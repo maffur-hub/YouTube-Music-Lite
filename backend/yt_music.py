@@ -30,6 +30,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 STATE_DIR = os.path.expanduser("~/.local/state/yt-music")
 CONFIG_DIR = os.path.expanduser("~/.config/yt-music")
 STATUS_PATH = os.path.join(STATE_DIR, "status.json")
+DAEMON_LOCK = os.path.join(STATE_DIR, "daemon.lock")
+DAEMON_PID_PATH = os.path.join(STATE_DIR, "daemon.pid")
+DAEMON_LOG = os.path.join(STATE_DIR, "daemon.log")
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 MPV_RUNTIME_DIR = os.path.join(RUNTIME_DIR, "yt-music")
 MPV_SOCKET = os.path.join(MPV_RUNTIME_DIR, "mpv.sock")
@@ -456,6 +459,7 @@ def wait_for_mpv(timeout=8):
 
 
 def mpv_play(video_id):
+    ensure_daemon()
     mpv_kill()
     ensure_private_runtime_dir()
     url = f"https://music.youtube.com/watch?v={video_id}"
@@ -488,18 +492,41 @@ def get_mpv_props():
         return None
     if not private_mpv_socket():
         return None
+    names = ["pause", "media-title", "metadata/by-key/artist",
+             "metadata/by-key/album", "duration", "time-pos",
+             "volume", "path", "filename", "loop-playlist"]
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(2)
             sock.connect(MPV_SOCKET)
-            props = {}
-            for name in ["pause", "media-title", "metadata/by-key/artist",
-                         "metadata/by-key/album", "duration", "time-pos",
-                         "volume", "path", "filename", "loop-playlist"]:
-                cmd = json.dumps({"command": ["get_property", name]}) + "\n"
+            for index, name in enumerate(names, start=1):
+                cmd = json.dumps({"command": ["get_property", name],
+                                  "request_id": index}) + "\n"
                 sock.sendall(cmd.encode())
-                resp = json.loads(sock.recv(4096).decode().strip().split("\n")[0])
-                props[name] = resp.get("data")
+            # Unsolicited events share this connection; route replies by
+            # request_id so an event cannot shift the property mapping.
+            pending = dict(enumerate(names, start=1))
+            props = {}
+            buffer = b""
+            while pending:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                lines = buffer.split(b"\n")
+                buffer = lines[-1]
+                for line in lines[:-1]:
+                    if not line.strip():
+                        continue
+                    try:
+                        resp = json.loads(line)
+                    except ValueError:
+                        continue
+                    index = resp.get("request_id")
+                    if index in pending:
+                        props[pending.pop(index)] = resp.get("data")
+            if pending:
+                return None
             return props
     except Exception:
         return None
@@ -547,10 +574,11 @@ def extract_video_id(props):
     return None
 
 
-def write_status_from_mpv(props):
+def write_status_from_mpv(props, notify=True):
     if not props:
-        write_status({"ok": True, "playing": False})
-        return
+        status = {"ok": True, "playing": False}
+        write_status(status)
+        return status
     paused = props.get("pause", True)
     title = props.get("media-title", "")
     if _looks_like_url_title(title):
@@ -575,8 +603,10 @@ def write_status_from_mpv(props):
         "volume": round(float(volume)),
         "loop": str(props.get("loop-playlist") or "no"),
     }
-    notify_track_change(previous, status)
+    if notify:
+        notify_track_change(previous, status)
     write_status(status)
+    return status
 
 
 # ---------------------------------------------------------------- commands
@@ -1005,6 +1035,7 @@ def cmd_thumbnail(args):
 
 
 def cmd_mix(args):
+    ensure_daemon()
     if not args:
         fail("Usage: yt-music-ctl mix <videoId> [playlistId]")
     seed_id = args[0]
@@ -1047,6 +1078,7 @@ def cmd_mix(args):
 
 
 def cmd_queue_playlist(args):
+    ensure_daemon()
     if not args:
         fail("Usage: yt-music-ctl queue <playlistId>")
     playlist_id = args[0]
@@ -1131,27 +1163,351 @@ def cmd_shuffle(args):
     mpv_send("playlist-shuffle")
 
 
-# ---------------------------------------------------------------- watcher daemon
+# ---------------------------------------------------------------- status daemon
 
-def cmd_watch(args):
-    """Continuous status watcher - runs as a background process."""
-    write_status({"ok": True, "playing": False, "watcher": True})
+OBSERVED_PROPERTIES = [
+    "pause", "media-title", "metadata/by-key/artist", "metadata/by-key/album",
+    "duration", "time-pos", "volume", "path", "loop-playlist",
+]
 
-    while True:
+
+def load_daemon_pid():
+    """Read the daemon pidfile without following an attacker-controlled link."""
+    try:
+        fd = os.open(DAEMON_PID_PATH, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
         try:
-            if not mpv_is_running():
-                time.sleep(0.5)
-                write_status({"ok": True, "playing": False, "watcher": True})
+            st = os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                    or st.st_mode & 0o077):
+                return None
+            with os.fdopen(fd) as fh:
+                fd = None
+                return json.load(fh)
+        finally:
+            if fd is not None:
+                os.close(fd)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def unlink_private(path):
+    """Remove a 0600 state file owned by this user, and nothing else."""
+    try:
+        st = os.lstat(path)
+        if (stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid()
+                and stat.S_IMODE(st.st_mode) == 0o600):
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+def daemon_is_running():
+    record = load_daemon_pid()
+    if not isinstance(record, dict):
+        return False
+    pid = record.get("pid")
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    if not record.get("start_time") or not record.get("executable"):
+        return False
+    identity = mpv_process_identity(pid)
+    if not identity:
+        return False
+    return (identity[0] == record.get("start_time")
+            and identity[1] == record.get("executable"))
+
+
+def ensure_daemon():
+    """Start the detached status daemon when it is missing or stale."""
+    try:
+        script_mtime = os.path.getmtime(os.path.realpath(__file__))
+        if daemon_is_running():
+            record = load_daemon_pid() or {}
+            if record.get("script_mtime") == script_mtime:
+                return False
+            daemon_stop()
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        fd = os.open(DAEMON_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, "ab") as log:
+            subprocess.Popen(
+                [sys.executable, os.path.realpath(__file__), "daemon"],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+        return True
+    except Exception:
+        return False
+
+
+def daemon_stop():
+    """SIGTERM the verified daemon process. Never raises."""
+    stopped = False
+    try:
+        record = load_daemon_pid()
+        pid = record.get("pid") if isinstance(record, dict) else None
+        identity = mpv_process_identity(pid) if isinstance(pid, int) and pid > 1 else None
+        identity_matches = (
+            identity is not None
+            and identity[0] == record.get("start_time")
+            and identity[1] == record.get("executable")
+        )
+        if identity_matches:
+            pidfd = None
+            try:
+                pidfd = os.pidfd_open(pid) if hasattr(os, "pidfd_open") else None
+                # Recheck after opening the pidfd so a dead process cannot be
+                # confused with a newly reused PID.
+                if mpv_process_identity(pid) == identity:
+                    if pidfd is not None and hasattr(signal, "pidfd_send_signal"):
+                        signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+                    else:
+                        os.kill(pid, signal.SIGTERM)
+                    stopped = True
+                    deadline = time.time() + 1
+                    while time.time() < deadline:
+                        if mpv_process_identity(pid) != identity:
+                            break
+                        time.sleep(0.05)
+                    if mpv_process_identity(pid) == identity:
+                        if pidfd is not None and hasattr(signal, "pidfd_send_signal"):
+                            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                        else:
+                            os.kill(pid, signal.SIGKILL)
+                        deadline = time.time() + 1
+                        while time.time() < deadline:
+                            if mpv_process_identity(pid) != identity:
+                                break
+                            time.sleep(0.05)
+            except OSError:
+                pass
+            finally:
+                if pidfd is not None:
+                    try:
+                        os.close(pidfd)
+                    except OSError:
+                        pass
+        if not daemon_is_running():
+            unlink_private(DAEMON_PID_PATH)
+            unlink_private(DAEMON_LOCK)
+    except Exception:
+        pass
+    return stopped
+
+
+def monitor_mpv_events():
+    """Stream mpv property changes into status.json until the socket dies."""
+    cache = get_mpv_props()
+    if not cache:
+        return
+    last_signature = None
+    notify_key = None
+    notify_deadline = 0.0
+    current_title = ""
+    # Snapshot of the last status that is safe to compare against: the ungated
+    # status write would otherwise put the new (videoId, title) into the file
+    # during a hold and make notify_track_change's backstop swallow the
+    # deferred notification.
+    notify_previous = read_status()
+
+    def flush():
+        nonlocal last_signature, notify_key, notify_previous
+        props = dict(cache)
+        for key, default in (("pause", True), ("media-title", ""), ("path", ""),
+                             ("volume", 100), ("duration", 0), ("time-pos", 0)):
+            if props.get(key) is None:
+                props[key] = default
+        try:
+            signature = (
+                not bool(props.get("pause", True)),
+                str(props.get("media-title") or ""),
+                str(props.get("metadata/by-key/artist") or ""),
+                str(props.get("metadata/by-key/album") or ""),
+                str(props.get("path") or ""),
+                str(props.get("loop-playlist") or "no"),
+                round(float(props.get("volume", 100))),
+                round(float(props.get("duration", 0))),
+                round(float(props.get("time-pos", 0))),
+            )
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None and signature == last_signature:
+            return
+        previous = notify_previous
+        status = write_status_from_mpv(props, notify=False)
+        last_signature = signature
+        if not status or not status.get("playing"):
+            notify_previous = status
+            return
+        title = status.get("title") or ""
+        video_id = status.get("videoId") or ""
+        if not video_id or _looks_like_url_title(title):
+            notify_previous = status
+            return
+        key = (video_id, title)
+        if key == notify_key:
+            notify_previous = status
+            return
+        if status.get("artist") or status.get("album"):
+            notify_track_change(previous, status)
+            notify_key = key
+            notify_previous = status
+        elif time.time() >= notify_deadline:
+            notify_track_change(previous, status)
+            notify_key = key
+            notify_previous = status
+        else:
+            return
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(2)
+        sock.connect(MPV_SOCKET)
+        for index, name in enumerate(OBSERVED_PROPERTIES, start=1):
+            cmd = json.dumps({"command": ["observe_property", index, name]}) + "\n"
+            sock.sendall(cmd.encode())
+        sock.settimeout(1.0)
+        flush()
+        buffer = b""
+        while True:
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                flush()
                 continue
-            props = get_mpv_props()
-            if not props:
-                write_status({"ok": True, "playing": False, "watcher": True})
-                time.sleep(0.5)
-                continue
-            write_status_from_mpv(props)
-            time.sleep(1)
+            if not chunk:
+                break
+            buffer += chunk
+            lines = buffer.split(b"\n")
+            buffer = lines[-1]
+            changed = False
+            shutdown = False
+            for line in lines[:-1]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                kind = event.get("event")
+                if kind == "property-change":
+                    name = event.get("name")
+                    if isinstance(name, str):
+                        cache[name] = event.get("data")
+                        changed = True
+                        if name == "media-title":
+                            value = event.get("data")
+                            if (isinstance(value, str) and value
+                                    and not _looks_like_url_title(value)
+                                    and value != current_title):
+                                current_title = value
+                                notify_deadline = time.time() + 1.2
+                elif kind == "shutdown":
+                    shutdown = True
+            if changed:
+                flush()
+            if shutdown:
+                break
+    except Exception:
+        pass
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+        flush()
+
+
+def run_daemon_loop():
+    """Own mpv IPC monitoring until interrupted; singleton via flock."""
+    lock_fd = None
+    try:
+        try:
+            lock_fd = os.open(DAEMON_LOCK, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+            st = os.fstat(lock_fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                raise OSError("unsafe daemon lock")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            if lock_fd is not None:
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
+            return
+        signal.signal(signal.SIGTERM, lambda *_args: sys.exit(0))
+        try:
+            record = {"pid": os.getpid()}
+            identity = mpv_process_identity(os.getpid())
+            if identity:
+                record["start_time"] = identity[0]
+                record["executable"] = identity[1]
+            record["script_mtime"] = os.path.getmtime(os.path.realpath(__file__))
+            json_dump(DAEMON_PID_PATH, record)
         except Exception:
-            time.sleep(1)
+            pass
+        idle = False
+        while True:
+            try:
+                if not mpv_is_running():
+                    if not idle:
+                        write_status({"ok": True, "playing": False})
+                        idle = True
+                    time.sleep(0.5)
+                    continue
+                idle = False
+                monitor_mpv_events()
+                if not mpv_is_running():
+                    write_status({"ok": True, "playing": False})
+                    idle = True
+                else:
+                    time.sleep(0.2)
+            except Exception:
+                time.sleep(0.5)
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        try:
+            record = load_daemon_pid()
+            if isinstance(record, dict) and record.get("pid") == os.getpid():
+                unlink_private(DAEMON_PID_PATH)
+        except Exception:
+            pass
+
+
+def cmd_daemon(args):
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    try:
+        run_daemon_loop()
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_ensure_daemon(args):
+    started = ensure_daemon()
+    if started:
+        deadline = time.time() + 2
+        while time.time() < deadline and not daemon_is_running():
+            time.sleep(0.05)
+    print(json.dumps({"ok": True, "started": bool(started),
+                      "running": daemon_is_running()}))
+
+
+def cmd_daemon_stop(args):
+    stopped = daemon_stop()
+    print(json.dumps({"ok": True, "stopped": bool(stopped)}))
 
 
 # ---------------------------------------------------------------- main
@@ -1185,7 +1541,10 @@ COMMANDS = {
     "queue": cmd_queue_playlist,
     "loop": cmd_loop,
     "shuffle": cmd_shuffle,
-    "watch": cmd_watch,
+    "daemon": cmd_daemon,
+    "watch": cmd_daemon,
+    "ensure-daemon": cmd_ensure_daemon,
+    "daemon-stop": cmd_daemon_stop,
 }
 
 
@@ -1222,7 +1581,10 @@ def main():
         print("  queue-add <videoId>      Append a track to the queue")
         print("  loop <mode>              Set loop mode (off/inf)")
         print("  shuffle                  Shuffle current playlist")
-        print("  watch                    Run background status watcher")
+        print("  daemon                   Run the status daemon in the foreground")
+        print("  ensure-daemon            Start the status daemon in the background")
+        print("  daemon-stop              Stop the status daemon")
+        print("  watch                    Legacy alias for daemon")
         sys.exit(0)
 
     cmd = sys.argv[1]

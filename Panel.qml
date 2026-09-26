@@ -621,7 +621,9 @@ Panel {
 
   function loadThumbnail() {
     var id = root.musicStatus ? String(root.musicStatus.videoId || "") : ""
-    root.thumbnailVideoId = root.isVideoId(id) ? id : ""
+    id = root.isVideoId(id) ? id : ""
+    if (id === root.thumbnailVideoId) return
+    root.thumbnailVideoId = id
     root.thumbnailSource = ""
     if (root.thumbnailVideoId !== "") root.startProcess(thumbnailProc, "thumbnail")
   }
@@ -639,7 +641,8 @@ Panel {
 
   Timer {
     id: autoRefresh
-    interval: 5000
+    // Live updates come from the yt-music daemon via status.json; this is only a backstop.
+    interval: 30000
     running: true
     repeat: true
     onTriggered: root.refresh()

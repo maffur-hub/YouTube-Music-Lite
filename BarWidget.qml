@@ -10,6 +10,7 @@ BarWidget {
   moduleName: "yt-music"
 
   property var musicStatus: null
+  readonly property string ctlPath: Quickshell.env("HOME") + "/.local/bin/yt-music-ctl"
   readonly property int iconPx: 12
   readonly property bool playing: Model.isPlaying(root.musicStatus)
   readonly property string barText: Model.barLabel(root.musicStatus)
@@ -67,6 +68,19 @@ BarWidget {
     onFileChanged: reload()
     onLoaded: root.musicStatus = Model.parseStatus(text())
     onLoadFailed: root.musicStatus = null
+  }
+
+  Process {
+    id: daemonProc
+    command: [root.ctlPath, "ensure-daemon"]
+    running: true
+  }
+
+  Timer {
+    interval: 60000
+    running: true
+    repeat: true
+    onTriggered: daemonProc.running = true
   }
 
   onBarChanged: injectPanel()
