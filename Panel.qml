@@ -12,6 +12,17 @@ Panel {
   ipcTarget: "yt-music"
   manageIpc: false
 
+  // Register the panel with the shell (the base IpcHandler is disabled by
+  // manageIpc: false); without this the shell does not track the popup.
+  IpcHandler {
+    target: root.ipcTarget
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+  }
+
   property var anchorItem: null
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
@@ -232,12 +243,12 @@ Panel {
   Process {
     id: statusProc
     command: [root.ctlPath, "status"]
-    stdout: DataStreamParser {
+    stdout: SplitParser {
       onRead: function(data) {
         root.appendProcessOutput("status", data)
       }
     }
-    stderr: DataStreamParser {
+    stderr: SplitParser {
       onRead: function(data) { root.appendProcessOutput("statusErr", data) }
     }
     onStarted: statusDeadline.start()
@@ -255,10 +266,10 @@ Panel {
   Process {
     id: playlistsProc
     command: [root.ctlPath, "playlists"]
-    stdout: DataStreamParser {
+    stdout: SplitParser {
       onRead: function(data) { root.appendProcessOutput("playlists", data) }
     }
-    stderr: DataStreamParser {
+    stderr: SplitParser {
       onRead: function(data) { root.appendProcessOutput("playlistsErr", data) }
     }
     onStarted: playlistsDeadline.start()
@@ -280,10 +291,10 @@ Panel {
 
   Process {
     id: tracksProc
-    stdout: DataStreamParser {
+    stdout: SplitParser {
       onRead: function(data) { root.appendProcessOutput("tracks", data) }
     }
-    stderr: DataStreamParser {
+    stderr: SplitParser {
       onRead: function(data) { root.appendProcessOutput("tracksErr", data) }
     }
     onStarted: tracksDeadline.start()
@@ -307,10 +318,10 @@ Panel {
 
   Process {
     id: searchProc
-    stdout: DataStreamParser {
+    stdout: SplitParser {
       onRead: function(data) { root.appendProcessOutput("search", data) }
     }
-    stderr: DataStreamParser {
+    stderr: SplitParser {
       onRead: function(data) { root.appendProcessOutput("searchErr", data) }
     }
     onStarted: searchDeadline.start()
@@ -326,8 +337,8 @@ Panel {
 
   Process {
     id: playNowProc
-    stdout: DataStreamParser { onRead: function(data) { root.appendProcessOutput("play", data) } }
-    stderr: DataStreamParser { onRead: function(data) { root.appendProcessOutput("playErr", data) } }
+    stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("play", data) } }
+    stderr: SplitParser { onRead: function(data) { root.appendProcessOutput("playErr", data) } }
     onStarted: playDeadline.start()
     onExited: function(exitCode) {
       playDeadline.stop()
@@ -343,8 +354,8 @@ Panel {
 
   Process {
     id: mixProc
-    stdout: DataStreamParser { onRead: function(data) { root.appendProcessOutput("mix", data) } }
-    stderr: DataStreamParser { onRead: function(data) { root.appendProcessOutput("mixErr", data) } }
+    stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("mix", data) } }
+    stderr: SplitParser { onRead: function(data) { root.appendProcessOutput("mixErr", data) } }
     onStarted: mixDeadline.start()
     onExited: function(exitCode) {
       mixDeadline.stop()
@@ -356,10 +367,10 @@ Panel {
 
   Process {
     id: queueProc
-    stdout: DataStreamParser {
+    stdout: SplitParser {
       onRead: function(data) { root.appendProcessOutput("queue", data) }
     }
-    stderr: DataStreamParser {
+    stderr: SplitParser {
       onRead: function(data) { root.appendProcessOutput("queueErr", data) }
     }
     onStarted: queueDeadline.start()
@@ -381,8 +392,8 @@ Panel {
   Process {
     id: logoutProc
     command: [root.ctlPath, "logout"]
-    stdout: DataStreamParser { onRead: function(data) { root.appendProcessOutput("logout", data) } }
-    stderr: DataStreamParser { onRead: function(data) { root.appendProcessOutput("logoutErr", data) } }
+    stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("logout", data) } }
+    stderr: SplitParser { onRead: function(data) { root.appendProcessOutput("logoutErr", data) } }
     onStarted: logoutDeadline.start()
     onExited: function(exitCode) {
       logoutDeadline.stop()
@@ -400,10 +411,10 @@ Panel {
 
   Process {
     id: createPlaylistProc
-    stdout: DataStreamParser {
+    stdout: SplitParser {
       onRead: function(data) { root.appendProcessOutput("create", data) }
     }
-    stderr: DataStreamParser {
+    stderr: SplitParser {
       onRead: function(data) { root.appendProcessOutput("createErr", data) }
     }
     onStarted: createDeadline.start()
@@ -427,8 +438,8 @@ Panel {
 
   Process {
     id: cmdProc
-    stdout: DataStreamParser { onRead: function(data) { root.appendProcessOutput("cmd", data) } }
-    stderr: DataStreamParser { onRead: function(data) { root.appendProcessOutput("cmdErr", data) } }
+    stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("cmd", data) } }
+    stderr: SplitParser { onRead: function(data) { root.appendProcessOutput("cmdErr", data) } }
     onStarted: cmdDeadline.start()
     onExited: function(exitCode) {
       cmdDeadline.stop()
@@ -462,8 +473,8 @@ Panel {
   Process {
     id: thumbnailProc
     command: [root.ctlPath, "thumbnail", root.thumbnailVideoId]
-    stdout: DataStreamParser { onRead: function(data) { root.appendProcessOutput("thumbnail", data) } }
-    stderr: DataStreamParser { onRead: function(data) { root.appendProcessOutput("thumbnailErr", data) } }
+    stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("thumbnail", data) } }
+    stderr: SplitParser { onRead: function(data) { root.appendProcessOutput("thumbnailErr", data) } }
     onStarted: thumbnailDeadline.start()
     onExited: function(exitCode) {
       thumbnailDeadline.stop()
@@ -495,7 +506,6 @@ Panel {
     if (root.thumbnailVideoId === "") root.thumbnailSource = ""
   }
   onMusicStatusChanged: root.loadThumbnail()
-  Component.onCompleted: root.loadThumbnail()
 
   Timer {
     id: afterCommand
@@ -542,7 +552,7 @@ Panel {
     }
   }
 
-  Component.onCompleted: root.loadPlaylists()
+  Component.onCompleted: { root.loadThumbnail(); root.loadPlaylists() }
 
   // ---------------------------------------------------------------- surface
 
