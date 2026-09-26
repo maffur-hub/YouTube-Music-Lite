@@ -48,6 +48,17 @@ Panel {
   property var searchResults: []
   property string searchQuery: ""
   property bool searching: false
+  property int selectedIndex: -1
+  property int lastVolume: 100
+  readonly property int currentVolume: root.musicStatus && root.musicStatus.volume !== undefined
+    ? Math.round(Number(root.musicStatus.volume))
+    : 100
+  readonly property var activeList: root.searchResults.length > 0
+    ? root.searchResults
+    : root.playlistTracks
+  readonly property bool looping: !!(root.musicStatus && root.musicStatus.loop
+    && root.musicStatus.loop !== "no")
+  onSearchResultsChanged: root.selectedIndex = -1
   property var likedVideoIds: ({})
   property string newPlaylistName: ""
   readonly property int maxProcessOutput: 65536
@@ -155,6 +166,7 @@ Panel {
     root.activePlaylistId = id
     root.activePlaylistTitle = title
     root.playlistTracks = []
+    root.selectedIndex = -1
     root.statusText = ""
     tracksProc.command = [root.ctlPath, "playlist", id]
     root.startProcess(tracksProc, "tracks")
@@ -180,6 +192,7 @@ Panel {
     root.activePlaylistId = ""
     root.activePlaylistTitle = ""
     root.playlistTracks = []
+    root.selectedIndex = -1
   }
 
   function logout() {
@@ -204,6 +217,14 @@ Panel {
     root.searching = true
     searchProc.command = [root.ctlPath, "search", root.searchQuery]
     root.startProcess(searchProc, "search")
+  }
+
+  function clearSearch() {
+    searchField.text = ""
+    root.searchQuery = ""
+    root.searchResults = []
+    root.searching = false
+    root.selectedIndex = -1
   }
 
   function playNow(videoId) {
@@ -236,6 +257,42 @@ Panel {
   function dislikeCurrent() {
     if (!root.musicStatus || !root.isVideoId(root.musicStatus.videoId)) return
     sendCmd("dislike", [root.musicStatus.videoId])
+  }
+
+  function toggleMute() {
+    var current = root.currentVolume
+    if (current > 0) {
+      root.lastVolume = current
+      root.sendCmd("volume", ["0"])
+    } else {
+      root.sendCmd("volume", [String(root.lastVolume || 100)])
+    }
+  }
+
+  function toggleLoop() {
+    var current = (root.musicStatus && root.musicStatus.loop) || "no"
+    root.sendCmd("loop", [current === "no" ? "inf" : "no"])
+  }
+
+  function selectIndex(index) {
+    if (index < -1 || index >= root.activeList.length) return
+    root.selectedIndex = index
+    root.ensureSelectionVisible()
+  }
+
+  function ensureSelectionVisible() {
+    if (root.selectedIndex < 0) return
+    if (panelFlick.contentHeight <= panelFlick.height) return
+    var repeater = root.searchResults.length > 0 ? searchRepeater : trackRepeater
+    if (!repeater) return
+    var item = repeater.itemAt(root.selectedIndex)
+    if (!item) return
+    var pt = item.mapToItem(panelFlick, 0, 0)
+    var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
+    if (pt.y < 0)
+      panelFlick.contentY = Math.max(0, panelFlick.contentY + pt.y)
+    else if (pt.y + item.height > panelFlick.height)
+      panelFlick.contentY = Math.min(maxY, panelFlick.contentY + pt.y + item.height - panelFlick.height)
   }
 
   // -------------------------------------------------------------- status refresh
@@ -569,10 +626,39 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      blocked: searchField.activeFocus || newPlaylistField.activeFocus
       onCloseRequested: root.close()
+      onMoveRequested: function(dx, dy) {
+        if (dy !== 0) {
+          var list = root.activeList
+          if (list.length > 0) root.selectIndex(Math.max(-1, Math.min(list.length - 1, root.selectedIndex + dy)))
+        } else if (dx !== 0) {
+          root.sendCmd("seek", [dx > 0 ? "5" : "-5"])
+        }
+      }
+      onActivateRequested: function() {
+        var list = root.activeList
+        if (root.selectedIndex >= 0 && root.selectedIndex < list.length) {
+          var item = list[root.selectedIndex]
+          if (item) root.playNow(item.videoId)
+        } else {
+          root.sendCmd("toggle", [])
+        }
+      }
+      onDeleteRequested: function() {
+        if (root.playlistTracks.length > 0 && root.selectedIndex >= 0
+            && root.selectedIndex < root.playlistTracks.length) {
+          root.sendCmd("remove", [root.activePlaylistId, root.playlistTracks[root.selectedIndex].videoId])
+        } else {
+          root.clearSearch()
+        }
+      }
       onTextKey: function(t) {
         if (t === "c") root.close()
-        else if (t === "l") root.loadPlaylists()
+        else if (t === "s") root.sendCmd("stop", [])
+        else if (t === "m") root.toggleMute()
+        else if (t === "r") root.toggleLoop()
+        else if (t === "f") root.sendCmd("shuffle", [])
       }
 
       Flickable {
@@ -806,6 +892,57 @@ Panel {
                     onClicked: root.sendCmd("shuffle", [])
                   }
                 }
+
+                Item {
+                  width: Style.space(28)
+                  height: Style.space(32)
+                  Text {
+                    anchors.centerIn: parent
+                    text: Model.ICON.stop
+                    color: root.fg
+                    font.family: root.fam
+                    font.pixelSize: Style.font.body
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.sendCmd("stop", [])
+                  }
+                }
+
+                Item {
+                  width: Style.space(28)
+                  height: Style.space(32)
+                  Text {
+                    anchors.centerIn: parent
+                    text: Model.ICON.repeat
+                    color: root.looping ? Color.accent : root.fg
+                    font.family: root.fam
+                    font.pixelSize: Style.font.body
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.toggleLoop()
+                  }
+                }
+
+                Item {
+                  width: Style.space(28)
+                  height: Style.space(32)
+                  Text {
+                    anchors.centerIn: parent
+                    text: Model.ICON.volume
+                    color: root.currentVolume === 0 ? Color.accent : Qt.darker(root.fg, 1.4)
+                    font.family: root.fam
+                    font.pixelSize: Style.font.body
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.toggleMute()
+                  }
+                }
               }
 
               Text {
@@ -815,6 +952,7 @@ Panel {
                 anchors.rightMargin: Style.space(12)
                 anchors.verticalCenter: heroActions.verticalCenter
                 textFormat: Text.PlainText
+                elide: Text.ElideRight
                 text: root.musicStatus
                   ? Model.fmtPosition(root.musicStatus.position || 0, root.musicStatus.duration || 0)
                   : ""
@@ -864,26 +1002,57 @@ Panel {
                 }
               }
 
-              Rectangle {
-                anchors.left: albumArt.right
-                anchors.leftMargin: Style.space(18)
-                anchors.right: parent.right
-                anchors.rightMargin: Style.space(18)
-                anchors.bottom: parent.bottom
-                anchors.bottomMargin: Style.space(10)
-                height: Style.space(3)
-                radius: height / 2
-                color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.18)
+            }
+          }
 
-                Rectangle {
-                  width: parent.width * (root.musicStatus && root.musicStatus.duration > 0
-                    ? Math.min(1, Math.max(0, root.musicStatus.position / root.musicStatus.duration))
-                    : 0)
-                  height: parent.height
-                  radius: height / 2
-                  color: Color.accent
-                }
+          // ---- seek
+          Row {
+            visible: Model.isActive(root.musicStatus)
+            width: parent.width
+            height: Style.spacing.controlHeight
+            spacing: Style.spacing.lg
+
+            Text {
+              width: Style.space(56)
+              height: parent.height
+              verticalAlignment: Text.AlignVCenter
+              textFormat: Text.PlainText
+              text: seekSlider.dragging
+                ? Model.fmtDuration(seekSlider.liveValue)
+                : Model.fmtDuration(root.musicStatus ? (root.musicStatus.position || 0) : 0)
+              color: root.fg
+              font.family: root.fam
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            PanelSlider {
+              id: seekSlider
+              bar: root.bar
+              anchors.verticalCenter: parent.verticalCenter
+              width: parent.width - Style.space(56) - Style.space(64) - Style.spacing.lg * 2
+              minimum: 0
+              maximum: Math.max(1, Number(root.musicStatus && root.musicStatus.duration) || 1)
+              value: Number(root.musicStatus && root.musicStatus.position) || 0
+              step: 1
+              integer: true
+              tickCount: 0
+              onReleased: function(v) {
+                var duration = Number(root.musicStatus && root.musicStatus.duration) || 0
+                if (duration > 0 && !root.busy)
+                  root.sendCmd("seek-pct", [String(Math.round(v / duration * 100))])
               }
+            }
+
+            Text {
+              width: Style.space(64)
+              height: parent.height
+              verticalAlignment: Text.AlignVCenter
+              horizontalAlignment: Text.AlignRight
+              textFormat: Text.PlainText
+              text: Model.fmtDuration(Number(root.musicStatus && root.musicStatus.duration) || 0)
+              color: root.fg
+              font.family: root.fam
+              font.pixelSize: Style.font.bodySmall
             }
           }
 
@@ -990,12 +1159,7 @@ Panel {
                   fontFamily: root.fam
                   foreground: root.fg
                   visible: searchField.text !== "" || root.searchQuery !== "" || root.searching || root.searchResults.length > 0
-                  onClicked: {
-                    searchField.text = ""
-                    root.searchQuery = ""
-                    root.searchResults = []
-                    root.searching = false
-                  }
+                  onClicked: root.clearSearch()
                 }
                 Button {
                   width: Style.space(44)
@@ -1033,10 +1197,25 @@ Panel {
             }
 
             Repeater {
+              id: searchRepeater
               model: root.searchResults
               delegate: Item {
                 width: contentColumn.width
                 height: Style.space(40)
+
+                Rectangle {
+                  anchors.fill: parent
+                  color: index === root.selectedIndex
+                    ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                    : "transparent"
+                  radius: Style.cornerRadius
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.selectedIndex = index
+                }
 
                 Row {
                   anchors.fill: parent
@@ -1230,11 +1409,26 @@ Panel {
             }
 
             Repeater {
+              id: trackRepeater
               model: root.playlistTracks
               delegate: Item {
                 id: trackRow
                 width: contentColumn.width
                 height: Style.space(36)
+
+                Rectangle {
+                  anchors.fill: parent
+                  color: index === root.selectedIndex
+                    ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                    : "transparent"
+                  radius: Style.cornerRadius
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.selectedIndex = index
+                }
 
                 Row {
                   anchors.fill: parent

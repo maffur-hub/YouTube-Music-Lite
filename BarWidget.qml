@@ -136,7 +136,7 @@ BarWidget {
           else
             root.bar.run("yt-music-ctl status 2>/dev/null")
         } else if (mouse.button === Qt.MiddleButton) {
-          root.refresh()
+          root.bar.run("yt-music-ctl toggle 2>/dev/null")
         } else {
           root.togglePanel()
         }

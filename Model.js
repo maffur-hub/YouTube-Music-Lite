@@ -62,6 +62,7 @@ function tooltipText(status) {
   if (!status.playing && !status.paused) return "YouTube Music — idle"
   var parts = [status.title || "Unknown"]
   if (status.artist) parts.push(status.artist)
+  if (status.album) parts.push(status.album)
   if (status.paused) parts.push("paused")
   return parts.join(" — ")
 }

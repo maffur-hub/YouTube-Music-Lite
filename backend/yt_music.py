@@ -451,7 +451,7 @@ def get_mpv_props():
             props = {}
             for name in ["pause", "media-title", "metadata/by-key/artist",
                          "metadata/by-key/album", "duration", "time-pos",
-                         "volume", "path", "filename"]:
+                         "volume", "path", "filename", "loop-playlist"]:
                 cmd = json.dumps({"command": ["get_property", name]}) + "\n"
                 sock.sendall(cmd.encode())
                 resp = json.loads(sock.recv(4096).decode().strip().split("\n")[0])
@@ -502,6 +502,7 @@ def write_status_from_mpv(props):
         "duration": round(float(duration)),
         "position": round(float(position)),
         "volume": round(float(volume)),
+        "loop": str(props.get("loop-playlist") or "no"),
     })
 
 
@@ -989,9 +990,14 @@ def cmd_volume(args):
 
 def cmd_loop(args):
     if not mpv_is_running():
+        print(json.dumps({"ok": False, "error": "Nothing playing"}))
         return
     mode = args[0] if args else "inf"
     mpv_send("set_property", ["loop-playlist", mode])
+    props = get_mpv_props()
+    if props:
+        write_status_from_mpv(props)
+    print(json.dumps({"ok": True, "loop": mode}))
 
 
 def cmd_shuffle(args):
