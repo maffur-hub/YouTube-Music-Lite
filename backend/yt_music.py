@@ -735,7 +735,7 @@ def cmd_playlists(args):
             result.append({
                 "id": pl.get("playlistId", ""),
                 "title": pl.get("title", ""),
-                "count": len(pl.get("thumbnails", [])),
+                "count": len(pl.get("thumbnails") or []),
                 "description": pl.get("description", ""),
             })
         print(json.dumps({"ok": True, "playlists": result}))

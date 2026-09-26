@@ -11,6 +11,8 @@ BarWidget {
 
   property var musicStatus: null
   readonly property int iconPx: 12
+  readonly property bool playing: Model.isPlaying(root.musicStatus)
+  readonly property string barText: Model.barLabel(root.musicStatus)
 
   function tooltipText() {
     return Model.tooltipText(root.musicStatus)
@@ -84,7 +86,7 @@ BarWidget {
   Item {
     id: button
     anchors.centerIn: parent
-    implicitWidth: Model.isActive(root.musicStatus)
+    implicitWidth: root.barText !== ""
       ? Math.max(Style.bar.iconSlot,
           noteIcon.implicitWidth + iconRow.spacing + statusLabel.implicitWidth + Style.space(10))
       : Style.bar.iconSlot
@@ -100,7 +102,7 @@ BarWidget {
       Text {
         id: noteIcon
         text: Model.ICON.note
-        color: Model.isActive(root.musicStatus)
+        color: root.playing
           ? Color.accent
           : root.bar ? root.bar.foreground : Style.text
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -110,8 +112,8 @@ BarWidget {
 
       Text {
         id: statusLabel
-        visible: Model.isActive(root.musicStatus)
-        text: Model.truncate(root.musicStatus ? (root.musicStatus.title || "") : "", 15)
+        visible: root.barText !== ""
+        text: root.barText
         color: root.bar ? root.bar.foreground : Style.text
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.caption

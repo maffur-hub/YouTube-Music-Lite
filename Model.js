@@ -48,8 +48,13 @@ function fmtPosition(pos, dur) {
 function barLabel(status) {
   if (!status || !status.playing) return ""
   var title = status.title || ""
-  if (title.length > 20) title = title.substring(0, 18) + "…"
-  return ICON.note + " " + title
+  var artist = status.artist || ""
+  var text = artist ? (title + " · " + artist) : title
+  return truncate(text, 40)
+}
+
+function isPlaying(status) {
+  return !!(status && status.playing)
 }
 
 function tooltipText(status) {
@@ -80,6 +85,7 @@ if (typeof module !== "undefined") {
     barLabel: barLabel,
     tooltipText: tooltipText,
     isActive: isActive,
+    isPlaying: isPlaying,
     truncate: truncate
   }
 }
