@@ -67,6 +67,13 @@ Panel {
   property string thumbnailSource: ""
   property string thumbnailVideoId: ""
 
+  property string contextVideoId: ""
+  property string contextTitle: ""
+  property string contextArtist: ""
+  property string contextSource: ""
+  property real contextX: 0
+  property real contextY: 0
+
   function open() {
     statusText = ""
     root.controller.show()
@@ -247,6 +254,66 @@ Panel {
     statusText = "Sending " + command + "…"
     cmdProc.command = [root.ctlPath, command].concat((args || []).map(String))
     root.startProcess(cmdProc, "cmd")
+  }
+
+  function openContextMenu(videoId, title, artist, source, x, y) {
+    if (!root.isVideoId(videoId)) return
+    root.contextVideoId = String(videoId)
+    root.contextTitle = title || ""
+    root.contextArtist = artist || ""
+    root.contextSource = source || ""
+    root.contextX = x; root.contextY = y
+    root.rebuildContextMenu()
+    contextMenu.popup(panelFlick, x, y)
+  }
+
+  function openPlaylistPicker() {
+    if (!root.loggedIn || root.playlists.length === 0) return
+    rebuildPlaylistPicker()
+    Qt.callLater(function() {
+      playlistPickerMenu.popup(panelFlick, root.contextX, root.contextY)
+    })
+  }
+
+  function clearMenu(menu) {
+    // Menu.clear() does not exist in Qt 6.11; remove items manually.
+    var guard = 0
+    while (menu.count > 0 && guard++ < 500) {
+      var old = menu.takeItem(0)
+      if (!old) break
+      old.destroy()
+    }
+  }
+
+  function addContextItem(text, handler) {
+    var it = contextMenuItemComponent.createObject(null, { "text": text, "runAction": handler })
+    if (it) contextMenu.addItem(it)
+  }
+
+  function rebuildContextMenu() {
+    clearMenu(contextMenu)
+    addContextItem("Play now", function() { root.sendCmd("play", [root.contextVideoId]) })
+    addContextItem("Play next", function() { root.sendCmd("play-next", [root.contextVideoId]) })
+    addContextItem("Add to queue", function() { root.sendCmd("queue-add", [root.contextVideoId]) })
+    addContextItem("Start mix", function() { root.playMix(root.contextVideoId) })
+    if (root.loggedIn)
+      addContextItem("Like", function() { root.sendCmd("like", [root.contextVideoId]) })
+    if (root.loggedIn && root.contextSource === "nowplaying")
+      addContextItem("Dislike", function() { root.sendCmd("dislike", [root.contextVideoId]) })
+    if (root.loggedIn && root.playlists.length > 0)
+      addContextItem("Add to playlist…", function() { root.openPlaylistPicker() })
+    if (root.contextSource === "track" && root.activePlaylistId !== "")
+      addContextItem("Remove from playlist", function() { root.sendCmd("remove", [root.activePlaylistId, root.contextVideoId]) })
+  }
+
+  function rebuildPlaylistPicker() {
+    clearMenu(playlistPickerMenu)
+    for (var i = 0; i < root.playlists.length; i++) {
+      var pl = root.playlists[i]
+      if (!pl || !pl.id) continue
+      var it = playlistMenuItemComponent.createObject(null, { "text": pl.title, "playlistId": pl.id })
+      if (it) playlistPickerMenu.addItem(it)
+    }
   }
 
   function likeCurrent() {
@@ -600,13 +667,29 @@ Panel {
   }
 
   Menu {
-    id: trackMenu
-    property string videoId: ""
+    id: contextMenu
+  }
 
+  Component {
+    id: contextMenuItemComponent
     MenuItem {
-      text: "Remove from playlist"
-      onTriggered: root.sendCmd("remove", [root.activePlaylistId, trackMenu.videoId])
+      property var runAction: null
+      onTriggered: { if (runAction) runAction() }
     }
+  }
+
+  Component {
+    id: playlistMenuItemComponent
+    MenuItem {
+      property string playlistId: ""
+      onTriggered: {
+        if (playlistId !== "") root.sendCmd("playlist-add", [playlistId, root.contextVideoId])
+      }
+    }
+  }
+
+  Menu {
+    id: playlistPickerMenu
   }
 
   Component.onCompleted: { root.loadThumbnail(); root.loadPlaylists() }
@@ -750,6 +833,17 @@ Panel {
               Item {
               id: heroRow
               anchors.fill: parent
+
+              MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.RightButton
+                onClicked: function(mouse) {
+                  if (!root.musicStatus || !root.isVideoId(root.musicStatus.videoId)) return
+                  var point = heroRow.mapToItem(panelFlick, mouse.x, mouse.y)
+                  root.openContextMenu(root.musicStatus.videoId, root.musicStatus.title, root.musicStatus.artist, "nowplaying", point.x, point.y)
+                  mouse.accepted = true
+                }
+              }
 
               Rectangle {
                 id: albumArt
@@ -1200,6 +1294,7 @@ Panel {
               id: searchRepeater
               model: root.searchResults
               delegate: Item {
+                id: searchRow
                 width: contentColumn.width
                 height: Style.space(40)
 
@@ -1286,6 +1381,16 @@ Panel {
                     foreground: root.fg
                     enabled: !root.busy
                     onClicked: root.playMix(modelData.videoId)
+                  }
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  acceptedButtons: Qt.RightButton
+                  onClicked: function(mouse) {
+                    var point = searchRow.mapToItem(panelFlick, mouse.x, mouse.y)
+                    root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "search", point.x, point.y)
+                    mouse.accepted = true
                   }
                 }
               }
@@ -1506,9 +1611,8 @@ Panel {
                   anchors.fill: parent
                   acceptedButtons: Qt.RightButton
                   onClicked: function(mouse) {
-                    trackMenu.videoId = modelData.videoId
                     var point = trackRow.mapToItem(panelFlick, mouse.x, mouse.y)
-                    trackMenu.popup(panelFlick, point.x, point.y)
+                    root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "track", point.x, point.y)
                     mouse.accepted = true
                   }
                 }

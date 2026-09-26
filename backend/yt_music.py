@@ -53,6 +53,15 @@ def valid_video_id(value):
             all(c.isalnum() or c in "_-" for c in value))
 
 
+def _looks_like_url_title(title):
+    text = str(title or "").strip().lower()
+    if not text:
+        return True
+    if text.startswith("http://") or text.startswith("https://"):
+        return True
+    return ("watch?v=" in text or "youtu.be/" in text or "youtube.com/" in text)
+
+
 def jpeg_dimensions(data):
     if len(data) < 4 or data[:2] != b"\xff\xd8":
         return None
@@ -209,6 +218,41 @@ def refresh_auth_headers(auth):
 def write_status(status):
     status["_ts"] = time.time()
     json_dump(STATUS_PATH, status)
+
+
+def read_status():
+    try:
+        with open(STATUS_PATH) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def notify_track_change(previous, current):
+    """Best-effort desktop notification when the playing track changes."""
+    try:
+        if not current.get("playing"):
+            return
+        title = current.get("title") or ""
+        video_id = current.get("videoId") or ""
+        if not video_id or _looks_like_url_title(title):
+            return
+        previous = previous or {}
+        if (previous.get("videoId") == video_id
+                and (previous.get("title") or "") == title):
+            return
+        cmd = ["notify-send", "-a", "YouTube Music", "-t", "6000"]
+        thumb = os.path.join(THUMBNAIL_CACHE_DIR, video_id + ".jpg")
+        if os.path.exists(thumb):
+            cmd.extend(["-i", thumb])
+        body = current.get("artist") or ""
+        album = current.get("album") or ""
+        if album:
+            body = f"{body} — {album}"
+        cmd.extend([title, body])
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 def get_ytmusic(require_auth=True):
@@ -461,6 +505,30 @@ def get_mpv_props():
         return None
 
 
+def wait_for_metadata(timeout=6):
+    """Poll mpv until media-title is a real (non-URL) title, then give
+    artist/album a brief beat to arrive so notifications get a real body."""
+    deadline = time.time() + timeout
+    settle_seconds = 1.0
+    settle_deadline = None
+    last = None
+    while True:
+        props = get_mpv_props()
+        if props:
+            last = props
+            media_title = props.get("media-title", "")
+            if media_title and not _looks_like_url_title(media_title):
+                if settle_deadline is None:
+                    settle_deadline = min(deadline, time.time() + settle_seconds)
+                if (props.get("metadata/by-key/artist")
+                        or props.get("metadata/by-key/album")
+                        or time.time() >= settle_deadline):
+                    return props
+        if time.time() >= deadline:
+            return last if last is not None else get_mpv_props()
+        time.sleep(0.25)
+
+
 def extract_video_id(props):
     if not props:
         return None
@@ -485,13 +553,16 @@ def write_status_from_mpv(props):
         return
     paused = props.get("pause", True)
     title = props.get("media-title", "")
+    if _looks_like_url_title(title):
+        title = ""
     artist = props.get("metadata/by-key/artist", "")
     album = props.get("metadata/by-key/album", "")
     duration = props.get("duration", 0) or 0
     position = props.get("time-pos", 0) or 0
     volume = props.get("volume", 100)
     video_id = extract_video_id(props)
-    write_status({
+    previous = read_status()
+    status = {
         "ok": True,
         "playing": not paused,
         "paused": bool(paused),
@@ -503,7 +574,9 @@ def write_status_from_mpv(props):
         "position": round(float(position)),
         "volume": round(float(volume)),
         "loop": str(props.get("loop-playlist") or "no"),
-    })
+    }
+    notify_track_change(previous, status)
+    write_status(status)
 
 
 # ---------------------------------------------------------------- commands
@@ -569,9 +642,61 @@ def cmd_play(args):
         fail("Usage: yt-music-ctl play <videoId>")
     video_id = args[0]
     mpv_play(video_id)
-    props = get_mpv_props()
+    props = wait_for_metadata()
     write_status_from_mpv(props)
     print(json.dumps({"ok": True, "videoId": video_id}))
+
+
+def cmd_play_next(args):
+    if not args:
+        fail("Usage: yt-music-ctl play-next <videoId>")
+    video_id = args[0]
+    if not valid_video_id(video_id):
+        fail("Invalid video ID")
+    if not mpv_is_running():
+        mpv_play(video_id)
+        write_status_from_mpv(wait_for_metadata())
+        print(json.dumps({"ok": True, "played": True, "videoId": video_id}))
+        return
+    url = f"https://music.youtube.com/watch?v={video_id}"
+    mpv_send("loadfile", [url, "insert-next"])
+    print(json.dumps({"ok": True, "queuedNext": True, "videoId": video_id}))
+
+
+def cmd_queue_add(args):
+    if not args:
+        fail("Usage: yt-music-ctl queue-add <videoId>")
+    video_id = args[0]
+    if not valid_video_id(video_id):
+        fail("Invalid video ID")
+    if not mpv_is_running():
+        mpv_play(video_id)
+        write_status_from_mpv(wait_for_metadata())
+        print(json.dumps({"ok": True, "played": True, "videoId": video_id}))
+        return
+    url = f"https://music.youtube.com/watch?v={video_id}"
+    mpv_send("loadfile", [url, "append"])
+    print(json.dumps({"ok": True, "queued": True, "videoId": video_id}))
+
+
+def cmd_playlist_add(args):
+    if len(args) < 2:
+        fail("Usage: yt-music-ctl playlist-add <playlistId> <videoId>")
+    playlist_id, video_id = args[0], args[1]
+    if not valid_video_id(video_id):
+        fail("Invalid video ID")
+    ytm = get_ytmusic()
+    try:
+        # Liked Music is a system playlist; edit it via the song rating.
+        if playlist_id == "LM":
+            ytm.rate_song(video_id, "LIKE")
+        else:
+            ytm.add_playlist_items(playlist_id, [video_id])
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return
+    print(json.dumps({"ok": True, "added": True, "playlistId": playlist_id,
+                      "videoId": video_id}))
 
 
 def cmd_pause(args):
@@ -909,7 +1034,7 @@ def cmd_mix(args):
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         json_dump(MPV_PID_PATH, mpv_pid_record(proc))
         wait_for_mpv()
-        props = get_mpv_props()
+        props = wait_for_metadata()
         write_status_from_mpv(props)
         print(json.dumps({
             "ok": True,
@@ -945,7 +1070,7 @@ def cmd_queue_playlist(args):
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         json_dump(MPV_PID_PATH, mpv_pid_record(proc))
         wait_for_mpv()
-        props = get_mpv_props()
+        props = wait_for_metadata()
         write_status_from_mpv(props)
         print(json.dumps({
             "ok": True,
@@ -1035,6 +1160,9 @@ COMMANDS = {
     "login": cmd_login,
     "status": cmd_status,
     "play": cmd_play,
+    "play-next": cmd_play_next,
+    "queue-add": cmd_queue_add,
+    "playlist-add": cmd_playlist_add,
     "pause": cmd_pause,
     "resume": cmd_resume,
     "toggle": cmd_toggle,
@@ -1069,6 +1197,7 @@ def main():
         print("  login                    Log in via browser")
         print("  status                   Update status from mpv")
         print("  play <videoId>           Play a song")
+        print("  play-next <videoId>      Insert track to play next")
         print("  pause                    Pause playback")
         print("  resume                   Resume playback")
         print("  toggle                   Toggle play/pause")
@@ -1085,10 +1214,12 @@ def main():
         print("  playlists                List library playlists")
         print("  create-playlist <name>   Create a private playlist")
         print("  playlist <playlistId>    Get playlist tracks")
+        print("  playlist-add <id> <vid>  Add a track to a playlist (LM = liked)")
         print("  search <query>           Search for songs")
         print("  thumbnail <videoId>     Fetch a bounded album thumbnail")
         print("  mix <videoId>            Play radio mix from seed")
         print("  queue <playlistId>       Queue and play a playlist")
+        print("  queue-add <videoId>      Append a track to the queue")
         print("  loop <mode>              Set loop mode (off/inf)")
         print("  shuffle                  Shuffle current playlist")
         print("  watch                    Run background status watcher")
