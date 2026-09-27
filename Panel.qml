@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -551,7 +552,7 @@ Panel {
     root.contextQueueIndex = (source === "queue") ? Number(queueIndex) : -1
     root.contextX = x; root.contextY = y
     root.rebuildContextMenu()
-    contextMenu.popup(panelFlick, x, y)
+    contextMenu.popupAt(panelFlick, x, y)
   }
 
   function openRowMenu(row, source, x, y) {
@@ -567,30 +568,25 @@ Panel {
     root.contextSource = source || ""
     root.contextX = x; root.contextY = y
     root.rebuildContextMenu()
-    contextMenu.popup(panelFlick, x, y)
+    contextMenu.popupAt(panelFlick, x, y)
   }
 
   function openPlaylistPicker() {
     if (!root.loggedIn || root.playlists.length === 0) return
     rebuildPlaylistPicker()
     Qt.callLater(function() {
-      playlistPickerMenu.popup(panelFlick, root.contextX, root.contextY)
+      playlistPickerMenu.popupAt(panelFlick, root.contextX, root.contextY)
     })
   }
 
   function clearMenu(menu) {
-    // Menu.clear() does not exist in Qt 6.11; remove items manually.
-    var guard = 0
-    while (menu.count > 0 && guard++ < 500) {
-      var old = menu.takeItem(0)
-      if (!old) break
-      old.destroy()
-    }
+    // Menu.clear() does not exist in Qt 6.11; the themed MenuPopup keeps its
+    // rows in a JS array model, so just swap in an empty one.
+    menu.menuItems = []
   }
 
   function addContextItem(text, handler) {
-    var it = contextMenuItemComponent.createObject(null, { "text": text, "runAction": handler })
-    if (it) contextMenu.addItem(it)
+    contextMenu.addItem(text, handler)
   }
 
   function rebuildContextMenu() {
@@ -643,8 +639,15 @@ Panel {
     for (var i = 0; i < root.playlists.length; i++) {
       var pl = root.playlists[i]
       if (!pl || !pl.id) continue
-      var it = playlistMenuItemComponent.createObject(null, { "text": pl.title, "playlistId": pl.id })
-      if (it) playlistPickerMenu.addItem(it)
+      playlistPickerMenu.addItem(pl.title, root.playlistAddHandler(pl.id))
+    }
+  }
+
+  function playlistAddHandler(playlistId) {
+    // The returned closure captures the parameter, so every row keeps its own
+    // playlist id instead of the loop variable.
+    return function() {
+      root.sendCmd("playlist-add", [playlistId, root.contextVideoId])
     }
   }
 
@@ -1209,31 +1212,106 @@ Panel {
     }
   }
 
-  Menu {
-    id: contextMenu
-  }
+  // Themed context menus. Qt's Menu/MenuItem render with the platform-native
+  // look, so both menus are Popups that reuse the Omarchy popup surface
+  // vocabulary from qs.Ui/Dropdown (Color.popups tokens + BorderSurface) and
+  // drive their rows from a JS array model instead of Qt menu items.
+  component MenuPopup: Popup {
+    id: menu
 
-  Component {
-    id: contextMenuItemComponent
-    MenuItem {
-      property var runAction: null
-      onTriggered: { if (runAction) runAction() }
+    property var menuItems: []
+    property Item menuParent: null
+
+    focus: true
+    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+    padding: Style.spacing.hairline
+    leftPadding: Border.left(menu.borderSpec) + Style.spacing.hairline
+    rightPadding: Border.right(menu.borderSpec) + Style.spacing.hairline
+    topPadding: Border.top(menu.borderSpec) + Style.spacing.hairline
+    bottomPadding: Border.bottom(menu.borderSpec) + Style.spacing.hairline
+
+    readonly property var borderSpec: Border.localOrSurfaceSpec("popups", "border", Color.popups.border, Color.popups.border, Style.normalBorderWidth)
+
+    background: BorderSurface {
+      color: Color.popups.background
+      borderSpec: menu.borderSpec
+      radius: Style.cornerRadius
     }
-  }
 
-  Component {
-    id: playlistMenuItemComponent
-    MenuItem {
-      property string playlistId: ""
-      onTriggered: {
-        if (playlistId !== "") root.sendCmd("playlist-add", [playlistId, root.contextVideoId])
+    contentItem: ColumnLayout {
+      spacing: Style.spacing.labelGap
+
+      Repeater {
+        model: menu.menuItems
+
+        delegate: Rectangle {
+          id: row
+          required property var modelData
+          Layout.fillWidth: true
+          implicitWidth: rowLabel.implicitWidth + 2 * Style.spacing.controlPaddingX
+          implicitHeight: Style.spacing.popupRowHeight
+          color: rowMouse.containsMouse ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent"
+
+          Text {
+            id: rowLabel
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.spacing.controlPaddingX
+            anchors.rightMargin: Style.spacing.controlPaddingX
+            textFormat: Text.PlainText
+            text: String(modelData.text)
+            color: rowMouse.containsMouse ? Style.hoverStateColor(Color.popups.text, Color.accent) : Color.popups.text
+            font.family: root.fam
+            font.pixelSize: Style.font.body
+            elide: Text.ElideRight
+          }
+
+          MouseArea {
+            id: rowMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: menu.trigger(modelData)
+          }
+        }
       }
     }
+
+    function addItem(text, runAction) {
+      menuItems = menuItems.concat([{ text: text, runAction: runAction }])
+    }
+
+    function trigger(item) {
+      if (item && typeof item.runAction === "function") item.runAction()
+      close()
+    }
+
+    // Menu.popup(parent, x, y) replacement: x/y stay relative to parentItem.
+    function popupAt(parentItem, px, py) {
+      menuParent = parentItem
+      parent = parentItem
+      x = px
+      y = py
+      open()
+      fitToParent()
+    }
+
+    // Native Menu flipped/clamped itself; keep the popup inside the panel so
+    // right-clicks near the bottom edge don't push rows past the card.
+    function fitToParent() {
+      if (!opened || !menuParent) return
+      if (x > menuParent.width - width) x = Math.max(0, menuParent.width - width)
+      if (y > menuParent.height - height) y = Math.max(0, menuParent.height - height)
+    }
+
+    onImplicitWidthChanged: fitToParent()
+    onImplicitHeightChanged: fitToParent()
   }
 
-  Menu {
-    id: playlistPickerMenu
-  }
+  MenuPopup { id: contextMenu }
+
+  MenuPopup { id: playlistPickerMenu }
 
   Component.onCompleted: { root.loadThumbnail(); root.loadPlaylists(); root.restoreUiState() }
 
