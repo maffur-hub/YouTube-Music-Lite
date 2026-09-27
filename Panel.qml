@@ -65,23 +65,29 @@ Panel {
   property string librarySubtitle: ""
   property var libraryRows: []
   property string libraryRefId: ""
-  property bool libraryExpanded: false
+  // Top-level content tab: "search" | "playlists" | "library". Replaces the old
+  // libraryExpanded / playlistsExpanded collapsible-section flags.
+  property string activeTab: "search"
   property bool libraryStale: false
-  property bool playlistsExpanded: false
   property string libraryThumbUrl: ""
   property string libraryImageSource: ""
   property string libraryMeta: ""
   property string libraryDescription: ""
   property bool libraryInfoOpen: false
-  readonly property bool libraryRichHeader: root.libraryExpanded
+  readonly property bool libraryRichHeader: root.activeTab === "library"
     && (root.libraryKind === "album" || root.libraryKind === "artist")
     && (root.libraryImageSource !== "" || root.libraryThumbUrl !== ""
       || root.libraryMeta !== "" || root.libraryDescription !== "")
   readonly property var libraryList: root.libraryRows
-  readonly property string activeListKind: root.searchResults.length > 0 ? "search"
-    : (root.playlistTracks.length > 0 ? "playlist"
-    : (root.libraryExpanded && root.libraryList.length > 0 ? "library"
+  readonly property string activeListKind: (root.activeTab === "search" && root.searchResults.length > 0) ? "search"
+    : (root.activeTab === "playlists" && root.playlistTracks.length > 0 ? "playlist"
+    : (root.activeTab === "library" && root.libraryList.length > 0 ? "library"
     : (root.queueOpen && root.queueTracks.length > 0 ? "queue" : "")))
+  readonly property var tabItems: root.loggedIn
+    ? [ { key: "search", label: "Search" },
+        { key: "playlists", label: "Playlists" },
+        { key: "library", label: "Library" } ]
+    : [ { key: "search", label: "Search" } ]
   readonly property var activeList: root.activeListKind === "search" ? root.searchResults
     : (root.activeListKind === "playlist" ? root.playlistTracks
     : (root.activeListKind === "library" ? root.libraryList
@@ -91,6 +97,7 @@ Panel {
   readonly property bool shuffling: !!(root.musicStatus && root.musicStatus.shuffle)
   onSearchResultsChanged: root.selectedIndex = -1
   onActiveListKindChanged: root.selectedIndex = -1
+  onLoggedInChanged: if (!root.loggedIn && root.activeTab !== "search") root.activeTab = "search"
   property var likedVideoIds: ({})
   property string newPlaylistName: ""
   readonly property int maxProcessOutput: 65536
@@ -140,7 +147,7 @@ Panel {
         " p=os.path.expanduser('~/.local/state/yt-music/ui-state.json')\n" +
         " os.makedirs(os.path.dirname(p),exist_ok=True)\n" +
         " d={'libraryKind':sys.argv[1],'libraryRefId':sys.argv[2],"
-        + "'libraryExpanded':sys.argv[3]=='1','searchFilter':sys.argv[4]}\n" +
+        + "'activeTab':sys.argv[3],'searchFilter':sys.argv[4]}\n" +
         " t=p+'.tmp'\n" +
         " f=open(t,'w')\n" +
         " f.write(json.dumps(d))\n" +
@@ -164,7 +171,7 @@ Panel {
     if (uiSaveProc.running) return
     uiSaveProc.command = ["python3", "-c", root.uiStateScript("save"),
       root.libraryKind, root.libraryRefId,
-      root.libraryExpanded ? "1" : "0", root.searchFilter]
+      root.activeTab, root.searchFilter]
     root.startProcess(uiSaveProc, "uiSave")
   }
 
@@ -182,7 +189,6 @@ Panel {
     if (filter === "songs" || filter === "albums" || filter === "artists"
         || filter === "playlists")
       root.searchFilter = filter
-    var expanded = data.libraryExpanded === true
     var kind = String(data.libraryKind || "")
     var refId = String(data.libraryRefId || "")
     var restored = false
@@ -197,7 +203,11 @@ Panel {
       root.loadLibrary(kind)
       restored = true
     }
-    if (!restored || !expanded) root.libraryExpanded = expanded
+    var tab = String(data.activeTab || "")
+    // Back-compat: pre-tab state files only stored a libraryExpanded boolean.
+    if (tab !== "search" && tab !== "playlists" && tab !== "library")
+      tab = (data.libraryExpanded === true && restored) ? "library" : "search"
+    root.activeTab = tab
   }
 
   function toggle() {
@@ -321,6 +331,7 @@ Panel {
     root.activePlaylistId = id
     root.activePlaylistTitle = title
     root.playlistTracks = []
+    root.activeTab = "playlists"
     root.selectedIndex = -1
     root.statusText = ""
     tracksProc.command = [root.ctlPath, "playlist", id]
@@ -459,7 +470,7 @@ Panel {
       root.libraryRefId = ""
       root.resetLibraryInfo()
     }
-    root.libraryExpanded = true
+    root.activeTab = "library"
     root.selectedIndex = -1
     root.statusText = ""
     libraryProc.command = command
@@ -503,7 +514,7 @@ Panel {
       root.resetLibraryInfo()
     }
     root.libraryRefId = browseId
-    root.libraryExpanded = true
+    root.activeTab = "library"
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "album", browseId]
     root.startProcess(libraryProc, "library")
@@ -521,7 +532,7 @@ Panel {
       root.resetLibraryInfo()
     }
     root.libraryRefId = browseId
-    root.libraryExpanded = true
+    root.activeTab = "library"
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "artist", browseId]
     root.startProcess(libraryProc, "library")
@@ -2124,8 +2135,33 @@ Panel {
             }
           }
 
+          // ---- content tabs (Search / Playlists / Library)
+          Row {
+            visible: root.loggedIn
+            width: parent.width - Style.space(40)
+            height: Style.spacing.controlHeight
+            anchors.horizontalCenter: parent.horizontalCenter
+            spacing: Style.spacing.sm
+
+            Repeater {
+              model: root.tabItems
+              delegate: Button {
+                width: (parent.width - Style.spacing.sm * (root.tabItems.length - 1))
+                  / root.tabItems.length
+                height: Style.spacing.controlHeight
+                text: modelData.label
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                selected: root.activeTab === modelData.key
+                foreground: root.fg
+                onClicked: root.activeTab = modelData.key
+              }
+            }
+          }
+
             // ---- search
             Column {
+              visible: root.activeTab === "search"
               width: parent.width
               spacing: Style.spacing.sm
 
@@ -2222,7 +2258,7 @@ Panel {
 
           // ---- search results
           Column {
-            visible: root.searchResults.length > 0 || root.searching
+            visible: root.activeTab === "search" && (root.searchResults.length > 0 || root.searching)
             width: parent.width
             spacing: Style.spacing.panelGap
 
@@ -2408,36 +2444,15 @@ Panel {
 
           // ---- playlists
           Column {
-            visible: root.loggedIn
+            visible: root.loggedIn && root.activeTab === "playlists"
             width: parent.width
             spacing: Style.spacing.panelGap
-
-            Item {
-              width: parent.width
-              height: Style.space(24)
-
-              PanelSectionHeader {
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                text: (root.playlistsExpanded ? "▾  " : "▸  ") + "PLAYLISTS"
-                foreground: root.fg
-                fontFamily: root.fam
-              }
-
-              MouseArea {
-                anchors.fill: parent
-                acceptedButtons: Qt.LeftButton
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.playlistsExpanded = !root.playlistsExpanded
-              }
-            }
 
             Row {
               width: parent.width - Style.space(40)
               height: Style.spacing.controlHeight
               anchors.horizontalCenter: parent.horizontalCenter
               spacing: Style.spacing.sm
-              visible: root.playlistsExpanded
 
               TextField {
                 id: newPlaylistField
@@ -2466,7 +2481,6 @@ Panel {
             Item {
               width: parent.width
               height: Style.spacing.controlHeight
-              visible: root.playlistsExpanded
 
               Dropdown {
                 width: parent.width - Style.space(40)
@@ -2484,7 +2498,7 @@ Panel {
 
             // ---- playlist tracks view
           Column {
-            visible: root.playlistTracks.length > 0
+            visible: root.activeTab === "playlists" && root.playlistTracks.length > 0
             width: parent.width
             spacing: Style.spacing.panelGap
 
@@ -2647,28 +2661,14 @@ Panel {
 
           // ---- library
           Column {
-            visible: root.loggedIn
+            visible: root.loggedIn && root.activeTab === "library"
             width: parent.width
             spacing: Style.spacing.panelGap
 
             Item {
               width: parent.width
               height: Style.space(24)
-
-              PanelSectionHeader {
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                text: (root.libraryExpanded ? "▾  " : "▸  ") + "LIBRARY"
-                foreground: root.fg
-                fontFamily: root.fam
-              }
-
-              MouseArea {
-                anchors.fill: parent
-                acceptedButtons: Qt.LeftButton
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.libraryExpanded = !root.libraryExpanded
-              }
+              visible: root.libraryKind !== ""
 
               Button {
                 anchors.right: parent.right
@@ -2677,7 +2677,6 @@ Panel {
                 height: Style.space(24)
                 iconText: Model.ICON.close
                 tooltipText: "Close library"
-                visible: root.libraryKind !== ""
                 fontFamily: root.fam
                 foreground: root.fg
                 onClicked: root.closeLibrary()
@@ -2688,7 +2687,6 @@ Panel {
               width: parent.width - Style.space(40)
               anchors.horizontalCenter: parent.horizontalCenter
               spacing: Style.spacing.sm
-              visible: root.libraryExpanded
 
               Repeater {
                 model: [
@@ -2715,7 +2713,7 @@ Panel {
             Row {
               width: parent.width
               height: Style.space(28)
-              visible: root.libraryExpanded && root.libraryKind !== ""
+              visible: root.activeTab === "library" && root.libraryKind !== ""
               spacing: Style.spacing.sm
 
               Button {
@@ -2858,7 +2856,7 @@ Panel {
             }
 
             Text {
-              visible: root.libraryExpanded && root.libraryKind !== "" && root.libraryList.length === 0
+              visible: root.activeTab === "library" && root.libraryKind !== "" && root.libraryList.length === 0
                 && !libraryProc.running
               textFormat: Text.PlainText
               text: "Nothing here."
@@ -2869,7 +2867,7 @@ Panel {
 
             Repeater {
               id: libraryRepeater
-              visible: root.libraryExpanded
+              visible: root.activeTab === "library"
               model: root.libraryList
               delegate: Item {
                 id: libraryRow
