@@ -283,6 +283,18 @@ Panel {
     root.startProcess(lastPlayedClearProc, "lastPlayedClear")
   }
 
+  function clearQueue() {
+    if (queueClearProc.running) return
+    root.startProcess(queueClearProc, "queueClear")
+  }
+
+  function queueUpcomingCount() {
+    var remaining = root.queueTracks.length - 1
+    var pos = (typeof root.queuePosition === "number") ? root.queuePosition : 0
+    if (pos >= 0) remaining -= pos
+    return Math.max(0, remaining)
+  }
+
   function restoreSession() {
     if (root.busy) return
     if (restoreProc.running) return
@@ -1020,6 +1032,20 @@ Panel {
   }
 
   Process {
+    id: queueClearProc
+    command: [root.ctlPath, "queue-clear"]
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("queueClear", data) }
+    }
+    onStarted: queueClearDeadline.start()
+    onExited: function(exitCode) {
+      queueClearDeadline.stop()
+      root.refresh()
+      root.refreshQueue()
+    }
+  }
+
+  Process {
     id: restoreProc
     command: [root.ctlPath, "restore"]
     stdout: SplitParser {
@@ -1044,6 +1070,12 @@ Panel {
     id: lastPlayedClearDeadline
     interval: root.commandTimeout
     onTriggered: { if (lastPlayedClearProc.running) lastPlayedClearProc.running = false }
+  }
+
+  Timer {
+    id: queueClearDeadline
+    interval: root.commandTimeout
+    onTriggered: { if (queueClearProc.running) queueClearProc.running = false }
   }
 
   Timer {
@@ -2176,6 +2208,37 @@ Panel {
             visible: root.activeTab === "queue" && root.queueVisible
             width: parent.width
             spacing: 0
+
+            Row {
+              width: parent.width
+              height: Style.spacing.controlHeight
+              spacing: Style.spacing.sm
+
+              Text {
+                text: "UP NEXT"
+                color: Color.accent
+                font.family: root.fam
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                verticalAlignment: Text.AlignVCenter
+              }
+
+              Item {
+                width: parent.width - Style.space(150)
+                height: 1
+              }
+
+              Button {
+                width: Style.space(52)
+                height: Style.spacing.controlHeight
+                text: "Clear"
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                enabled: root.queueUpcomingCount() > 0 && !root.busy
+                onClicked: root.clearQueue()
+              }
+            }
 
             Column {
               width: parent.width

@@ -788,7 +788,9 @@ def mpv_is_running():
 
 
 def mpv_kill():
-    clear_session()
+    # The resumable-queue session is deliberately NOT cleared here: Stop (and a
+    # natural end of the playlist) must leave the queue resumable. The explicit
+    # start-of-new-playback paths below clear it themselves.
     # Shut down a pre-runtime-dir instance on the first managed replacement.
     if private_mpv_socket():
         mpv_send("quit")
@@ -876,6 +878,7 @@ def spawn_precache_next():
 def mpv_play(video_id):
     ensure_daemon()
     mpv_kill()
+    clear_session()
     ensure_private_runtime_dir()
     url = f"https://music.youtube.com/watch?v={video_id}"
     proc = subprocess.Popen([
@@ -2681,6 +2684,7 @@ def _mix_launch(track_list):
     """
     remember_tracks(track_list)
     mpv_kill()
+    clear_session()
     urls = [f"https://music.youtube.com/watch?v={t['videoId']}" for t in track_list]
     ensure_private_runtime_dir()
     proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
@@ -2790,6 +2794,7 @@ def cmd_queue_playlist(args):
             return
         remember_tracks(meta)
         mpv_kill()
+        clear_session()
         ensure_private_runtime_dir()
         proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
                                  f"--input-ipc-server={MPV_SOCKET}",
@@ -2855,6 +2860,7 @@ def cmd_enqueue(args):
         urls = [f"https://music.youtube.com/watch?v={t['videoId']}" for t in meta]
         if mode == "play" or not mpv_is_running():
             mpv_kill()
+            clear_session()
             ensure_private_runtime_dir()
             proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
                                      f"--input-ipc-server={MPV_SOCKET}",
@@ -2928,6 +2934,7 @@ def cmd_enqueue_files(args):
         urls = [f"https://music.youtube.com/watch?v={t['videoId']}" for t in meta]
         if mode == "play" or not mpv_is_running():
             mpv_kill()
+            clear_session()
             ensure_private_runtime_dir()
             proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
                                      f"--input-ipc-server={MPV_SOCKET}",
@@ -3055,6 +3062,39 @@ def cmd_queue_remove(args):
     else:
         write_status({"ok": True, "playing": False})
     print(json.dumps({"ok": True, "removed": index}))
+
+
+def cmd_queue_clear(args):
+    """Drop every upcoming queue entry, keeping the current track playing.
+
+    When nothing is playing, drop the saved resume session instead.
+    """
+    if not mpv_is_running():
+        session = load_session()
+        ids = session.get("videoIds") if isinstance(session, dict) else None
+        removed = len(ids) if isinstance(ids, list) else 0
+        clear_session()
+        write_status({"ok": True, "playing": False})
+        print(json.dumps({"ok": True, "cleared": True, "removed": removed,
+                          "remaining": 0, "playing": False}))
+        return
+    playlist, pos = _playlist_state()
+    if not playlist:
+        print(json.dumps({"ok": True, "cleared": True, "removed": 0,
+                          "remaining": 0, "playing": True}))
+        return
+    if pos is None or pos < 0:
+        pos = 0
+    removed = 0
+    for index in range(len(playlist) - 1, pos, -1):
+        resp = mpv_send("playlist-remove", index)
+        if isinstance(resp, dict) and resp.get("error") == "success":
+            removed += 1
+    write_status_from_mpv(get_mpv_props() or {})
+    playlist, _pos = _playlist_state()
+    remaining = len(playlist) if isinstance(playlist, list) else 0
+    print(json.dumps({"ok": True, "cleared": True, "removed": removed,
+                      "remaining": remaining, "playing": True}))
 
 
 def cmd_queue_move(args):
@@ -3676,6 +3716,7 @@ COMMANDS = {
     "mix": cmd_mix,
     "queue": cmd_queue_playlist,
     "queue-list": cmd_queue_list,
+    "queue-clear": cmd_queue_clear,
     "queue-jump": cmd_queue_jump,
     "queue-remove": cmd_queue_remove,
     "queue-move": cmd_queue_move,
@@ -3735,6 +3776,7 @@ def main():
         print("  queue <playlistId>       Queue and play a playlist")
         print("  queue-add <videoId>      Append a track to the queue")
         print("  queue-list               List the current queue")
+        print("  queue-clear              Remove every upcoming track")
         print("  queue-jump <index>       Jump to a queue index")
         print("  queue-remove <index>     Remove a queue entry")
         print("  queue-move <from> <to>   Move a queue entry")
