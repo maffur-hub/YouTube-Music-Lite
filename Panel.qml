@@ -66,6 +66,7 @@ Panel {
   property var libraryRows: []
   property string libraryRefId: ""
   property bool libraryExpanded: false
+  property bool playlistsExpanded: false
   property string libraryThumbUrl: ""
   property string libraryImageSource: ""
   property string libraryMeta: ""
@@ -2379,10 +2380,18 @@ Panel {
               height: Style.space(24)
 
               PanelSectionHeader {
-                anchors.centerIn: parent
-                text: "PLAYLISTS"
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: (root.playlistsExpanded ? "▾  " : "▸  ") + "PLAYLISTS"
                 foreground: root.fg
                 fontFamily: root.fam
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.playlistsExpanded = !root.playlistsExpanded
               }
             }
 
@@ -2391,6 +2400,7 @@ Panel {
               height: Style.spacing.controlHeight
               anchors.horizontalCenter: parent.horizontalCenter
               spacing: Style.spacing.sm
+              visible: root.playlistsExpanded
 
               TextField {
                 id: newPlaylistField
@@ -2419,6 +2429,7 @@ Panel {
             Item {
               width: parent.width
               height: Style.spacing.controlHeight
+              visible: root.playlistsExpanded
 
               Dropdown {
                 width: parent.width - Style.space(40)
