@@ -1511,6 +1511,73 @@ def cmd_enqueue(args):
         print(json.dumps({"ok": False, "error": str(e)}))
 
 
+def cmd_enqueue_files(args):
+    ensure_daemon()
+    usage = "Usage: yt-music-ctl enqueue-files <play|queue|next> <videoId...>"
+    if len(args) < 2:
+        fail(usage)
+    mode = args[0]
+    ids = args[1:]
+    if mode not in ("play", "queue", "next"):
+        fail(usage)
+    for vid in ids:
+        if not valid_video_id(vid):
+            fail(usage)
+    try:
+        known = load_track_meta()
+        meta = []
+        for vid in ids:
+            info = known.get(vid)
+            info = info if isinstance(info, dict) else {}
+            entry = {"videoId": vid}
+            for key in ("title", "artist", "duration"):
+                if info.get(key):
+                    entry[key] = info[key]
+            meta.append(entry)
+        if not meta:
+            print(json.dumps({"ok": False, "error": "No playable tracks"}))
+            return
+        remember_tracks(meta)
+        urls = [f"https://music.youtube.com/watch?v={t['videoId']}" for t in meta]
+        if mode == "play" or not mpv_is_running():
+            mpv_kill()
+            ensure_private_runtime_dir()
+            proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
+                                     f"--input-ipc-server={MPV_SOCKET}",
+                                     "--keep-open=no"] + urls,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            json_dump(MPV_PID_PATH, mpv_pid_record(proc))
+            wait_for_mpv()
+            props = wait_for_metadata()
+            write_status_from_mpv(props)
+            print(json.dumps({
+                "ok": True,
+                "played": True,
+                "mode": mode,
+                "tracks": len(meta)
+            }))
+        elif mode == "queue":
+            for url in urls:
+                mpv_send("loadfile", [url, "append"])
+            print(json.dumps({
+                "ok": True,
+                "queued": True,
+                "mode": mode,
+                "tracks": len(meta)
+            }))
+        else:  # next: reverse so the original order survives insert-next
+            for url in reversed(urls):
+                mpv_send("loadfile", [url, "insert-next"])
+            print(json.dumps({
+                "ok": True,
+                "queuedNext": True,
+                "mode": mode,
+                "tracks": len(meta)
+            }))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+
+
 def _queue_count():
     """Return the mpv playlist count, or None when it cannot be read."""
     props = mpv_query(["playlist-count"])
@@ -2058,6 +2125,7 @@ COMMANDS = {
     "home": cmd_home,
     "history": cmd_history,
     "enqueue": cmd_enqueue,
+    "enqueue-files": cmd_enqueue_files,
     "thumbnail": cmd_thumbnail,
     "mix": cmd_mix,
     "queue": cmd_queue_playlist,
@@ -2108,6 +2176,7 @@ def main():
         print("  album <browseId>         Get album tracks")
         print("  artist <browseId>        Get an artist's top songs + albums")
         print("  enqueue <play|queue|next> <album|artist|playlist> <id>   Play/queue a whole album, artist or playlist")
+        print("  enqueue-files <play|queue|next> <videoId...>   Play/queue an explicit list of videoIds")
         print("  thumbnail <videoId>     Fetch a bounded album thumbnail")
         print("  mix <videoId>            Play radio mix from seed")
         print("  queue <playlistId>       Queue and play a playlist")

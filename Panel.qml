@@ -397,11 +397,15 @@ Panel {
     root.selectedIndex = -1
   }
 
-  function librarySongCount() {
+  function songCount(rows) {
     var n = 0
-    for (var i = 0; i < root.libraryRows.length; i++)
-      if (root.libraryRows[i].kind === "song") n++
+    for (var i = 0; i < rows.length; i++)
+      if (rows[i].kind === "song") n++
     return n
+  }
+
+  function librarySongCount() {
+    return root.songCount(root.libraryRows)
   }
 
   function enqueueNav(mode, kind, id) {
@@ -410,10 +414,21 @@ Panel {
     root.sendCmd("enqueue", [mode, kind, id])
   }
 
+  function enqueueFiles(mode) {
+    if (root.busy) return
+    var ids = []
+    for (var i = 0; i < root.searchResults.length; i++) {
+      var r = root.searchResults[i]
+      if (r && r.kind === "song" && r.videoId) ids.push(String(r.videoId))
+    }
+    if (ids.length === 0) return
+    root.sendCmd("enqueue-files", [mode].concat(ids))
+  }
+
   function openContextMenu(videoId, title, artist, source, x, y, queueIndex) {
     root.contextRow = null
-    if (!root.isVideoId(videoId)) return
-    root.contextVideoId = String(videoId)
+    if (!root.isVideoId(videoId) && source !== "queue") return
+    root.contextVideoId = String(videoId || "")
     root.contextTitle = title || ""
     root.contextArtist = artist || ""
     root.contextSource = source || ""
@@ -471,18 +486,20 @@ Panel {
       addContextItem("Open", function() { root.openRow(navRow, root.contextSource === "search") })
       return
     }
-    addContextItem("Play now", function() { root.sendCmd("play", [root.contextVideoId]) })
-    addContextItem("Play next", function() { root.sendCmd("play-next", [root.contextVideoId, root.contextTitle, root.contextArtist]) })
-    addContextItem("Add to queue", function() { root.sendCmd("queue-add", [root.contextVideoId, root.contextTitle, root.contextArtist]) })
-    addContextItem("Start mix", function() { root.playMix(root.contextVideoId) })
-    if (root.loggedIn)
-      addContextItem("Like", function() { root.sendCmd("like", [root.contextVideoId]) })
-    if (root.loggedIn && root.contextSource === "nowplaying")
-      addContextItem("Dislike", function() { root.sendCmd("dislike", [root.contextVideoId]) })
-    if (root.loggedIn && root.playlists.length > 0)
-      addContextItem("Add to playlist…", function() { root.openPlaylistPicker() })
-    if (root.contextSource === "track" && root.activePlaylistId !== "")
-      addContextItem("Remove from playlist", function() { root.sendCmd("remove", [root.activePlaylistId, root.contextVideoId]) })
+    if (root.isVideoId(root.contextVideoId)) {
+      addContextItem("Play now", function() { root.sendCmd("play", [root.contextVideoId]) })
+      addContextItem("Play next", function() { root.sendCmd("play-next", [root.contextVideoId, root.contextTitle, root.contextArtist]) })
+      addContextItem("Add to queue", function() { root.sendCmd("queue-add", [root.contextVideoId, root.contextTitle, root.contextArtist]) })
+      addContextItem("Start mix", function() { root.playMix(root.contextVideoId) })
+      if (root.loggedIn)
+        addContextItem("Like", function() { root.sendCmd("like", [root.contextVideoId]) })
+      if (root.loggedIn && root.contextSource === "nowplaying")
+        addContextItem("Dislike", function() { root.sendCmd("dislike", [root.contextVideoId]) })
+      if (root.loggedIn && root.playlists.length > 0)
+        addContextItem("Add to playlist…", function() { root.openPlaylistPicker() })
+      if (root.contextSource === "track" && root.activePlaylistId !== "")
+        addContextItem("Remove from playlist", function() { root.sendCmd("remove", [root.activePlaylistId, root.contextVideoId]) })
+    }
     if (root.contextSource === "queue" && root.contextQueueIndex >= 0) {
       var qi = root.contextQueueIndex
       if (qi > 0)
@@ -1744,6 +1761,35 @@ Panel {
             visible: root.searchResults.length > 0 || root.searching
             width: parent.width
             spacing: Style.spacing.panelGap
+
+            Row {
+              width: parent.width
+              height: Style.space(28)
+              spacing: Style.spacing.sm
+              visible: root.searchFilter === "songs" && root.songCount(root.searchResults) > 0
+
+              Button {
+                width: Style.space(72)
+                height: Style.space(28)
+                text: "Play all"
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                enabled: !root.busy && root.songCount(root.searchResults) > 0
+                onClicked: root.enqueueFiles("play")
+              }
+
+              Button {
+                width: Style.space(72)
+                height: Style.space(28)
+                text: "Queue all"
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                enabled: !root.busy && root.songCount(root.searchResults) > 0
+                onClicked: root.enqueueFiles("queue")
+              }
+            }
 
             PanelSectionHeader {
               text: "SEARCH RESULTS — " + root.searchQuery.toUpperCase()
