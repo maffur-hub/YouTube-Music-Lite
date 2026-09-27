@@ -253,7 +253,7 @@ def remember_tracks(entries):
         prior = store.get(video_id)
         prior = prior if isinstance(prior, dict) else {}
         record = {}
-        for key in ("title", "artist", "duration"):
+        for key in ("title", "artist", "album", "duration"):
             value = entry.get(key)
             if not value:
                 value = prior.get(key)
@@ -754,6 +754,7 @@ def cmd_play(args):
         "videoId": video_id,
         "title": title,
         "artist": (props or {}).get("metadata/by-key/artist") or "",
+        "album": (props or {}).get("metadata/by-key/album") or "",
         "duration": round(float((props or {}).get("duration") or 0)),
     }])
     print(json.dumps({"ok": True, "videoId": video_id}))
@@ -1407,10 +1408,14 @@ def cmd_mix(args):
             vid = track.get("videoId", "")
             if not vid:
                 continue
+            album = track.get("album") or {}
+            if not isinstance(album, dict):
+                album = {"name": album}
             tracks.append({
                 "videoId": vid,
                 "title": track.get("title", ""),
                 "artist": ", ".join(a.get("name", "") for a in (track.get("artists") or [])),
+                "album": album.get("title", "") or album.get("name", ""),
                 "duration": track.get("duration_seconds", 0) or 0,
             })
         if not tracks:
@@ -1453,11 +1458,15 @@ def cmd_queue_playlist(args):
             vid = t.get("videoId", "")
             if vid:
                 urls.append(f"https://music.youtube.com/watch?v={vid}")
+                album = t.get("album") or {}
+                if not isinstance(album, dict):
+                    album = {"name": album}
                 meta.append({
                     "videoId": vid,
                     "title": t.get("title", ""),
                     "artist": ", ".join(a.get("name", "")
                                         for a in (t.get("artists") or [])),
+                    "album": album.get("title", "") or album.get("name", ""),
                     "duration": t.get("duration_seconds", 0) or 0,
                 })
         if not urls:
@@ -1512,11 +1521,15 @@ def cmd_enqueue(args):
             vid = t.get("videoId", "")
             if not vid:
                 continue
+            album = t.get("album") or {}
+            if not isinstance(album, dict):
+                album = {"name": album}
             meta.append({
                 "videoId": vid,
                 "title": t.get("title", ""),
                 "artist": ", ".join(a.get("name", "")
                                     for a in (t.get("artists") or [])),
+                "album": album.get("title", "") or album.get("name", ""),
                 "duration": t.get("duration_seconds", 0) or 0,
             })
         if not meta:
@@ -1688,6 +1701,7 @@ def cmd_queue_list(args):
             "videoId": video_id,
             "title": str(info.get("title") or entry.get("title") or ""),
             "artist": str(info.get("artist") or ""),
+            "album": str(info.get("album") or ""),
             "duration": info.get("duration") or 0,
             "current": bool(entry.get("current")),
         })

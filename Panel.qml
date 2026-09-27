@@ -238,6 +238,7 @@ Panel {
       videoId: String(song.videoId),
       title: root.boundedString(song.title, 256),
       artist: root.boundedString(song.artist, 256),
+      album: root.boundedString(song.album, 256),
       duration: Math.max(0, Math.min(86400, Number(song.duration) || 0))
     }
   }
@@ -263,6 +264,7 @@ Panel {
         out.push({ kind: "song", videoId: vid, browseId: "",
                    title: root.boundedString(item.title, 256),
                    artist: root.boundedString(item.artist, 256),
+                   album: root.boundedString(item.album, 256),
                    duration: Math.max(0, Math.min(86400, Number(item.duration) || 0)) })
       } else if (kind === "album" || kind === "artist" || kind === "playlist") {
         var bid = root.boundedString(item.browseId, 256)
@@ -483,6 +485,14 @@ Panel {
 
   function librarySongCount() {
     return root.songCount(root.libraryRows)
+  }
+
+  function songSubtitle(row) {
+    if (!row) return ""
+    var artist = String(row.artist || "")
+    var album = String(row.album || "")
+    if (artist && album) return artist + " · " + album
+    return artist || album
   }
 
   function enqueueNav(mode, kind, id) {
@@ -823,6 +833,7 @@ Panel {
             videoId: String(t.videoId || ""),
             title: root.boundedString(t.title, 256),
             artist: root.boundedString(t.artist, 256),
+            album: root.boundedString(t.album, 256),
             duration: Math.max(0, Number(t.duration) || 0),
             current: !!t.current
           })
@@ -1810,15 +1821,21 @@ Panel {
                   height: Style.space(32)
 
                   Rectangle {
+                    id: queueRowBg
                     anchors.fill: parent
                     color: index === root.selectedIndex
                       ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                      : "transparent"
+                      : (queueRowClick.containsMouse
+                        ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+                        : "transparent")
                     radius: Style.cornerRadius
+                    Behavior on color { ColorAnimation { duration: 120 } }
                   }
 
                   MouseArea {
+                    id: queueRowClick
                     anchors.fill: parent
+                    hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.selectIndex(index)
                   }
@@ -1859,7 +1876,7 @@ Panel {
                         textFormat: Text.PlainText
                         width: parent.width
                         elide: Text.ElideRight
-                        text: modelData.artist
+                        text: root.songSubtitle(modelData)
                         color: Qt.darker(root.fg, 1.4)
                         font.family: root.fam
                         font.pixelSize: Style.font.caption
@@ -2058,15 +2075,21 @@ Panel {
                 height: Style.space(40)
 
                 Rectangle {
+                  id: searchRowBg
                   anchors.fill: parent
                   color: index === root.selectedIndex
                     ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                    : "transparent"
+                    : (searchRowClick.containsMouse
+                      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+                      : "transparent")
                   radius: Style.cornerRadius
+                  Behavior on color { ColorAnimation { duration: 120 } }
                 }
 
                 MouseArea {
+                  id: searchRowClick
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
                     root.selectIndex(index)
@@ -2110,7 +2133,7 @@ Panel {
                       textFormat: Text.PlainText
                       width: parent.width
                       elide: Text.ElideRight
-                      text: modelData.artist
+                      text: root.songSubtitle(modelData)
                       color: Qt.darker(root.fg, 1.4)
                       font.family: root.fam
                       font.pixelSize: Style.font.caption
@@ -2304,15 +2327,21 @@ Panel {
                 height: Style.space(36)
 
                 Rectangle {
+                  id: trackRowBg
                   anchors.fill: parent
                   color: index === root.selectedIndex
                     ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                    : "transparent"
+                    : (trackRowClick.containsMouse
+                      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+                      : "transparent")
                   radius: Style.cornerRadius
+                  Behavior on color { ColorAnimation { duration: 120 } }
                 }
 
                 MouseArea {
+                  id: trackRowClick
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: root.selectedIndex = index
                 }
@@ -2348,7 +2377,7 @@ Panel {
                       textFormat: Text.PlainText
                       width: parent.width
                       elide: Text.ElideRight
-                      text: modelData.artist
+                      text: root.songSubtitle(modelData)
                       color: Qt.darker(root.fg, 1.4)
                       font.family: root.fam
                       font.pixelSize: Style.font.caption
@@ -2570,15 +2599,21 @@ Panel {
                 height: Style.space(40)
 
                 Rectangle {
+                  id: libraryRowBg
                   anchors.fill: parent
                   color: index === root.selectedIndex
                     ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                    : "transparent"
+                    : (libraryRowClick.containsMouse
+                      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+                      : "transparent")
                   radius: Style.cornerRadius
+                  Behavior on color { ColorAnimation { duration: 120 } }
                 }
 
                 MouseArea {
+                  id: libraryRowClick
                   anchors.fill: parent
+                  hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
                     root.selectIndex(index)
@@ -2617,11 +2652,11 @@ Panel {
                       font.pixelSize: Style.font.bodySmall
                     }
                     Text {
-                      visible: modelData.artist !== ""
+                      visible: root.songSubtitle(modelData) !== ""
                       textFormat: Text.PlainText
                       width: parent.width
                       elide: Text.ElideRight
-                      text: modelData.artist
+                      text: root.songSubtitle(modelData)
                       color: Qt.darker(root.fg, 1.4)
                       font.family: root.fam
                       font.pixelSize: Style.font.caption
