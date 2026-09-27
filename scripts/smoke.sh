@@ -5,13 +5,17 @@
 # Usage: scripts/smoke.sh [--full]
 #
 #   scripts/smoke.sh          Non-destructive run. Exercises the read-only
-#                             commands, the network navigation lookups and the
+#                             commands, the network navigation lookups, the
+#                             metadata response cache and the
 #                             usage/argument-error checks. Nothing on the
-#                             YouTube Music account is mutated.
+#                             YouTube Music account is mutated and no audio is
+#                             played.
 #   scripts/smoke.sh --full   Also exercises the playback-affecting commands:
 #                             starts playback of a known videoId, pokes the
 #                             transport controls and the queue, then cleans up
-#                             with `stop` + `daemon-stop`.
+#                             with `stop` + `daemon-stop`. Also precaches one
+#                             known track's audio (a real yt-dlp download) and
+#                             checks the precache answers without a player.
 #
 # Commands ALWAYS SKIPPED (with or without --full) and why:
 #   login                    interactive browser authentication
@@ -23,6 +27,13 @@
 #                            path is covered by ensure-daemon + daemon-stop
 #
 # Notes on the default (non --full) run:
+#   * The metadata response cache is exercised read-only: a freshly cleared
+#     cache gives a live miss, the repeat call a hit (identical payload apart
+#     from cached/stale), `-r` / `--refresh` a bypass, and every record must be
+#     0700 / 0600. The stale offline fallback is checked by ageing the stored
+#     ts and proxying one fetch at a dead port; the backend's expected
+#     "YouTube session expired..." line on stderr is ignored there. Only the
+#     plugin's own ~/.local/state/yt-music/cache is cleared, never user data.
 #   * Playback-affecting commands (play, pause, toggle, next, prev, seek,
 #     seek-pct, volume, loop, shuffle, mix, queue, queue-*, queue-add,
 #     play-next, enqueue, enqueue-files, thumbnail, daemon, ensure-daemon,
@@ -43,6 +54,7 @@
 set -uo pipefail
 
 CTL="${YT_MUSIC_CTL:-$HOME/.local/bin/yt-music-ctl}"
+CACHE_DIR="$HOME/.local/state/yt-music/cache"
 
 # Known-good ids used across the checks.
 LYRICS_VID="HUskuj8I9xY"
@@ -59,7 +71,7 @@ for arg in "$@"; do
     case "$arg" in
         --full) FULL=1 ;;
         -h|--help)
-            sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -165,11 +177,216 @@ try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(1)
-sys.exit(0 if isinstance(data, dict) and data.get("ok") is True else 1)' 2>/dev/null; then
+    sys.exit(0 if isinstance(data, dict) and data.get("ok") is True else 1)' 2>/dev/null; then
         fail "$label" "unexpected JSON success on stdout"
         return
     fi
     pass "$label"
+}
+
+# check_cached <label> <True|False> <cmd...> - exit 0 and stdout must be JSON
+# with ok == true and the top-level .cached flag exactly <True|False>.
+check_cached() {
+    local label=$1 want=$2 out rc err got
+    shift 2
+    out=$("$@" 2>"$ERR_FILE")
+    rc=$?
+    err=$(cat "$ERR_FILE")
+    got=$(printf '%s' "$out" | python3 -c 'import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("?"); raise SystemExit
+flags = {True: "True", False: "False"}
+print(flags.get(data.get("cached"), "?") if data.get("ok") is True else "?")' 2>/dev/null)
+    if [[ $rc -eq 0 && $got == "$want" ]]; then
+        pass "$label"
+    else
+        fail "$label" "exit $rc: $(detail "$out" "$err")"
+    fi
+}
+
+# check_cache_hit <label> <cmd...> - run the command twice: the first reply
+# must be a live fetch (.cached false) and the second a cache hit (.cached
+# true), with both payloads identical once cached/stale are removed.
+check_cache_hit() {
+    local label=$1 f1 f2 rc1 rc2 err1 verdict
+    shift
+    f1=$(mktemp)
+    f2=$(mktemp)
+    "$@" >"$f1" 2>"$ERR_FILE"
+    rc1=$?
+    err1=$(cat "$ERR_FILE")
+    "$@" >"$f2" 2>"$ERR_FILE"
+    rc2=$?
+    verdict=$(python3 - "$f1" "$f2" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        first = json.load(fh)
+    with open(sys.argv[2]) as fh:
+        second = json.load(fh)
+except Exception as exc:
+    print("not JSON: %s" % exc)
+    raise SystemExit
+if first.get("cached") is not False:
+    print("run1 cached=%r, want False" % (first.get("cached"),))
+    raise SystemExit
+if second.get("cached") is not True:
+    print("run2 cached=%r, want True" % (second.get("cached"),))
+    raise SystemExit
+for record in (first, second):
+    record.pop("cached", None)
+    record.pop("stale", None)
+if first != second:
+    keys = sorted(set(first) ^ set(second))
+    print("payloads differ (%s)" % (", ".join(keys) or "same keys, other values"))
+    raise SystemExit
+print("ok")
+PY
+)
+    rm -f "$f1" "$f2"
+    if [[ $verdict == ok ]]; then
+        pass "$label"
+    else
+        fail "$label" "exit $rc1/$rc2: $(detail "$verdict" "$err1")"
+    fi
+}
+
+# check_stale <label> <cmd...> - exit 0 with a cached, stale JSON payload: the
+# live fetch failed and the aged entry was served instead. The failure the
+# backend reports on stderr in that case is expected and ignored.
+check_stale() {
+    local label=$1 out rc err
+    shift
+    out=$("$@" 2>"$ERR_FILE")
+    rc=$?
+    err=$(cat "$ERR_FILE")
+    if [[ $rc -eq 0 ]] && printf '%s' "$out" | python3 -c 'import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if data.get("ok") is True and data.get("cached") is True
+         and data.get("stale") is True else 1)' 2>/dev/null; then
+        pass "$label"
+    else
+        fail "$label" "exit $rc: $(detail "$out" "$err")"
+    fi
+}
+
+# check_not_ok <label> <error> <cmd...> - exit 0 and stdout must be JSON with
+# ok == false; a non-empty <error> also pins the .error text. Invalid ids and
+# "nothing playing" are clean JSON answers, not crashes.
+check_not_ok() {
+    local label=$1 message=$2 out rc got
+    shift 2
+    out=$("$@" 2>"$ERR_FILE")
+    rc=$?
+    got=$(printf '%s' "$out" | python3 -c 'import sys, json
+want = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("?"); raise SystemExit
+if data.get("ok") is not False:
+    print("?")
+elif want and data.get("error") != want:
+    print("error=%r" % (data.get("error"),))
+else:
+    print("True")' "$message" 2>/dev/null)
+    if [[ $rc -eq 0 && $got == True ]]; then
+        pass "$label"
+    else
+        fail "$label" "exit $rc: $(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+}
+
+# check_precache <label> <cmd...> - a successful precache: exit 0, JSON ok with
+# a non-empty path whose file exists and is mode 600.
+check_precache() {
+    local label=$1 out rc err path mode
+    shift
+    out=$("$@" 2>"$ERR_FILE")
+    rc=$?
+    err=$(cat "$ERR_FILE")
+    path=$(printf '%s' "$out" | python3 -c 'import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print(""); raise SystemExit
+print(data.get("path") or "" if data.get("ok") is True else "")' 2>/dev/null)
+    if [[ -z $path ]]; then
+        fail "$label" "exit $rc: $(detail "$out" "$err")"
+        return
+    fi
+    if [[ ! -f $path ]]; then
+        fail "$label" "missing file $path"
+        return
+    fi
+    mode=$(stat -c %a "$path" 2>/dev/null)
+    if [[ $mode != 600 ]]; then
+        fail "$label" "mode $mode, want 600: $path"
+        return
+    fi
+    pass "$label"
+}
+
+# check_mode <label> <path> <mode> - stat -c %a must report <mode>.
+check_mode() {
+    local label=$1 path=$2 want=$3 mode
+    mode=$(stat -c %a "$path" 2>/dev/null)
+    if [[ $mode == "$want" ]]; then
+        pass "$label"
+    else
+        fail "$label" "${mode:-missing} ($path)"
+    fi
+}
+
+# check_cache_records - every *.json record in the metadata cache is 0600.
+check_cache_records() {
+    local path mode seen=0 bad=""
+    for path in "$CACHE_DIR"/*.json; do
+        [[ -e $path ]] || continue
+        seen=$((seen + 1))
+        mode=$(stat -c %a "$path" 2>/dev/null)
+        if [[ $mode != 600 ]]; then
+            bad+="$path=$mode "
+        fi
+    done
+    if ((seen == 0)); then
+        fail "cache records mode 600" "no *.json under $CACHE_DIR"
+    elif [[ -n $bad ]]; then
+        fail "cache records mode 600" "$bad"
+    else
+        pass "cache records mode 600"
+    fi
+}
+
+# age_cache - push every stored record's ts ten years into the past so its TTL
+# reads as expired; the payloads themselves are left untouched.
+age_cache() {
+    python3 - "$CACHE_DIR" <<'PY'
+import json, os, sys, time
+cache_dir = sys.argv[1]
+if not os.path.isdir(cache_dir):
+    raise SystemExit
+for name in sorted(os.listdir(cache_dir)):
+    if not name.endswith(".json"):
+        continue
+    path = os.path.join(cache_dir, name)
+    try:
+        with open(path) as fh:
+            record = json.load(fh)
+        if not isinstance(record, dict):
+            continue
+        record["ts"] = time.time() - 10 * 365 * 24 * 3600
+        with open(path, "w") as fh:
+            json.dump(record, fh)
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+PY
 }
 
 mpv_alive() {
@@ -289,6 +506,29 @@ check_ok "album $ALBUM_ID" "$CTL" album "$ALBUM_ID"
 check_ok "artist $ARTIST_ID" "$CTL" artist "$ARTIST_ID"
 check_ok "playlist $PLAYLIST_ID" "$CTL" playlist "$PLAYLIST_ID"
 
+# ------------------------------------------------------- metadata cache (G5)
+section "cache (read-only)"
+# Start from an empty cache so the first call of every pair below is provably
+# live; only the plugin's own metadata cache is cleared, never user data.
+rm -rf "$CACHE_DIR"
+check_cache_hit "album $ALBUM_ID (miss then hit)" "$CTL" album "$ALBUM_ID"
+check_cache_hit "artist $ARTIST_ID (miss then hit)" "$CTL" artist "$ARTIST_ID"
+check_cache_hit "search -f albums fleetwood mac (miss then hit)" \
+    "$CTL" search -f albums fleetwood mac
+check_cache_hit "lyrics $LYRICS_VID (miss then hit)" "$CTL" lyrics "$LYRICS_VID"
+check_cached "album -r bypasses a fresh cache" False "$CTL" album "$ALBUM_ID" -r
+check_mode "cache dir mode 700" "$CACHE_DIR" 700
+check_cache_records
+# Offline fallback without cutting the real network: age every record, then
+# send one fetch at a dead proxy. The backend answers from the cache and the
+# "YouTube session expired..." line it prints on stderr is expected here.
+age_cache
+check_stale "album serves a stale record offline" \
+    env HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 \
+    "$CTL" album "$ALBUM_ID"
+# Left stale on purpose: nothing after this depends on a fresh cache, and a
+# later live fetch would simply rewrite the records.
+
 # ---------------------------------------------------------------- usage errors
 section "usage errors"
 if start_idle_mpv; then
@@ -369,6 +609,29 @@ if [[ $FULL -eq 1 ]]; then
     section "cleanup (--full)"
     check_ok "stop" "$CTL" stop
     check_ok "daemon-stop" "$CTL" daemon-stop
+
+    # ------------------------------------------------------- precache (G5)
+    # No `enqueue play album ...` queue-surgery check here on purpose: it is
+    # too heavy and playback-affecting for a smoke script, and the queue order
+    # it would verify was already checked by hand. The cleanup above stopped
+    # mpv and the daemon; re-assert that so the "nothing playing" answer is
+    # deterministic even when something else was up before this run.
+    section "precache (network, --full only)"
+    if mpv_alive || daemon_running; then
+        printf 'NOTE stopping the player/daemon for the precache checks\n'
+        "$CTL" stop >/dev/null 2>&1
+        "$CTL" daemon-stop >/dev/null 2>&1
+        for _i in $(seq 1 20); do
+            mpv_alive || daemon_running || break
+            sleep 0.2
+        done
+    fi
+    check_not_ok "precache bogus id" "Invalid video ID" "$CTL" precache bogus
+    check_not_ok "precache with no mpv" "Nothing playing" "$CTL" precache
+    check_precache "precache $LYRICS_VID" "$CTL" precache "$LYRICS_VID"
+    check_cached "precache $LYRICS_VID (cache hit)" True "$CTL" precache "$LYRICS_VID"
+    # The audio cache is a cache: the downloaded file is deliberately left in
+    # place for the next run (and for the daemon's next-track precache).
 fi
 
 printf '\nPASS %d / FAIL %d\n' "$PASS" "$FAIL"

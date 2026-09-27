@@ -48,6 +48,39 @@ MAX_THUMBNAIL_BYTES = 1024 * 1024
 MAX_THUMBNAIL_DIMENSION = 4096
 MAX_THUMBNAIL_PIXELS = 16 * 1024 * 1024
 
+# Precached audio for queue tracks: one file per videoId under
+# $XDG_CACHE_HOME/yt-music/audio (files 0600, directory 0700). The cap covers
+# every file in the directory; the oldest (by mtime) are evicted first.
+AUDIO_CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "yt-music", "audio")
+AUDIO_CACHE_MAX_BYTES = 512 * 1024 * 1024      # 512 MiB across the whole cache
+AUDIO_CACHE_MAX_FILE_BYTES = 64 * 1024 * 1024  # 64 MiB per file (a song is far smaller)
+AUDIO_PRECACHE_TIMEOUT = 60                    # seconds allowed per yt-dlp run
+AUDIO_DOWNLOAD_GRACE = 300                     # age before an orphaned .dl-* dir is reaped
+# The venv python has no yt_dlp module, so yt-dlp is always run as a binary.
+YTDLP_BIN = "/usr/bin/yt-dlp"
+
+# Bounded on-disk cache of API metadata responses: one JSON file per key under
+# STATE_DIR/cache (files 0600, directory 0700), evicted oldest-first by stored
+# ts once either cap is exceeded.
+METADATA_CACHE_DIR = os.path.join(STATE_DIR, "cache")
+METADATA_CACHE_MAX_ENTRIES = 400
+METADATA_CACHE_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB
+
+# Per-command TTLs, in seconds. Fast-moving screens get short TTLs (history,
+# search) so refreshes stay honest; near-static reference data gets long ones
+# (album/artist/lyrics), which is what makes re-opening a screen instant.
+METADATA_CACHE_TTL = {
+    "search": 300,     # 5 min
+    "home": 600,       # 10 min
+    "history": 120,    # 2 min
+    "library": 900,    # 15 min
+    "playlist": 600,   # 10 min
+    "album": 3600,     # 1 h
+    "artist": 3600,    # 1 h
+    "mix": 300,        # 5 min
+    "lyrics": 86400,   # 24 h — lyrics essentially never change
+}
+
 
 # ---------------------------------------------------------------- helpers
 
@@ -136,6 +169,168 @@ def json_load(path, default=None):
             return json.load(f)
     except Exception:
         return default
+
+
+# ---------------------------------------------------- metadata response cache
+
+def _cache_key(namespace, args):
+    """Stable file stem for a namespace plus its normalized argument list."""
+    canonical = json.dumps([namespace, list(args)], sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _cache_path(namespace, args):
+    return os.path.join(METADATA_CACHE_DIR, _cache_key(namespace, args) + ".json")
+
+
+def cache_read(namespace, args, ttl):
+    """Return (payload, fresh) for a cache key. Never raises.
+
+    payload is the stored dict (or None when absent/corrupt); fresh is True
+    only when the record is younger than ttl. Stale payloads are still
+    returned so callers can fall back to them when the live fetch fails.
+    """
+    try:
+        path = _cache_path(namespace, args)
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode):  # never read through a planted link
+            return None, False
+        record = json_load(path, default=None)
+        if not isinstance(record, dict):
+            return None, False
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            return None, False
+        try:
+            fresh = (time.time() - float(record.get("ts"))) <= float(ttl)
+        except (TypeError, ValueError):
+            fresh = False
+        return payload, bool(fresh)
+    except Exception:
+        return None, False
+
+
+def cache_write(namespace, args, payload):
+    """Store one record atomically, then evict oldest entries to stay in
+    bounds (entry count and total bytes). Never raises."""
+    try:
+        os.makedirs(METADATA_CACHE_DIR, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(METADATA_CACHE_DIR, 0o700)
+        except OSError:
+            pass
+        record = {"ts": time.time(), "payload": payload}
+        json_dump(_cache_path(namespace, args), record)
+        _cache_prune()
+    except Exception:
+        pass
+
+
+def _cache_entries():
+    """(ts, size, path) for each regular cache file, oldest stored ts first.
+
+    Falls back to mtime when the stored ts is unreadable. Symlinks and other
+    non-regular files are skipped, so this never follows a planted link.
+    """
+    entries = []
+    for name in os.listdir(METADATA_CACHE_DIR):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(METADATA_CACHE_DIR, name)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        record = json_load(path, default=None)
+        ts = record.get("ts") if isinstance(record, dict) else None
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+            ts = st.st_mtime
+        entries.append((float(ts), st.st_size, path))
+    entries.sort(key=lambda item: item[0])
+    return entries
+
+
+def _cache_prune():
+    """Delete oldest entries until both caps hold. Never raises."""
+    try:
+        entries = _cache_entries()
+        total = sum(size for _ts, size, _path in entries)
+        while entries and (len(entries) > METADATA_CACHE_MAX_ENTRIES
+                           or total > METADATA_CACHE_MAX_BYTES):
+            _ts, size, path = entries.pop(0)
+            total -= size
+            try:
+                st = os.lstat(path)
+                if stat.S_ISREG(st.st_mode):
+                    os.unlink(path)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def cache_clear():
+    """Unlink every regular file inside the cache dir; never follows symlinks.
+    Never raises."""
+    try:
+        for name in os.listdir(METADATA_CACHE_DIR):
+            path = os.path.join(METADATA_CACHE_DIR, name)
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid():
+                os.unlink(path)
+    except Exception:
+        pass
+
+
+def _strip_refresh(args):
+    """Split -r/--refresh (allowed anywhere) out of a command's arguments."""
+    remaining = [a for a in args if a not in ("-r", "--refresh")]
+    return remaining, len(remaining) != len(args)
+
+
+def _cache_served(payload, stale=False):
+    """Copy a cached payload and add the marker keys printed to the caller."""
+    out = dict(payload)
+    out["cached"] = True
+    if stale:
+        out["stale"] = True
+    else:
+        out.pop("stale", None)
+    return out
+
+
+def _serve_stale(namespace, key, ttl):
+    """Print the cached payload as a stale fallback. True when one existed."""
+    try:
+        stale, _fresh = cache_read(namespace, key, ttl)
+        if stale is None:
+            return False
+        print(json.dumps(_cache_served(stale, stale=True)))
+        return True
+    except Exception:
+        return False
+
+
+def _ytmusic_for_cache(namespace, key, ttl, **kwargs):
+    """Build a ytmusic client, printing a stale cached payload instead when
+    the auth bootstrap itself fails (offline, or an expired session).
+
+    fail() already reported the reason on stderr. Returns None only when the
+    stale payload was printed and the caller must return right away; with
+    nothing cached the SystemExit is re-raised so the original message and
+    exit code survive unchanged.
+    """
+    try:
+        return get_ytmusic(**kwargs)
+    except SystemExit:
+        if _serve_stale(namespace, key, ttl):
+            return None
+        raise
 
 
 def private_runtime_dir():
@@ -515,6 +710,29 @@ def wait_for_mpv(timeout=8):
     return False
 
 
+def spawn_precache_next():
+    """Fire-and-forget precache of the queue's next entry in a detached child.
+
+    The daemon also warms the next track, but it can attach to a freshly
+    started mpv during the same window a new queue is loading and miss the
+    first flush. This one-shot child re-runs shortly after playback starts,
+    long after the playlist is populated, so the first next-track precache is
+    deterministic. It is idempotent: a cached track is detected immediately.
+    Never raises.
+    """
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.realpath(__file__), "precache"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception:
+        pass
+
+
 def mpv_play(video_id):
     ensure_daemon()
     mpv_kill()
@@ -629,6 +847,10 @@ def video_id_from_url(url):
     """Pull the video id out of a watch/youtu.be URL (or a bare id)."""
     if not isinstance(url, str) or not url:
         return None
+    # A precached queue entry plays as a local file rather than a URL.
+    local = cache_audio_video_id(url)
+    if local:
+        return local
     if "v=" in url:
         for part in url.split("?"):
             if "v=" in part:
@@ -650,7 +872,7 @@ def extract_video_id(props):
     return video_id_from_url(path)
 
 
-def write_status_from_mpv(props, notify=True):
+def write_status_from_mpv(props, notify=True, spawn_precache=False):
     if not props:
         status = {"ok": True, "playing": False}
         write_status(status)
@@ -661,6 +883,15 @@ def write_status_from_mpv(props, notify=True):
         title = ""
     artist = props.get("metadata/by-key/artist", "")
     album = props.get("metadata/by-key/album", "")
+    # A precached local file carries no stream metadata: mpv reports its file
+    # name as the title, so take title/artist/album from the track sidecar.
+    local_id = cache_audio_video_id(props.get("path") or props.get("filename") or "")
+    if local_id:
+        local_meta = load_track_meta().get(local_id)
+        local_meta = local_meta if isinstance(local_meta, dict) else {}
+        title = str(local_meta.get("title") or "")
+        artist = str(local_meta.get("artist") or "")
+        album = str(local_meta.get("album") or "")
     duration = props.get("duration", 0) or 0
     position = props.get("time-pos", 0) or 0
     volume = props.get("volume", 100)
@@ -684,6 +915,11 @@ def write_status_from_mpv(props, notify=True):
     if notify:
         notify_track_change(previous, status)
     write_status(status)
+    # A one-shot CLI playback start schedules the next-track precache in a
+    # detached child, so the first warm does not depend on when the daemon
+    # happens to attach to the new mpv. The daemon never sets this flag.
+    if spawn_precache and status.get("playing") and video_id:
+        spawn_precache_next()
     return status
 
 
@@ -768,7 +1004,7 @@ def cmd_play(args):
     video_id = args[0]
     mpv_play(video_id)
     props = wait_for_metadata()
-    write_status_from_mpv(props)
+    write_status_from_mpv(props, spawn_precache=True)
     title = (props or {}).get("media-title") or ""
     if _looks_like_url_title(title):
         title = ""
@@ -1027,10 +1263,20 @@ def cmd_create_playlist(args):
 
 
 def cmd_playlist_tracks(args):
+    args, refresh = _strip_refresh(args)
     if not args:
         fail("Usage: yt-music-ctl playlist <playlistId>")
     playlist_id = args[0]
-    ytm = get_ytmusic()
+    key = [playlist_id]
+    ttl = METADATA_CACHE_TTL["playlist"]
+    if not refresh:
+        payload, fresh = cache_read("playlist", key, ttl)
+        if fresh and payload is not None:
+            print(json.dumps(_cache_served(payload)))
+            return
+    ytm = _ytmusic_for_cache("playlist", key, ttl)
+    if ytm is None:
+        return
     try:
         pl = ytm.get_playlist(playlist_id, limit=100)
         tracks = []
@@ -1047,14 +1293,18 @@ def cmd_playlist_tracks(args):
                 "thumbnail": (track.get("thumbnails", [{}])[-1].get("url", "")
                               if track.get("thumbnails") else ""),
             })
-        print(json.dumps({
+        payload = {
             "ok": True,
             "title": pl.get("title", ""),
             "playlistId": playlist_id,
-            "tracks": tracks
-        }))
+            "tracks": tracks,
+            "cached": False,
+        }
+        cache_write("playlist", key, payload)
+        print(json.dumps(payload))
     except Exception as e:
-        print(json.dumps({"ok": False, "error": str(e)}))
+        if not _serve_stale("playlist", key, ttl):
+            print(json.dumps({"ok": False, "error": str(e)}))
 
 
 def cmd_remove(args):
@@ -1183,6 +1433,7 @@ def cmd_liked(args):
 
 
 def cmd_library(args):
+    args, refresh = _strip_refresh(args)
     if not args or args[0] not in ("songs", "albums", "artists", "playlists"):
         fail("Usage: yt-music-ctl library <songs|albums|artists|playlists> [limit]")
     kind = args[0]
@@ -1192,7 +1443,16 @@ def cmd_library(args):
             limit = max(1, min(500, int(args[1])))
         except ValueError:
             fail("Invalid limit")
-    ytm = get_ytmusic()
+    key = [kind, limit]
+    ttl = METADATA_CACHE_TTL["library"]
+    if not refresh:
+        payload, fresh = cache_read("library", key, ttl)
+        if fresh and payload is not None:
+            print(json.dumps(_cache_served(payload)))
+            return
+    ytm = _ytmusic_for_cache("library", key, ttl)
+    if ytm is None:
+        return
     try:
         if kind == "songs":
             rows = ytm.get_library_songs(limit=limit) or []
@@ -1206,21 +1466,34 @@ def cmd_library(args):
         else:  # playlists
             rows = ytm.get_library_playlists(limit=limit) or []
             items = [playlist_row(p) for p in rows if p.get("playlistId")]
-        print(json.dumps({"ok": True, "kind": kind, "items": items}))
+        payload = {"ok": True, "kind": kind, "items": items, "cached": False}
+        cache_write("library", key, payload)
+        print(json.dumps(payload))
     except Exception as e:
-        print(json.dumps({"ok": False, "kind": kind, "error": str(e)}))
+        if not _serve_stale("library", key, ttl):
+            print(json.dumps({"ok": False, "kind": kind, "error": str(e)}))
 
 
 def cmd_album(args):
+    args, refresh = _strip_refresh(args)
     if not args:
         fail("Usage: yt-music-ctl album <browseId>")
     browse_id = args[0]
-    ytm = get_ytmusic()
+    key = [browse_id]
+    ttl = METADATA_CACHE_TTL["album"]
+    if not refresh:
+        payload, fresh = cache_read("album", key, ttl)
+        if fresh and payload is not None:
+            print(json.dumps(_cache_served(payload)))
+            return
+    ytm = _ytmusic_for_cache("album", key, ttl)
+    if ytm is None:
+        return
     try:
         album = ytm.get_album(browse_id)
         thumbs = album.get("thumbnails") or []
         duration_seconds = int(album.get("duration_seconds") or 0)
-        print(json.dumps({
+        payload = {
             "ok": True,
             "browseId": browse_id,
             "title": album.get("title", ""),
@@ -1235,16 +1508,30 @@ def cmd_album(args):
             "description": album.get("description", "") or "",
             "explicit": bool(album.get("isExplicit")),
             "items": [song_row(t) for t in (album.get("tracks") or []) if t.get("videoId")],
-        }))
+            "cached": False,
+        }
+        cache_write("album", key, payload)
+        print(json.dumps(payload))
     except Exception as e:
-        print(json.dumps({"ok": False, "error": str(e)}))
+        if not _serve_stale("album", key, ttl):
+            print(json.dumps({"ok": False, "error": str(e)}))
 
 
 def cmd_artist(args):
+    args, refresh = _strip_refresh(args)
     if not args:
         fail("Usage: yt-music-ctl artist <browseId>")
     browse_id = args[0]
-    ytm = get_ytmusic()
+    key = [browse_id]
+    ttl = METADATA_CACHE_TTL["artist"]
+    if not refresh:
+        payload, fresh = cache_read("artist", key, ttl)
+        if fresh and payload is not None:
+            print(json.dumps(_cache_served(payload)))
+            return
+    ytm = _ytmusic_for_cache("artist", key, ttl)
+    if ytm is None:
+        return
     try:
         artist = ytm.get_artist(browse_id)
         songs = ((artist.get("songs") or {}).get("results") or [])
@@ -1254,7 +1541,7 @@ def cmd_artist(args):
         top_songs = [song_row(t) for t in songs if t.get("videoId")]
         album_rows = [library_album_row(a) for a in albums if a.get("browseId")]
         single_rows = [library_album_row(s) for s in singles if s.get("browseId")]
-        print(json.dumps({
+        payload = {
             "ok": True,
             "browseId": browse_id,
             "name": artist.get("name", ""),
@@ -1267,12 +1554,17 @@ def cmd_artist(args):
             "albums": album_rows,
             "singles": single_rows,
             "items": top_songs + album_rows + single_rows,
-        }))
+            "cached": False,
+        }
+        cache_write("artist", key, payload)
+        print(json.dumps(payload))
     except Exception as e:
-        print(json.dumps({"ok": False, "error": str(e)}))
+        if not _serve_stale("artist", key, ttl):
+            print(json.dumps({"ok": False, "error": str(e)}))
 
 
 def cmd_search(args):
+    args, refresh = _strip_refresh(args)
     search_filters = ("songs", "albums", "artists", "playlists")
     if args and args[0] == "-f":
         if len(args) < 2 or args[1] not in search_filters:
@@ -1282,11 +1574,21 @@ def cmd_search(args):
     else:
         filter_kind = "songs"
         query = " ".join(args)
-    if not query.strip():
+    query = " ".join(query.split())
+    if not query:
         fail("Usage: yt-music-ctl search [-f songs|albums|artists|playlists] <query>")
     expected = {"songs": "song", "albums": "album",
                 "artists": "artist", "playlists": "playlist"}[filter_kind]
-    ytm = get_ytmusic(require_auth=False)
+    key = [filter_kind, query]
+    ttl = METADATA_CACHE_TTL["search"]
+    if not refresh:
+        payload, fresh = cache_read("search", key, ttl)
+        if fresh and payload is not None:
+            print(json.dumps(_cache_served(payload)))
+            return
+    ytm = _ytmusic_for_cache("search", key, ttl, require_auth=False)
+    if ytm is None:
+        return
     try:
         results = ytm.search(query, filter=filter_kind, limit=20)
         items = []
@@ -1298,20 +1600,33 @@ def cmd_search(args):
                 items.append(row)
             if len(items) >= 50:
                 break
-        print(json.dumps({"ok": True, "query": query, "filter": filter_kind,
-                          "items": items}))
+        payload = {"ok": True, "query": query, "filter": filter_kind,
+                   "items": items, "cached": False}
+        cache_write("search", key, payload)
+        print(json.dumps(payload))
     except Exception as e:
-        print(json.dumps({"ok": False, "error": str(e)}))
+        if not _serve_stale("search", key, ttl):
+            print(json.dumps({"ok": False, "error": str(e)}))
 
 
 def cmd_home(args):
+    args, refresh = _strip_refresh(args)
     sections = 3
     if args:
         try:
             sections = max(1, min(8, int(args[0])))
         except ValueError:
             fail("Usage: yt-music-ctl home [sections]")
-    ytm = get_ytmusic()
+    key = [sections]
+    ttl = METADATA_CACHE_TTL["home"]
+    if not refresh:
+        payload, fresh = cache_read("home", key, ttl)
+        if fresh and payload is not None:
+            print(json.dumps(_cache_served(payload)))
+            return
+    ytm = _ytmusic_for_cache("home", key, ttl)
+    if ytm is None:
+        return
     try:
         feed = ytm.get_home(limit=sections) or []
         items = []
@@ -1324,39 +1639,69 @@ def cmd_home(args):
                     break
             if len(items) >= 200:
                 break
-        print(json.dumps({"ok": True, "items": items}))
+        payload = {"ok": True, "items": items, "cached": False}
+        cache_write("home", key, payload)
+        print(json.dumps(payload))
     except Exception as e:
-        print(json.dumps({"ok": False, "error": str(e)}))
+        if not _serve_stale("home", key, ttl):
+            print(json.dumps({"ok": False, "error": str(e)}))
 
 
 def cmd_history(args):
+    args, refresh = _strip_refresh(args)
     limit = 100
     if args:
         try:
             limit = max(1, min(300, int(args[0])))
         except ValueError:
             fail("Usage: yt-music-ctl history [limit]")
-    ytm = get_ytmusic()
+    key = [limit]
+    ttl = METADATA_CACHE_TTL["history"]
+    if not refresh:
+        payload, fresh = cache_read("history", key, ttl)
+        if fresh and payload is not None:
+            print(json.dumps(_cache_served(payload)))
+            return
+    ytm = _ytmusic_for_cache("history", key, ttl)
+    if ytm is None:
+        return
     try:
         rows = ytm.get_history() or []
         items = [song_row(t) for t in rows[:limit] if t.get("videoId")]
-        print(json.dumps({"ok": True, "items": items}))
+        payload = {"ok": True, "items": items, "cached": False}
+        cache_write("history", key, payload)
+        print(json.dumps(payload))
     except Exception as e:
-        print(json.dumps({"ok": False, "error": str(e)}))
+        if not _serve_stale("history", key, ttl):
+            print(json.dumps({"ok": False, "error": str(e)}))
 
 
 def cmd_lyrics(args):
+    args, refresh = _strip_refresh(args)
     if len(args) != 1 or not valid_video_id(args[0]):
         fail("Usage: yt-music-ctl lyrics <videoId>")
     video_id = args[0]
-    ytm = get_ytmusic()
+    key = [video_id]
+    ttl = METADATA_CACHE_TTL["lyrics"]
+    if not refresh:
+        payload, fresh = cache_read("lyrics", key, ttl)
+        if fresh and payload is not None:
+            print(json.dumps(_cache_served(payload)))
+            return
+    ytm = _ytmusic_for_cache("lyrics", key, ttl)
+    if ytm is None:
+        return
     try:
         watch = ytm.get_watch_playlist(video_id)
         lyrics_id = watch.get("lyrics") if isinstance(watch, dict) else None
         if not lyrics_id:
             # Plenty of tracks genuinely have no lyrics — that is not an error.
-            print(json.dumps({"ok": True, "videoId": video_id,
-                              "hasLyrics": False, "lines": [], "source": None}))
+            # The resolved "no lyrics" answer is still cacheable.
+            payload = {"ok": True, "videoId": video_id,
+                       "hasLyrics": False, "lines": [], "source": None,
+                       "cached": False}
+            cache_write("lyrics", key, payload)
+            print(json.dumps(payload))
             return
         data = ytm.get_lyrics(lyrics_id) or {}
         raw_lines = [line.strip() for line in str(data.get("lyrics") or "").split("\n")]
@@ -1391,16 +1736,21 @@ def cmd_lyrics(args):
             synced = None
         if not isinstance(synced, list) or not synced:
             synced = None
-        print(json.dumps({
+        payload = {
             "ok": True,
             "videoId": video_id,
             "hasLyrics": True,
             "source": data.get("source") or None,
             "lines": lines,
             "synced": synced,
-        }))
+            "cached": False,
+        }
+        cache_write("lyrics", key, payload)
+        print(json.dumps(payload))
     except Exception as e:
-        print(json.dumps({"ok": False, "error": str(e)}))
+        # Only successful answers are cached, so anything stale here is good.
+        if not _serve_stale("lyrics", key, ttl):
+            print(json.dumps({"ok": False, "error": str(e)}))
 
 
 def cmd_thumbnail(args):
@@ -1475,11 +1825,526 @@ def cmd_image(args):
         fail(f"Image fetch failed: {exc}")
 
 
+# ------------------------------------------------------------- precache audio
+
+def audio_cache_path(video_id):
+    """Existing cached audio file for video_id, or "" when there is none.
+
+    Only regular files whose stem is exactly `<videoId>.` are considered, so
+    neither a planted symlink nor a lookalike id can be returned.
+    """
+    if not valid_video_id(video_id):
+        return ""
+    try:
+        names = os.listdir(AUDIO_CACHE_DIR)
+    except OSError:
+        return ""
+    for name in names:
+        if not name.startswith(video_id + "."):
+            continue
+        path = os.path.join(AUDIO_CACHE_DIR, name)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            return path
+    return ""
+
+
+def cache_audio_video_id(path):
+    """videoId for a local precached audio path, else "".
+
+    mpv reports `path`/`filename` verbatim, so a track played from the cache
+    is identified by its file name instead of a watch URL.
+    """
+    if not isinstance(path, str) or not path.startswith(AUDIO_CACHE_DIR + os.sep):
+        return ""
+    stem = os.path.basename(path).rsplit(".", 1)[0]
+    return stem if valid_video_id(stem) else ""
+
+
+def _audio_cache_entries():
+    """(mtime, size, path) for each regular cache file, oldest first.
+
+    Symlinks and other non-regular files are skipped (lstat only), so this
+    never follows a planted link — same rule as _cache_entries.
+    """
+    entries = []
+    try:
+        names = os.listdir(AUDIO_CACHE_DIR)
+    except OSError:
+        return entries
+    for name in names:
+        path = os.path.join(AUDIO_CACHE_DIR, name)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        entries.append((st.st_mtime, st.st_size, path))
+    entries.sort(key=lambda item: item[0])
+    return entries
+
+
+def _cleanup_stale_downloads(grace=AUDIO_DOWNLOAD_GRACE):
+    """Remove leftover `.dl-*` temp dirs from interrupted downloads.
+
+    A normally-failing yt-dlp run is cleaned up in precache_track's finally
+    block, but SIGTERM (e.g. the daemon being stopped mid-download) skips it
+    and would otherwise leak a multi-megabyte file that audio_cache_prune
+    never sees. Only dirs older than `grace` seconds are removed so a live
+    download started by another process is never destroyed. Never raises.
+    """
+    cutoff = time.time() - max(0.0, float(grace))
+    try:
+        names = os.listdir(AUDIO_CACHE_DIR)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(".dl-"):
+            continue
+        path = os.path.join(AUDIO_CACHE_DIR, name)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            continue
+        if st.st_mtime > cutoff:
+            continue
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def audio_cache_prune(max_bytes=None):
+    """Delete oldest files until the cache fits the byte cap. Never raises."""
+    cap = AUDIO_CACHE_MAX_BYTES if max_bytes is None else int(max_bytes)
+    try:
+        _cleanup_stale_downloads()
+        entries = _audio_cache_entries()
+        total = sum(size for _mtime, size, _path in entries)
+        while entries and total > cap:
+            _mtime, size, path = entries.pop(0)
+            total -= size
+            try:
+                st = os.lstat(path)
+                if stat.S_ISREG(st.st_mode):
+                    os.unlink(path)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def _download_output(tmp_dir):
+    """Largest regular file yt-dlp wrote into tmp_dir, or ""."""
+    candidates = []
+    try:
+        names = os.listdir(tmp_dir)
+    except OSError:
+        return ""
+    for name in names:
+        if name.startswith(".") or name.endswith((".part", ".ytdl")):
+            continue
+        path = os.path.join(tmp_dir, name)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            candidates.append((st.st_size, path))
+    if not candidates:
+        return ""
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def _ytdlp_error(proc):
+    """Short, single-line reason from a failed yt-dlp run."""
+    text = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+    line = text[-1] if text else ""
+    if len(line) > 160:
+        line = line[:157] + "..."
+    return line or f"yt-dlp exited {proc.returncode}"
+
+
+def precache_track(video_id, force=False):
+    """Download one track's audio into AUDIO_CACHE_DIR. Never raises.
+
+    Returns {"ok", "error", "cached", "path"}: cached is True when the file
+    was already present (and force was not set), path is "" on failure.
+
+    yt-dlp runs as the system binary with the minimal flag set:
+
+        -f bestaudio/best --no-playlist --no-progress -o <tmpl> <url>
+
+    There is deliberately no `-x`/`--audio-format`: bestaudio for YouTube is a
+    single already-compressed stream (opus-in-webm or m4a), which mpv plays
+    natively through the same container it would have streamed. Skipping the
+    extract/convert step removes an ffmpeg dependency, a transcode, and a whole
+    class of partial-output failures, at the cost of a `.webm`/`.m4a` extension
+    instead of a fixed one (the file is renamed to `<videoId>.<ext>` either
+    way). Output goes to a private temp directory inside the cache so a failed
+    or interrupted run can never leave a partial file behind.
+    """
+    if not valid_video_id(video_id):
+        return {"ok": False, "error": "Invalid video ID", "cached": False, "path": ""}
+    tmp_dir = None
+    try:
+        os.makedirs(AUDIO_CACHE_DIR, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(AUDIO_CACHE_DIR, 0o700)
+        except OSError:
+            pass
+        # Reap temp dirs from downloads that died without running their
+        # finally block (e.g. the daemon was SIGTERM'd mid-download). Done
+        # before the cache-hit early return so a repeat call still cleans up.
+        _cleanup_stale_downloads()
+        existing = audio_cache_path(video_id)
+        if existing and not force:
+            try:
+                os.utime(existing, None)  # LRU touch: used is recent
+            except OSError:
+                pass
+            return {"ok": True, "error": "", "cached": True, "path": existing}
+        tmp_dir = tempfile.mkdtemp(dir=AUDIO_CACHE_DIR, prefix=".dl-")
+        template = os.path.join(tmp_dir, "%(id)s.%(ext)s")
+        url = f"https://music.youtube.com/watch?v={video_id}"
+        proc = subprocess.run(
+            [YTDLP_BIN, "-f", "bestaudio/best", "--no-playlist",
+             "--no-progress", "-o", template, url],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=AUDIO_PRECACHE_TIMEOUT)
+        if proc.returncode != 0:
+            return {"ok": False, "error": _ytdlp_error(proc),
+                    "cached": False, "path": ""}
+        produced = _download_output(tmp_dir)
+        if not produced:
+            return {"ok": False, "error": "yt-dlp produced no file",
+                    "cached": False, "path": ""}
+        if os.path.basename(produced).rsplit(".", 1)[0] != video_id:
+            return {"ok": False, "error": "yt-dlp returned a different video",
+                    "cached": False, "path": ""}
+        try:
+            st = os.lstat(produced)
+        except OSError:
+            st = None
+        if st is None or not stat.S_ISREG(st.st_mode):
+            return {"ok": False, "error": "yt-dlp produced no file",
+                    "cached": False, "path": ""}
+        if st.st_size <= 0:
+            return {"ok": False, "error": "Downloaded file is empty",
+                    "cached": False, "path": ""}
+        if st.st_size > AUDIO_CACHE_MAX_FILE_BYTES:
+            return {"ok": False, "error": "Audio file is too large",
+                    "cached": False, "path": ""}
+        extension = os.path.splitext(produced)[1]
+        if not extension or len(extension) > 8:
+            return {"ok": False, "error": "Unexpected output name",
+                    "cached": False, "path": ""}
+        target = os.path.join(AUDIO_CACHE_DIR, video_id + extension)
+        os.chmod(produced, 0o600)
+        os.replace(produced, target)
+        audio_cache_prune()
+        return {"ok": True, "error": "", "cached": False, "path": target}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Download timed out", "cached": False, "path": ""}
+    except Exception as exc:
+        message = str(exc) or exc.__class__.__name__
+        if len(message) > 160:
+            message = message[:157] + "..."
+        return {"ok": False, "error": message, "cached": False, "path": ""}
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _playlist_state():
+    """(playlist, playlist-pos) from mpv, or (None, -1) when unreadable."""
+    props = mpv_query(["playlist", "playlist-pos"])
+    if not isinstance(props, dict):
+        return None, -1
+    playlist = props.get("playlist")
+    playlist = playlist if isinstance(playlist, list) else None
+    try:
+        pos = int(props.get("playlist-pos"))
+    except (TypeError, ValueError):
+        pos = -1
+    return playlist, pos
+
+
+def next_queue_video_id():
+    """videoId of the queue entry after the current one, or ""."""
+    try:
+        playlist, pos = _playlist_state()
+        if not playlist or pos < 0 or pos + 1 >= len(playlist):
+            return ""
+        entry = playlist[pos + 1]
+        video_id = (video_id_from_url(entry.get("filename") or "")
+                    if isinstance(entry, dict) else None)
+        return video_id if valid_video_id(video_id) else ""
+    except Exception:
+        return ""
+
+
+def _remove_playlist_path(path):
+    """Drop the playlist entry that plays `path`, if there is one."""
+    try:
+        playlist, _pos = _playlist_state()
+        if not playlist:
+            return False
+        for index, entry in enumerate(playlist):
+            if isinstance(entry, dict) and entry.get("filename") == path:
+                mpv_send("playlist-remove", index)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def install_cached_next(video_id, path):
+    """Make the queue's next entry play the local cached file.
+
+    mpv's playlist holds streaming URLs, so "play from cache" means swapping
+    that entry in place: `loadfile <path> insert-next` puts the local file at
+    pos+1 and pushes the original next entry down to pos+2, and that displaced
+    duplicate is removed only after its videoId is confirmed to be the one we
+    replaced. The queue keeps its length and its order; on any mismatch nothing
+    is removed (or the just-inserted entry is rolled back). The swap is also
+    skipped when the track sidecar has no title for the id (mpv would otherwise
+    expose a bare file name to the UI), which leaves the entry streaming exactly
+    as before. Never raises.
+
+    Returns {"ok": bool, "error": str, "installed": bool}.
+    """
+    if not valid_video_id(video_id) or not path:
+        return {"ok": False, "error": "Nothing to install", "installed": False}
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode):
+            return {"ok": False, "error": "Cache file missing", "installed": False}
+    except OSError:
+        return {"ok": False, "error": "Cache file missing", "installed": False}
+    if not mpv_is_running():
+        return {"ok": False, "error": "Nothing playing", "installed": False}
+    try:
+        playlist, pos = _playlist_state()
+        if not playlist or pos < 0 or pos + 1 >= len(playlist):
+            return {"ok": False, "error": "No next track", "installed": False}
+        nxt = pos + 1
+        entry = playlist[nxt] if isinstance(playlist[nxt], dict) else {}
+        filename = entry.get("filename") or ""
+        if filename == path:
+            return {"ok": True, "error": "", "installed": False}
+        if video_id_from_url(filename) != video_id:
+            return {"ok": False, "error": "Next queue entry changed",
+                    "installed": False}
+        # Swap the file in only when the sidecar can still name the track:
+        # the audio stream carries no tags, so without a stored title the bar
+        # and queue-list would show a bare file name — worse than streaming.
+        # The audio stays precached either way.
+        sidecar = load_track_meta().get(video_id)
+        if not (isinstance(sidecar, dict) and str(sidecar.get("title") or "").strip()):
+            return {"ok": False, "error": "No stored metadata for this track",
+                    "installed": False}
+        resp = mpv_send("loadfile", [path, "insert-next"])
+        if not isinstance(resp, dict) or resp.get("error") != "success":
+            return {"ok": False, "error": "mpv refused the cached file",
+                    "installed": False}
+        after, after_pos = _playlist_state()
+        if (not after or len(after) != len(playlist) + 1 or after_pos != pos
+                or not isinstance(after[nxt], dict)
+                or after[nxt].get("filename") != path):
+            _remove_playlist_path(path)
+            return {"ok": False, "error": "Queue changed during install",
+                    "installed": False}
+        displaced = after[nxt + 1] if nxt + 1 < len(after) else {}
+        displaced_id = (video_id_from_url(displaced.get("filename") or "")
+                        if isinstance(displaced, dict) else None)
+        if displaced_id != video_id:
+            # Not the entry we meant to replace: undo the insert instead of
+            # deleting somebody else's queue entry.
+            mpv_send("playlist-remove", nxt)
+            return {"ok": False, "error": "Queue changed during install",
+                    "installed": False}
+        mpv_send("playlist-remove", nxt + 1)
+        final, final_pos = _playlist_state()
+        if (not final or len(final) != len(playlist) or final_pos != pos
+                or not isinstance(final[nxt], dict)
+                or final[nxt].get("filename") != path):
+            return {"ok": False, "error": "Queue changed during install",
+                    "installed": False}
+        try:
+            os.utime(path, None)  # keep the queued file out of the first evictions
+        except OSError:
+            pass
+        return {"ok": True, "error": "", "installed": True}
+    except Exception as exc:
+        message = str(exc) or exc.__class__.__name__
+        if len(message) > 160:
+            message = message[:157] + "..."
+        return {"ok": False, "error": message, "installed": False}
+
+
+def precache_next(force=False):
+    """Precache the queue entry after the current one. Never raises.
+
+    Returns {"ok", "videoId", "error", "cached", "path"}; videoId is "" when
+    there is no identifiable next entry.
+    """
+    try:
+        video_id = next_queue_video_id()
+        if not video_id:
+            return {"ok": False, "videoId": "", "error": "No next track",
+                    "cached": False, "path": ""}
+        result = precache_track(video_id, force=force)
+        return {"ok": bool(result.get("ok")), "videoId": video_id,
+                "error": str(result.get("error") or ""),
+                "cached": bool(result.get("cached")),
+                "path": str(result.get("path") or "")}
+    except Exception as exc:
+        return {"ok": False, "videoId": "", "error": str(exc),
+                "cached": False, "path": ""}
+
+
+# One background download at a time, plus two remembered ids:
+#   requested - last target handed to a worker (never downloaded twice in a row)
+#   for_track - the currently playing id whose "next" entry has been handled
+# so the status loop can ask for a precache on every flush without queueing
+# work up or re-querying mpv in a tight loop.
+_PRECACHE_LOCK = threading.Lock()
+_PRECACHE_STATE = {"requested": "", "for_track": ""}
+
+
+def schedule_precache(current_id):
+    """Precache (and install) the entry after `current_id` on a worker thread.
+
+    Returns True when a worker thread was started. At most one worker runs at
+    a time — while a download is in flight the lock is held and this returns
+    immediately without touching mpv, so the caller can simply ask again on its
+    next flush. Every exception inside the worker is swallowed and nothing is
+    logged.
+    """
+    if not valid_video_id(current_id):
+        return False
+    if _PRECACHE_STATE["for_track"] == current_id:
+        return False  # this playing track was already handled
+    if not _PRECACHE_LOCK.acquire(blocking=False):
+        return False  # a download is already running; try again on next flush
+    started = False
+    try:
+        target = next_queue_video_id()
+        if not target:
+            # The playlist may simply not be readable yet (mpv still starting,
+            # or enqueue's fresh mpv not attached). Do NOT latch for_track, or
+            # this track would be marked handled and never precached.
+            return False
+        if target == _PRECACHE_STATE["requested"]:
+            # A worker for this exact target ran (or is running); nothing new.
+            _PRECACHE_STATE["for_track"] = current_id
+            return False
+
+        def worker():
+            try:
+                result = precache_track(target)
+                if result.get("ok"):
+                    install_cached_next(target, str(result.get("path") or ""))
+            except Exception:
+                pass
+            finally:
+                _PRECACHE_LOCK.release()
+
+        threading.Thread(target=worker, daemon=True, name="yt-music-precache").start()
+        _PRECACHE_STATE["requested"] = target
+        _PRECACHE_STATE["for_track"] = current_id
+        started = True
+        return True
+    except Exception:
+        return False
+    finally:
+        if not started:
+            try:
+                _PRECACHE_LOCK.release()
+            except RuntimeError:
+                pass
+
+
+def cmd_precache(args):
+    if args:
+        video_id = args[0]
+        if not valid_video_id(video_id):
+            print(json.dumps({"ok": False, "error": "Invalid video ID"}))
+            return
+        result = precache_track(video_id)
+        if result.get("ok"):
+            print(json.dumps({"ok": True, "videoId": video_id,
+                              "cached": bool(result.get("cached")),
+                              "path": str(result.get("path") or "")}))
+        else:
+            print(json.dumps({"ok": False,
+                              "error": str(result.get("error") or "Download failed")}))
+        return
+    if not mpv_is_running():
+        print(json.dumps({"ok": False, "error": "Nothing playing"}))
+        return
+    result = precache_next()
+    if not result.get("ok"):
+        print(json.dumps({"ok": False,
+                          "error": str(result.get("error") or "Nothing to precache")}))
+        return
+    # Cache first, then point the queue's next entry at the local file.
+    install_cached_next(str(result.get("videoId") or ""), str(result.get("path") or ""))
+    print(json.dumps({"ok": True, "videoId": result.get("videoId"),
+                      "cached": bool(result.get("cached")),
+                      "path": str(result.get("path") or "")}))
+
+
+def _mix_launch(track_list):
+    """Replace the current mpv playlist with the mix and refresh status.
+
+    This is the playback side effect of cmd_mix: it must run on every path
+    that serves a mix, cache hit included.
+    """
+    remember_tracks(track_list)
+    mpv_kill()
+    urls = [f"https://music.youtube.com/watch?v={t['videoId']}" for t in track_list]
+    ensure_private_runtime_dir()
+    proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
+                             f"--input-ipc-server={MPV_SOCKET}",
+                             "--keep-open=no"] + urls,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    json_dump(MPV_PID_PATH, mpv_pid_record(proc))
+    wait_for_mpv()
+    props = wait_for_metadata()
+    write_status_from_mpv(props, spawn_precache=True)
+
+
+def _mix_output(payload):
+    """The printed JSON for a mix, rebuilt from a cached metadata record."""
+    return {"ok": True, "mix": True, "seedId": payload.get("seedId", ""),
+            "tracks": len(payload.get("trackList") or [])}
+
+
 def cmd_mix(args):
+    args, refresh = _strip_refresh(args)
     ensure_daemon()
     if not args:
         fail("Usage: yt-music-ctl mix <videoId> [playlistId]")
     seed_id = args[0]
+    key = list(args)
+    ttl = METADATA_CACHE_TTL["mix"]
+    if not refresh:
+        payload, fresh = cache_read("mix", key, ttl)
+        track_list = payload.get("trackList") if isinstance(payload, dict) else None
+        if fresh and isinstance(track_list, list) and track_list:
+            # Metadata comes from the cache, playback still happens here.
+            _mix_launch(track_list)
+            print(json.dumps(_cache_served(_mix_output(payload))))
+            return
     ytm = get_ytmusic(require_auth=False)
     try:
         watchlist = ytm.get_watch_playlist(seed_id, limit=50)
@@ -1501,26 +2366,21 @@ def cmd_mix(args):
         if not tracks:
             print(json.dumps({"ok": False, "error": "No mix tracks found"}))
             return
-        remember_tracks(tracks)
-        mpv_kill()
-        urls = [f"https://music.youtube.com/watch?v={t['videoId']}" for t in tracks]
-        ensure_private_runtime_dir()
-        proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
-                                 f"--input-ipc-server={MPV_SOCKET}",
-                                 "--keep-open=no"] + urls,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        json_dump(MPV_PID_PATH, mpv_pid_record(proc))
-        wait_for_mpv()
-        props = wait_for_metadata()
-        write_status_from_mpv(props)
-        print(json.dumps({
-            "ok": True,
-            "mix": True,
-            "seedId": seed_id,
-            "tracks": len(tracks)
-        }))
+        _mix_launch(tracks)
+        payload = {"seedId": seed_id, "trackList": tracks}
+        cache_write("mix", key, payload)
+        print(json.dumps({**_mix_output(payload), "cached": False}))
     except Exception as e:
-        print(json.dumps({"ok": False, "error": str(e)}))
+        stale, _fresh = cache_read("mix", key, ttl)
+        stale_tracks = stale.get("trackList") if isinstance(stale, dict) else None
+        if isinstance(stale_tracks, list) and stale_tracks:
+            try:
+                _mix_launch(stale_tracks)
+            except Exception:
+                pass
+            print(json.dumps(_cache_served(_mix_output(stale), stale=True)))
+        else:
+            print(json.dumps({"ok": False, "error": str(e)}))
 
 
 def cmd_queue_playlist(args):
@@ -1562,7 +2422,7 @@ def cmd_queue_playlist(args):
         json_dump(MPV_PID_PATH, mpv_pid_record(proc))
         wait_for_mpv()
         props = wait_for_metadata()
-        write_status_from_mpv(props)
+        write_status_from_mpv(props, spawn_precache=True)
         print(json.dumps({
             "ok": True,
             "queued": True,
@@ -1627,7 +2487,7 @@ def cmd_enqueue(args):
             json_dump(MPV_PID_PATH, mpv_pid_record(proc))
             wait_for_mpv()
             props = wait_for_metadata()
-            write_status_from_mpv(props)
+            write_status_from_mpv(props, spawn_precache=True)
             print(json.dumps({
                 "ok": True,
                 "played": True,
@@ -1700,7 +2560,7 @@ def cmd_enqueue_files(args):
             json_dump(MPV_PID_PATH, mpv_pid_record(proc))
             wait_for_mpv()
             props = wait_for_metadata()
-            write_status_from_mpv(props)
+            write_status_from_mpv(props, spawn_precache=True)
             print(json.dumps({
                 "ok": True,
                 "played": True,
@@ -2038,6 +2898,8 @@ def monitor_mpv_events():
     notify_key = None
     notify_deadline = 0.0
     current_title = ""
+    precache_retry_at = 0.0
+    precache_retry_id = ""
     # Snapshot of the last status that is safe to compare against: the ungated
     # status write would otherwise put the new (videoId, title) into the file
     # during a hold and make notify_track_change's backstop swallow the
@@ -2046,11 +2908,25 @@ def monitor_mpv_events():
 
     def flush():
         nonlocal last_signature, notify_key, notify_previous
+        nonlocal precache_retry_at, precache_retry_id
         props = dict(cache)
         for key, default in (("pause", True), ("media-title", ""), ("path", ""),
                              ("volume", 100), ("duration", 0), ("time-pos", 0)):
             if props.get(key) is None:
                 props[key] = default
+        # Retry precache on a timer as well as on property changes: the very
+        # first flush after mpv starts can race the playlist being populated,
+        # and a signature that never changes again would otherwise skip it.
+        retry_id = str(props.get("path") or "")
+        now = time.time()
+        if retry_id and retry_id != precache_retry_id:
+            precache_retry_id = retry_id
+            precache_retry_at = now + 3.0
+        elif retry_id and now >= precache_retry_at:
+            precache_retry_at = now + 3.0
+            current_id = extract_video_id(props)
+            if valid_video_id(current_id):
+                schedule_precache(current_id)
         try:
             signature = (
                 not bool(props.get("pause", True)),
@@ -2077,6 +2953,10 @@ def monitor_mpv_events():
             return
         title = status.get("title") or ""
         video_id = status.get("videoId") or ""
+        if video_id and status.get("playing"):
+            # Warm the next queue entry's audio off-thread whenever the
+            # playing track changes (dedup + one-at-a-time live in there).
+            schedule_precache(video_id)
         if not video_id or _looks_like_url_title(title):
             notify_previous = status
             return
@@ -2195,6 +3075,14 @@ def run_daemon_loop():
                     time.sleep(0.5)
                     continue
                 idle = False
+                # Kick the next-track precache from the loop as well as from
+                # flush(): if the daemon attached to a fresh mpv mid-startup,
+                # a flush may have fired before the playlist was populated.
+                # schedule_precache is idempotent and cheap when it has
+                # nothing to do.
+                _playing_id = extract_video_id(get_mpv_props() or {})
+                if valid_video_id(_playing_id):
+                    schedule_precache(_playing_id)
                 monitor_mpv_events()
                 if not mpv_is_running():
                     write_status({"ok": True, "playing": False})
@@ -2280,6 +3168,7 @@ COMMANDS = {
     "enqueue-files": cmd_enqueue_files,
     "thumbnail": cmd_thumbnail,
     "image": cmd_image,
+    "precache": cmd_precache,
     "lyrics": cmd_lyrics,
     "mix": cmd_mix,
     "queue": cmd_queue_playlist,
@@ -2333,6 +3222,7 @@ def main():
         print("  enqueue-files <play|queue|next> <videoId...>   Play/queue an explicit list of videoIds")
         print("  thumbnail <videoId>     Fetch a bounded album thumbnail")
         print("  image <url>             Cache an album/artist cover image")
+        print("  precache [videoId]      Prefetch next-track audio (or one id)")
         print("  lyrics <videoId>        Fetch lyrics (plain, plus synced when available)")
         print("  mix <videoId>            Play radio mix from seed")
         print("  queue <playlistId>       Queue and play a playlist")
@@ -2347,6 +3237,10 @@ def main():
         print("  ensure-daemon            Start the status daemon in the background")
         print("  daemon-stop              Stop the status daemon")
         print("  watch                    Legacy alias for daemon")
+        print()
+        print("Metadata read commands (search, library, home, history, album,")
+        print("artist, playlist, mix, lyrics) accept -r/--refresh anywhere to")
+        print("bypass the on-disk metadata cache.")
         sys.exit(0)
 
     cmd = sys.argv[1]
