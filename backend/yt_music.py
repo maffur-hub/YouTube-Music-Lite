@@ -12,6 +12,7 @@ State lives under:
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -41,6 +42,8 @@ MPV_SOCKET = os.path.join(MPV_RUNTIME_DIR, "mpv.sock")
 MPV_PID_PATH = os.path.join(MPV_RUNTIME_DIR, "mpv.pid")
 LIKES_TITLE = "Liked Music"
 THUMBNAIL_CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "yt-music", "thumbs")
+IMAGE_CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "yt-music", "images")
+IMAGE_HOST_SUFFIXES = ("googleusercontent.com", "ytimg.com", "ggpht.com", "google.com")
 MAX_THUMBNAIL_BYTES = 1024 * 1024
 MAX_THUMBNAIL_DIMENSION = 4096
 MAX_THUMBNAIL_PIXELS = 16 * 1024 * 1024
@@ -91,6 +94,25 @@ def jpeg_dimensions(data):
                     int.from_bytes(data[offset + 5:offset + 7], "big"))
         offset += length
     return None
+
+
+def format_duration(seconds):
+    """Human-readable duration, e.g. "1 hr 27 min" / "42 min" / ""."""
+    try:
+        total = int(seconds or 0)
+    except (TypeError, ValueError):
+        return ""
+    if total <= 0:
+        return ""
+    hours, remainder = divmod(total, 3600)
+    minutes = remainder // 60
+    if not hours and not minutes:
+        minutes = 1
+    if hours and minutes:
+        return f"{hours} hr {minutes} min"
+    if hours:
+        return f"{hours} hr"
+    return f"{minutes} min"
 
 
 def json_dump(path, data, mode=0o600):
@@ -1196,6 +1218,8 @@ def cmd_album(args):
     ytm = get_ytmusic()
     try:
         album = ytm.get_album(browse_id)
+        thumbs = album.get("thumbnails") or []
+        duration_seconds = int(album.get("duration_seconds") or 0)
         print(json.dumps({
             "ok": True,
             "browseId": browse_id,
@@ -1203,6 +1227,13 @@ def cmd_album(args):
             "artist": ", ".join(a.get("name", "") for a in (album.get("artists") or [])),
             "year": album.get("year", "") or "",
             "audioPlaylistId": album.get("audioPlaylistId", ""),
+            "thumbnail": thumbs[-1].get("url", "") if thumbs else "",
+            "type": album.get("type", "") or "",
+            "trackCount": int(album.get("trackCount") or 0),
+            "durationSeconds": duration_seconds,
+            "duration": album.get("duration") or format_duration(duration_seconds),
+            "description": album.get("description", "") or "",
+            "explicit": bool(album.get("isExplicit")),
             "items": [song_row(t) for t in (album.get("tracks") or []) if t.get("videoId")],
         }))
     except Exception as e:
@@ -1219,14 +1250,23 @@ def cmd_artist(args):
         songs = ((artist.get("songs") or {}).get("results") or [])
         albums = ((artist.get("albums") or {}).get("results") or [])
         singles = ((artist.get("singles") or {}).get("results") or [])
+        thumbs = artist.get("thumbnails") or []
+        top_songs = [song_row(t) for t in songs if t.get("videoId")]
+        album_rows = [library_album_row(a) for a in albums if a.get("browseId")]
+        single_rows = [library_album_row(s) for s in singles if s.get("browseId")]
         print(json.dumps({
             "ok": True,
             "browseId": browse_id,
             "name": artist.get("name", ""),
             "subscribers": artist.get("subscribers", "") or "",
             "description": artist.get("description", "") or "",
-            "items": ([song_row(t) for t in songs if t.get("videoId")]
-                      + [library_album_row(a) for a in (albums + singles) if a.get("browseId")]),
+            "thumbnail": thumbs[-1].get("url", "") if thumbs else "",
+            "views": artist.get("views", "") or "",
+            "monthlyListeners": artist.get("monthlyListeners", "") or "",
+            "topSongs": top_songs,
+            "albums": album_rows,
+            "singles": single_rows,
+            "items": top_songs + album_rows + single_rows,
         }))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
@@ -1393,6 +1433,46 @@ def cmd_thumbnail(args):
                 os.unlink(temporary)
     except Exception as exc:
         fail(f"Thumbnail fetch failed: {exc}")
+
+
+def cmd_image(args):
+    if not args or not args[0].startswith(("http://", "https://")):
+        fail("Usage: yt-music-ctl image <url>")
+    url = args[0]
+    import urllib.parse
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if not any(host == suffix or host.endswith("." + suffix) for suffix in IMAGE_HOST_SUFFIXES):
+        fail("Image host not allowed")
+    os.makedirs(IMAGE_CACHE_DIR, mode=0o700, exist_ok=True)
+    key = hashlib.sha256(url.encode()).hexdigest()[:32]
+    path = os.path.join(IMAGE_CACHE_DIR, f"{key}.jpg")
+    try:
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            return
+        request = urllib.request.Request(url, headers={"User-Agent": "yt-music-ctl/1"})
+        with urllib.request.urlopen(request, timeout=8) as response:
+            data = response.read(MAX_THUMBNAIL_BYTES + 1)
+        if len(data) > MAX_THUMBNAIL_BYTES:
+            fail("Image is too large")
+        if data[:2] == b"\xff\xd8":
+            dimensions = jpeg_dimensions(data)
+            if (not dimensions or dimensions[0] > MAX_THUMBNAIL_DIMENSION or
+                    dimensions[1] > MAX_THUMBNAIL_DIMENSION or
+                    dimensions[0] * dimensions[1] > MAX_THUMBNAIL_PIXELS):
+                fail("Image dimensions are not allowed")
+        elif data[:4] != b"\x89PNG":
+            fail("Image is not a JPEG or PNG")
+        fd, temporary = tempfile.mkstemp(dir=IMAGE_CACHE_DIR, prefix=".img-", suffix=".jpg")
+        try:
+            with os.fdopen(fd, "wb") as output:
+                output.write(data)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    except Exception as exc:
+        fail(f"Image fetch failed: {exc}")
 
 
 def cmd_mix(args):
@@ -2199,6 +2279,7 @@ COMMANDS = {
     "enqueue": cmd_enqueue,
     "enqueue-files": cmd_enqueue_files,
     "thumbnail": cmd_thumbnail,
+    "image": cmd_image,
     "lyrics": cmd_lyrics,
     "mix": cmd_mix,
     "queue": cmd_queue_playlist,
@@ -2251,6 +2332,7 @@ def main():
         print("  enqueue <play|queue|next> <album|artist|playlist> <id>   Play/queue a whole album, artist or playlist")
         print("  enqueue-files <play|queue|next> <videoId...>   Play/queue an explicit list of videoIds")
         print("  thumbnail <videoId>     Fetch a bounded album thumbnail")
+        print("  image <url>             Cache an album/artist cover image")
         print("  lyrics <videoId>        Fetch lyrics (plain, plus synced when available)")
         print("  mix <videoId>            Play radio mix from seed")
         print("  queue <playlistId>       Queue and play a playlist")

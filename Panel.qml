@@ -65,6 +65,15 @@ Panel {
   property var libraryRows: []
   property string libraryRefId: ""
   property bool libraryExpanded: false
+  property string libraryThumbUrl: ""
+  property string libraryImageSource: ""
+  property string libraryMeta: ""
+  property string libraryDescription: ""
+  property bool libraryInfoOpen: false
+  readonly property bool libraryRichHeader: root.libraryExpanded
+    && (root.libraryKind === "album" || root.libraryKind === "artist")
+    && (root.libraryImageSource !== "" || root.libraryThumbUrl !== ""
+      || root.libraryMeta !== "" || root.libraryDescription !== "")
   readonly property var libraryList: root.libraryRows
   readonly property string activeListKind: root.searchResults.length > 0 ? "search"
     : (root.playlistTracks.length > 0 ? "playlist"
@@ -435,10 +444,19 @@ Panel {
     root.libraryRows = []
     root.libraryRefId = ""
     root.libraryExpanded = true
+    root.resetLibraryInfo()
     root.selectedIndex = -1
     root.statusText = ""
     libraryProc.command = command
     root.startProcess(libraryProc, "library")
+  }
+
+  function resetLibraryInfo() {
+    root.libraryThumbUrl = ""
+    root.libraryImageSource = ""
+    root.libraryMeta = ""
+    root.libraryDescription = ""
+    root.libraryInfoOpen = false
   }
 
   function openAlbum(browseId, title) {
@@ -449,6 +467,7 @@ Panel {
     root.libraryRows = []
     root.libraryRefId = browseId
     root.libraryExpanded = true
+    root.resetLibraryInfo()
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "album", browseId]
     root.startProcess(libraryProc, "library")
@@ -462,6 +481,7 @@ Panel {
     root.libraryRows = []
     root.libraryRefId = browseId
     root.libraryExpanded = true
+    root.resetLibraryInfo()
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "artist", browseId]
     root.startProcess(libraryProc, "library")
@@ -473,6 +493,7 @@ Panel {
     root.librarySubtitle = ""
     root.libraryRows = []
     root.libraryRefId = ""
+    root.resetLibraryInfo()
     root.selectedIndex = -1
   }
 
@@ -568,6 +589,16 @@ Panel {
     clearMenu(contextMenu)
     if (root.contextRow) {
       var navRow = root.contextRow
+      if (navRow.kind === "album")
+        addContextItem("Album info", function() {
+          root.openRow(navRow, root.contextSource === "search")
+          root.libraryInfoOpen = true
+        })
+      else if (navRow.kind === "artist")
+        addContextItem("Artist info", function() {
+          root.openRow(navRow, root.contextSource === "search")
+          root.libraryInfoOpen = true
+        })
       addContextItem("Play all", function() { root.enqueueNav("play", navRow.kind, navRow.browseId) })
       addContextItem("Add all to queue", function() { root.enqueueNav("queue", navRow.kind, navRow.browseId) })
       addContextItem("Open", function() { root.openRow(navRow, root.contextSource === "search") })
@@ -874,9 +905,27 @@ Panel {
         root.libraryTitle = root.boundedString(data.title || root.libraryTitle, 128)
         root.librarySubtitle = root.boundedString(
           (data.artist || "") + (data.year ? "  ·  " + data.year : ""), 256)
+        root.libraryThumbUrl = root.boundedString(data.thumbnail || "", 512)
+        var albumMeta = []
+        if (data.year) albumMeta.push(root.boundedString(data.year, 64))
+        var albumTracks = Number(data.trackCount) || 0
+        if (albumTracks > 0)
+          albumMeta.push(albumTracks + (albumTracks === 1 ? " track" : " tracks"))
+        if (data.duration) albumMeta.push(root.boundedString(data.duration, 64))
+        root.libraryMeta = root.boundedString(albumMeta.join("  ·  "), 256)
+        root.libraryDescription = root.boundedString(data.description || "", 4096)
+        root.fetchCover()
       } else if (kind === "artist") {
         root.libraryTitle = root.boundedString(data.name || root.libraryTitle, 128)
         root.librarySubtitle = root.boundedString(data.subscribers || "", 128)
+        root.libraryThumbUrl = root.boundedString(data.thumbnail || "", 512)
+        var artistMeta = []
+        if (data.subscribers) artistMeta.push(root.boundedString(data.subscribers, 64))
+        if (data.monthlyListeners)
+          artistMeta.push(root.boundedString(data.monthlyListeners, 64) + " monthly listeners")
+        root.libraryMeta = root.boundedString(artistMeta.join("  ·  "), 256)
+        root.libraryDescription = root.boundedString(data.description || "", 4096)
+        root.fetchCover()
       }
     }
   }
@@ -1036,6 +1085,32 @@ Panel {
     id: thumbnailDeadline
     interval: root.commandTimeout
     onTriggered: { if (thumbnailProc.running) thumbnailProc.running = false }
+  }
+
+  Process {
+    id: coverProc
+    stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("cover", data) } }
+    stderr: SplitParser { onRead: function(data) { root.appendProcessOutput("coverErr", data) } }
+    onStarted: coverDeadline.start()
+    onExited: function(exitCode) {
+      // `image <url>` prints nothing on success; the cached path is keyed by a
+      // sha256 we cannot rebuild from QML, so libraryImageSource stays on the
+      // remote URL (set by fetchCover) while this warms the on-disk cache.
+      coverDeadline.stop()
+    }
+  }
+
+  Timer {
+    id: coverDeadline
+    interval: root.commandTimeout
+    onTriggered: { if (coverProc.running) coverProc.running = false }
+  }
+
+  function fetchCover() {
+    root.libraryImageSource = root.libraryThumbUrl
+    if (root.libraryThumbUrl === "" || coverProc.running) return
+    coverProc.command = [root.ctlPath, "image", root.libraryThumbUrl]
+    root.startProcess(coverProc, "cover")
   }
 
   function thumbnailPath(videoId) {
@@ -2562,6 +2637,7 @@ Panel {
               }
 
               Text {
+                visible: !root.libraryRichHeader
                 width: parent.width - Style.space(72)
                   - ((root.libraryKind === "album" || root.libraryKind === "artist")
                     ? Style.space(144) + Style.spacing.sm * 2 : 0)
@@ -2576,6 +2652,91 @@ Panel {
                 font.family: root.fam
                 font.pixelSize: Style.font.bodySmall
                 font.bold: true
+              }
+            }
+
+            Row {
+              width: parent.width - Style.space(40)
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.space(12)
+              visible: root.libraryRichHeader
+
+              Rectangle {
+                id: libraryCover
+                visible: root.libraryImageSource !== "" || root.libraryThumbUrl !== ""
+                width: Style.space(96)
+                height: Style.space(96)
+                radius: Style.cornerRadius
+                color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.1)
+                clip: true
+
+                Image {
+                  id: libraryCoverImage
+                  anchors.fill: parent
+                  source: root.libraryImageSource
+                  fillMode: Image.PreserveAspectCrop
+                  asynchronous: true
+                  cache: true
+                  sourceSize.width: 96
+                  sourceSize.height: 96
+                }
+
+                Text {
+                  anchors.centerIn: parent
+                  visible: libraryCoverImage.status !== Image.Ready
+                  text: Model.ICON.note
+                  color: Color.accent
+                  font.family: root.fam
+                  font.pixelSize: Style.font.displayLarge
+                }
+              }
+
+              Column {
+                width: parent.width
+                  - (libraryCover.visible ? libraryCover.width + Style.space(12) : 0)
+                spacing: Style.space(3)
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  elide: Text.ElideRight
+                  text: root.libraryTitle
+                    + (root.librarySubtitle !== "" ? "  ·  " + root.librarySubtitle : "")
+                  color: root.fg
+                  font.family: root.fam
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+
+                Text {
+                  visible: root.libraryMeta !== ""
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  elide: Text.ElideRight
+                  text: root.libraryMeta
+                  color: Qt.darker(root.fg, 1.4)
+                  font.family: root.fam
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  visible: root.libraryDescription !== ""
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  text: root.libraryDescription
+                  color: Qt.darker(root.fg, 1.4)
+                  font.family: root.fam
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.Wrap
+                  elide: Text.ElideRight
+                  maximumLineCount: root.libraryInfoOpen ? 400 : 3
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.libraryInfoOpen = !root.libraryInfoOpen
+                  }
+                }
               }
             }
 
