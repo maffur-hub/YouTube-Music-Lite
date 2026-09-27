@@ -1069,6 +1069,7 @@ def song_row(track):
         album = {"name": album}
     thumbs = track.get("thumbnails") or []
     return {
+        "kind": "song",
         "videoId": track.get("videoId", ""),
         "title": track.get("title", ""),
         "artist": ", ".join(a.get("name", "") for a in (track.get("artists") or [])),
@@ -1081,6 +1082,7 @@ def song_row(track):
 def library_album_row(album):
     thumbs = album.get("thumbnails") or []
     return {
+        "kind": "album",
         "browseId": album.get("browseId", ""),
         "title": album.get("title", ""),
         "artist": ", ".join(a.get("name", "") for a in (album.get("artists") or [])),
@@ -1091,12 +1093,49 @@ def library_album_row(album):
 
 def library_artist_row(artist):
     thumbs = artist.get("thumbnails") or []
+    name = artist.get("artist", "") or artist.get("name", "")
     return {
+        "kind": "artist",
         "browseId": artist.get("browseId", ""),
-        "name": artist.get("artist", "") or artist.get("name", ""),
+        "name": name,
+        "title": name,
         "subscribers": artist.get("subscribers", "") or "",
         "thumbnail": thumbs[-1].get("url", "") if thumbs else "",
     }
+
+
+def playlist_row(p):
+    return {
+        "kind": "playlist",
+        "videoId": "",
+        "browseId": p.get("playlistId") or p.get("browseId") or "",
+        "title": p.get("title", "") or "",
+        "artist": p.get("author", "") or "",
+        "duration": 0,
+    }
+
+
+def mixed_row(item):
+    """Map a heterogeneous ytmusicapi item to the generic item shape."""
+    if not isinstance(item, dict):
+        return None
+    if item.get("videoId"):
+        return song_row(item)
+    browse_id = str(item.get("browseId", ""))
+    # Album/single/EP pages share the MPREb_ browse id prefix; search results
+    # label singles as type "Single" and omit audioPlaylistId, so the prefix is
+    # the reliable signal here.
+    if (item.get("audioPlaylistId") or item.get("type") in ("Album", "Single", "EP")
+            or browse_id.startswith("MPREb_")):
+        return library_album_row(item)
+    if item.get("subscribers") is not None or browse_id.startswith("UC"):
+        row = library_artist_row(item)
+        row["title"] = item.get("artist") or item.get("title") or ""
+        return row
+    pid = item.get("playlistId") or item.get("browseId")
+    if pid:
+        return playlist_row(item)
+    return None
 
 
 def cmd_liked(args):
@@ -1109,12 +1148,12 @@ def cmd_liked(args):
     ytm = get_ytmusic()
     try:
         liked = ytm.get_liked_songs(limit=limit)
-        tracks = [song_row(t) for t in (liked.get("tracks") or []) if t.get("videoId")]
+        items = [song_row(t) for t in (liked.get("tracks") or []) if t.get("videoId")]
         print(json.dumps({
             "ok": True,
             "title": liked.get("title", "Liked Music"),
             "playlistId": "LM",
-            "tracks": tracks,
+            "items": items,
         }))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
@@ -1134,29 +1173,17 @@ def cmd_library(args):
     try:
         if kind == "songs":
             rows = ytm.get_library_songs(limit=limit) or []
-            print(json.dumps({
-                "ok": True, "kind": "songs",
-                "tracks": [song_row(t) for t in rows if t.get("videoId")],
-            }))
+            items = [song_row(t) for t in rows if t.get("videoId")]
         elif kind == "albums":
             rows = ytm.get_library_albums(limit=limit) or []
-            print(json.dumps({
-                "ok": True, "kind": "albums",
-                "albums": [library_album_row(a) for a in rows if a.get("browseId")],
-            }))
+            items = [library_album_row(a) for a in rows if a.get("browseId")]
         elif kind == "artists":
             rows = ytm.get_library_artists(limit=limit) or []
-            print(json.dumps({
-                "ok": True, "kind": "artists",
-                "artists": [library_artist_row(a) for a in rows if a.get("browseId")],
-            }))
+            items = [library_artist_row(a) for a in rows if a.get("browseId")]
         else:  # playlists
             rows = ytm.get_library_playlists(limit=limit) or []
-            print(json.dumps({
-                "ok": True, "kind": "playlists",
-                "playlists": [{"id": p.get("playlistId", ""), "title": p.get("title", "")}
-                              for p in rows if p.get("playlistId")],
-            }))
+            items = [playlist_row(p) for p in rows if p.get("playlistId")]
+        print(json.dumps({"ok": True, "kind": kind, "items": items}))
     except Exception as e:
         print(json.dumps({"ok": False, "kind": kind, "error": str(e)}))
 
@@ -1175,7 +1202,7 @@ def cmd_album(args):
             "artist": ", ".join(a.get("name", "") for a in (album.get("artists") or [])),
             "year": album.get("year", "") or "",
             "audioPlaylistId": album.get("audioPlaylistId", ""),
-            "tracks": [song_row(t) for t in (album.get("tracks") or []) if t.get("videoId")],
+            "items": [song_row(t) for t in (album.get("tracks") or []) if t.get("videoId")],
         }))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
@@ -1197,37 +1224,82 @@ def cmd_artist(args):
             "name": artist.get("name", ""),
             "subscribers": artist.get("subscribers", "") or "",
             "description": artist.get("description", "") or "",
-            "tracks": [song_row(t) for t in songs if t.get("videoId")],
-            "albums": [library_album_row(a) for a in (albums + singles) if a.get("browseId")],
+            "items": ([song_row(t) for t in songs if t.get("videoId")]
+                      + [library_album_row(a) for a in (albums + singles) if a.get("browseId")]),
         }))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
 
 
 def cmd_search(args):
-    if not args:
-        fail("Usage: yt-music-ctl search <query>")
-    query = " ".join(args)
+    search_filters = ("songs", "albums", "artists", "playlists")
+    if args and args[0] == "-f":
+        if len(args) < 2 or args[1] not in search_filters:
+            fail("Invalid search filter")
+        filter_kind = args[1]
+        query = " ".join(args[2:])
+    else:
+        filter_kind = "songs"
+        query = " ".join(args)
+    if not query.strip():
+        fail("Usage: yt-music-ctl search [-f songs|albums|artists|playlists] <query>")
+    expected = {"songs": "song", "albums": "album",
+                "artists": "artist", "playlists": "playlist"}[filter_kind]
     ytm = get_ytmusic(require_auth=False)
     try:
-        results = ytm.search(query, filter="songs", limit=20)
-        songs = []
+        results = ytm.search(query, filter=filter_kind, limit=20)
+        items = []
         for r in results:
-            if r.get("resultType") != "song":
+            if r.get("resultType") != expected:
                 continue
-            vid = r.get("videoId", "")
-            if not vid:
-                continue
-            songs.append({
-                "videoId": vid,
-                "title": r.get("title", ""),
-                "artist": ", ".join(a.get("name", "") for a in (r.get("artists") or [])),
-                "album": r.get("album", {}).get("name", "") if r.get("album") else "",
-                "duration": r.get("duration_seconds", 0) or 0,
-                "thumbnail": (r.get("thumbnails", [{}])[-1].get("url", "")
-                              if r.get("thumbnails") else ""),
-            })
-        print(json.dumps({"ok": True, "query": query, "songs": songs}))
+            row = mixed_row(r)
+            if row:
+                items.append(row)
+            if len(items) >= 50:
+                break
+        print(json.dumps({"ok": True, "query": query, "filter": filter_kind,
+                          "items": items}))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+
+
+def cmd_home(args):
+    sections = 3
+    if args:
+        try:
+            sections = max(1, min(8, int(args[0])))
+        except ValueError:
+            fail("Usage: yt-music-ctl home [sections]")
+    ytm = get_ytmusic()
+    try:
+        feed = ytm.get_home(limit=sections) or []
+        items = []
+        for section in feed:
+            for item in (section.get("contents") or []):
+                row = mixed_row(item)
+                if row:
+                    items.append(row)
+                if len(items) >= 200:
+                    break
+            if len(items) >= 200:
+                break
+        print(json.dumps({"ok": True, "items": items}))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+
+
+def cmd_history(args):
+    limit = 100
+    if args:
+        try:
+            limit = max(1, min(300, int(args[0])))
+        except ValueError:
+            fail("Usage: yt-music-ctl history [limit]")
+    ytm = get_ytmusic()
+    try:
+        rows = ytm.get_history() or []
+        items = [song_row(t) for t in rows[:limit] if t.get("videoId")]
+        print(json.dumps({"ok": True, "items": items}))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
 
@@ -1898,6 +1970,8 @@ COMMANDS = {
     "library": cmd_library,
     "album": cmd_album,
     "artist": cmd_artist,
+    "home": cmd_home,
+    "history": cmd_history,
     "thumbnail": cmd_thumbnail,
     "mix": cmd_mix,
     "queue": cmd_queue_playlist,
@@ -1940,9 +2014,11 @@ def main():
         print("  create-playlist <name>   Create a private playlist")
         print("  playlist <playlistId>    Get playlist tracks")
         print("  playlist-add <id> <vid>  Add a track to a playlist (LM = liked)")
-        print("  search <query>           Search for songs")
+        print("  search [-f kind] <query>  Search songs|albums|artists|playlists")
         print("  liked [limit]            List liked songs")
         print("  library <kind> [limit]   List library songs|albums|artists|playlists")
+        print("  home [sections]          Fetch the home feed (default 3 sections)")
+        print("  history [limit]          List recently played tracks")
         print("  album <browseId>         Get album tracks")
         print("  artist <browseId>        Get an artist's top songs + albums")
         print("  thumbnail <videoId>     Fetch a bounded album thumbnail")

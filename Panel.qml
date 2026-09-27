@@ -47,6 +47,7 @@ Panel {
   property string activePlaylistId: ""
   property var searchResults: []
   property string searchQuery: ""
+  property string searchFilter: "songs"
   property bool searching: false
   property int selectedIndex: -1
   property int lastVolume: 100
@@ -61,22 +62,8 @@ Panel {
   property string libraryKind: ""
   property string libraryTitle: ""
   property string librarySubtitle: ""
-  property var libraryTracks: []
-  property var libraryNav: []
-  readonly property var libraryList: {
-    var out = []
-    for (var i = 0; i < root.libraryTracks.length; i++) {
-      var track = root.libraryTracks[i]
-      out.push({ kind: "song", videoId: track.videoId, title: track.title,
-                 artist: track.artist, duration: track.duration, browseId: "" })
-    }
-    for (var j = 0; j < root.libraryNav.length; j++) {
-      var entry = root.libraryNav[j]
-      out.push({ kind: entry.kind, videoId: "", title: entry.title,
-                 artist: entry.subtitle || "", duration: 0, browseId: entry.browseId })
-    }
-    return out
-  }
+  property var libraryRows: []
+  readonly property var libraryList: root.libraryRows
   readonly property string activeListKind: root.searchResults.length > 0 ? "search"
     : (root.playlistTracks.length > 0 ? "playlist"
     : (root.libraryList.length > 0 ? "library"
@@ -184,6 +171,30 @@ Panel {
     return result
   }
 
+  function normalizeMixedRows(items, limit) {
+    var out = []
+    var count = Math.min(Array.isArray(items) ? items.length : 0, limit)
+    for (var i = 0; i < count; i++) {
+      var item = items[i] || {}
+      var kind = String(item.kind || "")
+      if (kind === "song") {
+        var vid = String(item.videoId || "")
+        if (!root.isVideoId(vid)) continue
+        out.push({ kind: "song", videoId: vid, browseId: "",
+                   title: root.boundedString(item.title, 256),
+                   artist: root.boundedString(item.artist, 256),
+                   duration: Math.max(0, Math.min(86400, Number(item.duration) || 0)) })
+      } else if (kind === "album" || kind === "artist" || kind === "playlist") {
+        var bid = root.boundedString(item.browseId, 256)
+        if (!bid) continue
+        out.push({ kind: kind, videoId: "", browseId: bid,
+                   title: root.boundedString(item.title, 256),
+                   artist: root.boundedString(item.artist, 256), duration: 0 })
+      }
+    }
+    return out
+  }
+
   function normalizePlaylists(items) {
     var result = []
     for (var i = 0; i < Math.min(Array.isArray(items) ? items.length : 0, 100); i++) {
@@ -264,16 +275,26 @@ Panel {
     root.searchQuery = query.trim()
     root.searchResults = []
     root.searching = true
-    searchProc.command = [root.ctlPath, "search", root.searchQuery]
+    searchProc.command = [root.ctlPath, "search", "-f", root.searchFilter, root.searchQuery]
     root.startProcess(searchProc, "search")
   }
 
   function clearSearch() {
     searchField.text = ""
     root.searchQuery = ""
+    root.searchFilter = "songs"
     root.searchResults = []
     root.searching = false
     root.selectedIndex = -1
+  }
+
+  function openRow(row, fromSearch) {
+    if (!row) return
+    if (row.kind === "song") { root.playNow(row.videoId); return }
+    if (fromSearch) root.searchResults = []
+    if (row.kind === "album") root.openAlbum(row.browseId, row.title)
+    else if (row.kind === "artist") root.openArtist(row.browseId, row.title)
+    else if (row.kind === "playlist") root.openPlaylist(row.browseId, row.title)
   }
 
   function playNow(videoId) {
@@ -317,6 +338,8 @@ Panel {
     if (kind === "liked") return [root.ctlPath, "liked", "200"]
     if (kind === "songs" || kind === "albums" || kind === "artists")
       return [root.ctlPath, "library", kind, "200"]
+    if (kind === "home") return [root.ctlPath, "home", "4"]
+    if (kind === "history") return [root.ctlPath, "history", "200"]
     return null
   }
 
@@ -327,8 +350,7 @@ Panel {
     root.libraryKind = kind
     root.libraryTitle = ""
     root.librarySubtitle = ""
-    root.libraryTracks = []
-    root.libraryNav = []
+    root.libraryRows = []
     root.selectedIndex = -1
     root.statusText = ""
     libraryProc.command = command
@@ -340,8 +362,7 @@ Panel {
     root.libraryKind = "album"
     root.libraryTitle = title || "Album"
     root.librarySubtitle = ""
-    root.libraryTracks = []
-    root.libraryNav = []
+    root.libraryRows = []
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "album", browseId]
     root.startProcess(libraryProc, "library")
@@ -352,8 +373,7 @@ Panel {
     root.libraryKind = "artist"
     root.libraryTitle = name || "Artist"
     root.librarySubtitle = ""
-    root.libraryTracks = []
-    root.libraryNav = []
+    root.libraryRows = []
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "artist", browseId]
     root.startProcess(libraryProc, "library")
@@ -363,31 +383,8 @@ Panel {
     root.libraryKind = ""
     root.libraryTitle = ""
     root.librarySubtitle = ""
-    root.libraryTracks = []
-    root.libraryNav = []
+    root.libraryRows = []
     root.selectedIndex = -1
-  }
-
-  function normalizeLibraryNav(items, kind, limit) {
-    var out = []
-    var count = Math.min(Array.isArray(items) ? items.length : 0, limit)
-    for (var i = 0; i < count; i++) {
-      var item = items[i] || {}
-      if (!item.browseId) continue
-      var subtitle = ""
-      if (kind === "artist")
-        subtitle = root.boundedString(item.subscribers, 128)
-      else
-        subtitle = root.boundedString((item.artist || "")
-          + (item.year ? "  ·  " + item.year : ""), 256)
-      out.push({
-        kind: kind,
-        browseId: root.boundedString(item.browseId, 128),
-        title: root.boundedString(kind === "artist" ? item.name : item.title, 256),
-        subtitle: subtitle
-      })
-    }
-    return out
   }
 
   function openContextMenu(videoId, title, artist, source, x, y, queueIndex) {
@@ -598,7 +595,7 @@ Panel {
       searchDeadline.stop()
       var data = root.parseProcessJson(root.processText("search"))
       if (data && data.ok && data.query === root.searchQuery)
-        root.searchResults = root.normalizeSongs(data.songs, 100)
+        root.searchResults = root.normalizeMixedRows(data.items, 100)
       root.busy = false
       root.searching = false
     }
@@ -707,25 +704,27 @@ Panel {
       libraryDeadline.stop()
       var data = root.parseProcessJson(root.processText("library"))
       if (!data || !data.ok) return
+      root.libraryRows = root.normalizeMixedRows(data.items, 500)
       var kind = root.libraryKind
-      if (kind === "liked" || kind === "songs") {
-        root.libraryTracks = root.normalizeSongs(data.tracks, 300)
-        if (kind === "liked" && data.title)
-          root.libraryTitle = root.boundedString(data.title, 128)
+      if (kind === "liked") {
+        root.libraryTitle = root.boundedString(data.title || "Liked Music", 128)
+      } else if (kind === "home") {
+        root.libraryTitle = root.boundedString("Home", 128)
+      } else if (kind === "history") {
+        root.libraryTitle = root.boundedString("Recently played", 128)
+      } else if (kind === "songs") {
+        root.libraryTitle = root.boundedString("Songs", 128)
       } else if (kind === "albums") {
-        root.libraryNav = root.normalizeLibraryNav(data.albums, "album", 300)
+        root.libraryTitle = root.boundedString("Albums", 128)
       } else if (kind === "artists") {
-        root.libraryNav = root.normalizeLibraryNav(data.artists, "artist", 300)
+        root.libraryTitle = root.boundedString("Artists", 128)
       } else if (kind === "album") {
         root.libraryTitle = root.boundedString(data.title || root.libraryTitle, 128)
         root.librarySubtitle = root.boundedString(
           (data.artist || "") + (data.year ? "  ·  " + data.year : ""), 256)
-        root.libraryTracks = root.normalizeSongs(data.tracks, 300)
       } else if (kind === "artist") {
         root.libraryTitle = root.boundedString(data.name || root.libraryTitle, 128)
-        root.librarySubtitle = root.boundedString(data.subscribers, 128)
-        root.libraryTracks = root.normalizeSongs(data.tracks, 300)
-        root.libraryNav = root.normalizeLibraryNav(data.albums, "album", 300)
+        root.librarySubtitle = root.boundedString(data.subscribers || "", 128)
       }
     }
   }
@@ -958,10 +957,12 @@ Panel {
         }
         if (root.activeListKind === "library" && root.selectedIndex >= 0
             && root.selectedIndex < root.libraryList.length) {
-          var libraryRow = root.libraryList[root.selectedIndex]
-          if (libraryRow.kind === "song") root.playNow(libraryRow.videoId)
-          else if (libraryRow.kind === "album") root.openAlbum(libraryRow.browseId, libraryRow.title)
-          else root.openArtist(libraryRow.browseId, libraryRow.title)
+          root.openRow(root.libraryList[root.selectedIndex], false)
+          return
+        }
+        if (root.activeListKind === "search" && root.selectedIndex >= 0
+            && root.selectedIndex < root.searchResults.length) {
+          root.openRow(root.searchResults[root.selectedIndex], true)
           return
         }
         var list = root.activeList
@@ -1595,9 +1596,9 @@ Panel {
           }
 
             // ---- search
-            Item {
+            Column {
               width: parent.width
-              height: Style.spacing.controlHeight
+              spacing: Style.spacing.sm
 
               Row {
                 width: parent.width - Style.space(40)
@@ -1657,6 +1658,37 @@ Panel {
                   onClicked: root.logout()
                 }
               }
+
+              Row {
+                width: parent.width - Style.space(40)
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.spacing.sm
+                visible: searchField.text !== "" || root.searchQuery !== "" || root.searching || root.searchResults.length > 0
+
+                Repeater {
+                  model: [
+                    { key: "songs", label: "Songs" },
+                    { key: "albums", label: "Albums" },
+                    { key: "artists", label: "Artists" },
+                    { key: "playlists", label: "Playlists" }
+                  ]
+                  delegate: Button {
+                    width: (parent.width - Style.spacing.sm * 3) / 4
+                    height: Style.spacing.controlHeight
+                    text: modelData.label
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    foreground: root.searchFilter === modelData.key ? Color.accent : root.fg
+                    enabled: !root.searching
+                    onClicked: {
+                      if (root.searchFilter !== modelData.key) {
+                        root.searchFilter = modelData.key
+                        if (searchField.text.trim() !== "") root.search(searchField.text)
+                      }
+                    }
+                  }
+                }
+              }
             }
 
           // ---- search results
@@ -1699,7 +1731,10 @@ Panel {
                 MouseArea {
                   anchors.fill: parent
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: root.selectedIndex = index
+                  onClicked: {
+                    root.selectIndex(index)
+                    if (modelData.kind !== "song") root.openRow(modelData, true)
+                  }
                 }
 
                 Row {
@@ -1709,7 +1744,8 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     width: Style.space(24)
-                    text: Model.ICON.note
+                    text: modelData.kind === "song" ? Model.ICON.note
+                      : (modelData.kind === "playlist" ? Model.ICON.playlist : Model.ICON.music)
                     color: Color.accent
                     font.family: root.fam
                     font.pixelSize: Style.font.bodySmall
@@ -1717,7 +1753,11 @@ Panel {
                   }
 
                   Column {
-                    width: parent.width - Style.space(24) - Style.space(180)
+                    width: modelData.kind === "song"
+                      ? parent.width - Style.space(24) - Style.space(176)
+                        - Style.spacing.sm * 4
+                      : parent.width - Style.space(24) - Style.space(44)
+                        - Style.spacing.sm * 2
                     spacing: 0
 
                     Text {
@@ -1741,6 +1781,7 @@ Panel {
                   }
 
                   Text {
+                    visible: modelData.kind === "song"
                     textFormat: Text.PlainText
                     width: Style.space(80)
                     text: Model.fmtDuration(modelData.duration)
@@ -1752,6 +1793,7 @@ Panel {
                   }
 
                   Button {
+                    visible: modelData.kind === "song"
                     width: Style.space(52)
                     height: Style.space(28)
                     iconText: Model.ICON.play
@@ -1763,6 +1805,7 @@ Panel {
                   }
 
                   Button {
+                    visible: modelData.kind === "song"
                     width: Style.space(44)
                     height: Style.space(28)
                     iconText: Model.ICON.shuffle
@@ -1772,10 +1815,23 @@ Panel {
                     enabled: !root.busy
                     onClicked: root.playMix(modelData.videoId)
                   }
+
+                  Text {
+                    visible: modelData.kind !== "song"
+                    textFormat: Text.PlainText
+                    width: Style.space(44)
+                    text: "›"
+                    horizontalAlignment: Text.AlignRight
+                    color: Color.accent
+                    font.family: root.fam
+                    font.pixelSize: Style.font.body
+                    verticalAlignment: Text.AlignVCenter
+                  }
                 }
 
                 MouseArea {
                   anchors.fill: parent
+                  visible: modelData.kind === "song"
                   acceptedButtons: Qt.RightButton
                   onClicked: function(mouse) {
                     var point = searchRow.mapToItem(panelFlick, mouse.x, mouse.y)
@@ -2049,13 +2105,36 @@ Panel {
 
               Repeater {
                 model: [
-                  { key: "liked", label: "Liked" },
+                  { key: "home", label: "Home" },
+                  { key: "history", label: "Recent" },
+                  { key: "liked", label: "Liked" }
+                ]
+                delegate: Button {
+                  width: (parent.width - Style.spacing.sm * 2) / 3
+                  height: Style.spacing.controlHeight
+                  text: modelData.label
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.libraryKind === modelData.key ? Color.accent : root.fg
+                  enabled: !libraryProc.running
+                  onClicked: root.loadLibrary(modelData.key)
+                }
+              }
+            }
+
+            Row {
+              width: parent.width - Style.space(40)
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.spacing.sm
+
+              Repeater {
+                model: [
                   { key: "songs", label: "Songs" },
                   { key: "albums", label: "Albums" },
                   { key: "artists", label: "Artists" }
                 ]
                 delegate: Button {
-                  width: (parent.width - Style.spacing.sm * 3) / 4
+                  width: (parent.width - Style.spacing.sm * 2) / 3
                   height: Style.spacing.controlHeight
                   text: modelData.label
                   fontFamily: root.fam
@@ -2070,7 +2149,7 @@ Panel {
             Row {
               width: parent.width
               height: Style.space(28)
-              visible: root.libraryKind === "album" || root.libraryKind === "artist"
+              visible: root.libraryKind !== ""
               spacing: Style.spacing.sm
 
               Button {
@@ -2130,10 +2209,7 @@ Panel {
                   cursorShape: Qt.PointingHandCursor
                   onClicked: {
                     root.selectIndex(index)
-                    if (modelData.kind === "album")
-                      root.openAlbum(modelData.browseId, modelData.title)
-                    else if (modelData.kind === "artist")
-                      root.openArtist(modelData.browseId, modelData.title)
+                    if (modelData.kind !== "song") root.openRow(modelData, false)
                   }
                 }
 
@@ -2145,7 +2221,8 @@ Panel {
                     textFormat: Text.PlainText
                     width: Style.space(24)
                     text: modelData.kind === "song" ? Model.ICON.note
-                      : (modelData.kind === "album" ? Model.ICON.music : Model.ICON.playlist)
+                      : ((modelData.kind === "album" || modelData.kind === "artist")
+                        ? Model.ICON.music : Model.ICON.playlist)
                     color: Color.accent
                     font.family: root.fam
                     font.pixelSize: Style.font.bodySmall
