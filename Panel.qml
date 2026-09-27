@@ -64,8 +64,10 @@ Panel {
   property string librarySubtitle: ""
   property var libraryRows: []
   property string libraryRefId: ""
-  // Top-level content tab: "search" | "playlists" | "library". Replaces the old
-  // libraryExpanded / playlistsExpanded collapsible-section flags.
+  // Top-level content tab: "search" | "playlists" | "library" | "queue".
+  // "" means every section is collapsed (clicking the active tab again hides
+  // it). Collapsing is deliberately NOT persisted: saveUiState() maps "" back
+  // to "search". Replaces the old libraryExpanded / playlistsExpanded flags.
   property string activeTab: "search"
   property bool libraryStale: false
   property string libraryThumbUrl: ""
@@ -91,7 +93,8 @@ Panel {
     }
     return items
   }
-  readonly property string activeListKind: root.activeTab === "queue" ? (root.queueVisible ? "queue" : "")
+  readonly property string activeListKind: root.activeTab === "" ? ""
+    : root.activeTab === "queue" ? (root.queueVisible ? "queue" : "")
     : root.activeTab === "search" ? (root.searchResults.length > 0 ? "search" : "")
     : root.activeTab === "playlists" ? (root.playlistTracks.length > 0 ? "playlist" : "")
     : (root.libraryList.length > 0 ? "library" : "")
@@ -109,7 +112,18 @@ Panel {
       if (root.tabItems[i].key === key) return true
     return false
   }
-  onTabItemsChanged: if (!root.hasTab(root.activeTab)) root.activeTab = "search"
+  // Never let the active tab point at a hidden section, and never allow the
+  // all-collapsed state when only one tab exists (its strip would be hidden,
+  // leaving no way to reopen anything).
+  function clampActiveTab() {
+    if (root.tabItems.length <= 1) {
+      if (root.tabItems.length === 1 && root.activeTab !== root.tabItems[0].key)
+        root.activeTab = root.tabItems[0].key
+      return
+    }
+    if (root.activeTab !== "" && !root.hasTab(root.activeTab)) root.activeTab = "search"
+  }
+  onTabItemsChanged: root.clampActiveTab()
   property var likedVideoIds: ({})
   property string newPlaylistName: ""
   readonly property int maxProcessOutput: 65536
@@ -183,7 +197,8 @@ Panel {
     if (uiSaveProc.running) return
     uiSaveProc.command = ["python3", "-c", root.uiStateScript("save"),
       root.libraryKind, root.libraryRefId,
-      root.activeTab === "queue" ? "search" : root.activeTab, root.searchFilter]
+      (root.activeTab === "queue" || root.activeTab === "") ? "search" : root.activeTab,
+      root.searchFilter]
     root.startProcess(uiSaveProc, "uiSave")
   }
 
@@ -1427,6 +1442,7 @@ Panel {
         }
       }
       onDeleteRequested: function() {
+        if (root.activeListKind === "") return
         if (root.activeListKind === "library") return
         if (root.activeListKind === "queue" && root.selectedIndex >= 0
             && root.selectedIndex < root.queueTracks.length) {
@@ -1444,7 +1460,7 @@ Panel {
         else if (t === "m") root.toggleMute()
         else if (t === "r") root.toggleLoop()
         else if (t === "f") root.sendCmd("shuffle", [])
-        else if (t === "/") searchField.forceActiveFocus()
+        else if (t === "/") { root.activeTab = "search"; searchField.forceActiveFocus() }
       }
 
       Flickable {
@@ -2018,7 +2034,7 @@ Panel {
                 fontSize: Style.font.bodySmall
                 selected: root.activeTab === modelData.key
                 foreground: root.fg
-                onClicked: root.activeTab = modelData.key
+                onClicked: root.activeTab = (root.activeTab === modelData.key) ? "" : modelData.key
               }
             }
           }
