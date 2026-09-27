@@ -402,6 +402,14 @@ Panel {
     root.startProcess(mixProc, "mix")
   }
 
+  function playArtistRadio(browseId) {
+    var id = String(browseId || "")
+    if (root.busy || mixProc.running || !id) return
+    root.busy = true
+    mixProc.command = [root.ctlPath, "radio", id]
+    root.startProcess(mixProc, "mix")
+  }
+
   function sendCmd(command, args) {
     if (root.busy) return
     root.busy = true
@@ -594,11 +602,13 @@ Panel {
           root.openRow(navRow, root.contextSource === "search")
           root.libraryInfoOpen = true
         })
-      else if (navRow.kind === "artist")
+      else if (navRow.kind === "artist") {
         addContextItem("Artist info", function() {
           root.openRow(navRow, root.contextSource === "search")
           root.libraryInfoOpen = true
         })
+        addContextItem("Start radio", function() { root.playArtistRadio(navRow.browseId) })
+      }
       addContextItem("Play all", function() { root.enqueueNav("play", navRow.kind, navRow.browseId) })
       addContextItem("Add all to queue", function() { root.enqueueNav("queue", navRow.kind, navRow.browseId) })
       addContextItem("Open", function() { root.openRow(navRow, root.contextSource === "search") })
@@ -926,6 +936,8 @@ Panel {
         root.libraryMeta = root.boundedString(artistMeta.join("  ·  "), 256)
         root.libraryDescription = root.boundedString(data.description || "", 4096)
         root.fetchCover()
+        var sims = root.normalizeMixedRows(data.similar || [], 100)
+        if (sims.length > 0) root.libraryRows = root.libraryRows.concat(sims)
       }
     }
   }

@@ -13,9 +13,10 @@
 #   scripts/smoke.sh --full   Also exercises the playback-affecting commands:
 #                             starts playback of a known videoId, pokes the
 #                             transport controls and the queue, then cleans up
-#                             with `stop` + `daemon-stop`. Also precaches one
-#                             known track's audio (a real yt-dlp download) and
-#                             checks the precache answers without a player.
+#                             with `stop` + `daemon-stop`. Also plays the
+#                             artist's radio, precaches one known track's
+#                             audio (a real yt-dlp download) and checks the
+#                             precache answers without a player.
 #
 # Commands ALWAYS SKIPPED (with or without --full) and why:
 #   login                    interactive browser authentication
@@ -34,8 +35,10 @@
 #     ts and proxying one fetch at a dead port; the backend's expected
 #     "YouTube session expired..." line on stderr is ignored there. Only the
 #     plugin's own ~/.local/state/yt-music/cache is cleared, never user data.
+#   * The artist lookup is also fetched live (`-r`) once so the assertion on
+#     its non-empty "similar" artists list cannot be fooled by an old cache.
 #   * Playback-affecting commands (play, pause, toggle, next, prev, seek,
-#     seek-pct, volume, loop, shuffle, mix, queue, queue-*, queue-add,
+#     seek-pct, volume, loop, shuffle, mix, radio, queue, queue-*, queue-add,
 #     play-next, enqueue, enqueue-files, thumbnail, daemon, ensure-daemon,
 #     daemon-stop, watch) are only run with --full; a single NOTE lists them.
 #   * `enqueue` / `enqueue-files` call ensure_daemon() before their usage
@@ -71,7 +74,7 @@ for arg in "$@"; do
     case "$arg" in
         --full) FULL=1 ;;
         -h|--help)
-            sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,55p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -128,6 +131,47 @@ except Exception:
         pass "$label"
     else
         fail "$label" "exit $rc: $(detail "$out" "$err")"
+    fi
+}
+
+# check_field <label> <expected-json> <field> <cmd...> - stdout JSON's <field>
+# must equal <expected-json>. Use for booleans/numbers/strings.
+check_field() {
+    local label=$1 want=$2 field=$3 out rc got
+    shift 3
+    out=$("$@" 2>"$ERR_FILE")
+    rc=$?
+    got=$(printf '%s' "$out" | python3 -c "import sys, json
+try:
+    v = json.load(sys.stdin).get('$field')
+    print(json.dumps(v))
+except Exception:
+    print('null')" 2>/dev/null)
+    if [[ $got == "$want" ]]; then
+        pass "$label"
+    else
+        fail "$label" "got $got want $want: $(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+}
+
+# check_similar <label> <cmd...> - stdout JSON must have a non-empty "similar"
+# list whose first entry has a non-empty browseId.
+check_similar() {
+    local label=$1 out rc ok
+    shift
+    out=$("$@" 2>"$ERR_FILE")
+    rc=$?
+    ok=$(printf '%s' "$out" | python3 -c 'import sys, json
+try:
+    d = json.load(sys.stdin)
+    s = d.get("similar") or []
+    print("True" if s and (s[0] or {}).get("browseId") else "False")
+except Exception:
+    print("False")' 2>/dev/null)
+    if [[ $ok == True ]]; then
+        pass "$label"
+    else
+        fail "$label" "exit $rc: $(detail "$out" "$(cat "$ERR_FILE")")"
     fi
 }
 
@@ -504,6 +548,7 @@ check_ok "queue-list" "$CTL" queue-list
 section "navigation (network)"
 check_ok "album $ALBUM_ID" "$CTL" album "$ALBUM_ID"
 check_ok "artist $ARTIST_ID" "$CTL" artist "$ARTIST_ID"
+check_similar "artist $ARTIST_ID similar artists" "$CTL" artist -r "$ARTIST_ID"
 check_ok "playlist $PLAYLIST_ID" "$CTL" playlist "$PLAYLIST_ID"
 
 # ------------------------------------------------------- metadata cache (G5)
@@ -546,6 +591,7 @@ check_usage "enqueue-files bogus" "$CTL" enqueue-files bogus "$LYRICS_VID"
 check_usage "enqueue (no args)" "$CTL" enqueue
 check_usage "lyrics (no args)" "$CTL" lyrics
 check_usage "lyrics bad id" "$CTL" lyrics 'bad##id'
+check_usage "radio usage" "$CTL" radio
 if [[ -n $IDLE_MPV_PID ]] || mpv_alive; then
     check_usage "volume abc" "$CTL" volume abc
 else
@@ -572,7 +618,7 @@ skip "daemon / watch" "foreground loop that never returns (use ensure-daemon)"
 
 if [[ $FULL -eq 0 ]]; then
     printf 'NOTE playback-affecting commands skipped - pass --full: play pause '
-    printf 'resume toggle next prev seek seek-pct volume loop shuffle mix queue '
+    printf 'resume toggle next prev seek seek-pct volume loop shuffle mix radio queue '
     printf 'queue-jump queue-remove queue-move queue-add play-next enqueue '
     printf 'enqueue-files thumbnail ensure-daemon daemon-stop\n'
 fi
@@ -609,6 +655,17 @@ if [[ $FULL -eq 1 ]]; then
     section "cleanup (--full)"
     check_ok "stop" "$CTL" stop
     check_ok "daemon-stop" "$CTL" daemon-stop
+
+    # --------------------------------------------------------- radio (G5)
+    # radio calls ensure_daemon() and starts mpv on every path (cache hit
+    # included), so it only ever runs here, behind the --full guard, with the
+    # player/daemon state pinned before and after.
+    section "radio (network, --full only)"
+    "$CTL" stop >/dev/null 2>&1; "$CTL" daemon-stop >/dev/null 2>&1; sleep 1
+    check_ok "radio $ARTIST_ID" "$CTL" radio "$ARTIST_ID"
+    check_field "radio $ARTIST_ID mix flag" true "mix" "$CTL" radio "$ARTIST_ID"
+    check_cached "radio $ARTIST_ID (cache hit)" True "$CTL" radio "$ARTIST_ID"
+    "$CTL" stop >/dev/null 2>&1; "$CTL" daemon-stop >/dev/null 2>&1
 
     # ------------------------------------------------------- precache (G5)
     # No `enqueue play album ...` queue-surgery check here on purpose: it is

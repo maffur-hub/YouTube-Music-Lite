@@ -78,6 +78,7 @@ METADATA_CACHE_TTL = {
     "album": 3600,     # 1 h
     "artist": 3600,    # 1 h
     "mix": 300,        # 5 min
+    "radio": 300,      # 5 min
     "lyrics": 86400,   # 24 h — lyrics essentially never change
 }
 
@@ -1541,6 +1542,21 @@ def cmd_artist(args):
         top_songs = [song_row(t) for t in songs if t.get("videoId")]
         album_rows = [library_album_row(a) for a in albums if a.get("browseId")]
         single_rows = [library_album_row(s) for s in singles if s.get("browseId")]
+        related = artist.get("related")
+        rel_results = related if isinstance(related, list) else ((related or {}).get("results") or [])
+        similar = []
+        for r in rel_results:
+            if not isinstance(r, dict) or not r.get("browseId"):
+                continue
+            r_thumbs = r.get("thumbnails") or []
+            similar.append({
+                "kind": "artist",
+                "browseId": r.get("browseId", ""),
+                "title": r.get("title", "") or r.get("name", ""),
+                "artist": "",
+                "subscribers": r.get("subscribers", "") or "",
+                "thumbnail": r_thumbs[-1].get("url", "") if r_thumbs else "",
+            })
         payload = {
             "ok": True,
             "browseId": browse_id,
@@ -1554,12 +1570,69 @@ def cmd_artist(args):
             "albums": album_rows,
             "singles": single_rows,
             "items": top_songs + album_rows + single_rows,
+            "similar": similar,
+            "radioId": artist.get("radioId", "") or "",
+            "shuffleId": artist.get("shuffleId", "") or "",
             "cached": False,
         }
         cache_write("artist", key, payload)
         print(json.dumps(payload))
     except Exception as e:
         if not _serve_stale("artist", key, ttl):
+            print(json.dumps({"ok": False, "error": str(e)}))
+
+
+def cmd_artist_radio(args):
+    args, refresh = _strip_refresh(args)
+    ensure_daemon()
+    if not args:
+        fail("Usage: yt-music-ctl radio <browseId>")
+    browse_id = args[0]
+    key = [browse_id]
+    ttl = METADATA_CACHE_TTL["radio"]
+    if not refresh:
+        payload, fresh = cache_read("radio", key, ttl)
+        track_list = payload.get("trackList") if isinstance(payload, dict) else None
+        if fresh and isinstance(track_list, list) and track_list:
+            # Metadata comes from the cache, playback still happens here.
+            _mix_launch(track_list)
+            print(json.dumps(_cache_served(_mix_output(payload))))
+            return
+    ytm = _ytmusic_for_cache("radio", key, ttl)
+    if ytm is None:
+        return
+    try:
+        artist = ytm.get_artist(browse_id)
+        radio_id = artist.get("radioId", "") or ""
+        if not radio_id:
+            print(json.dumps({"ok": False, "error": "No radio for this artist"}))
+            return
+        watchlist = ytm.get_watch_playlist(playlistId=radio_id, radio=True)
+        tracks = []
+        for track in (watchlist.get("tracks") or []):
+            vid = track.get("videoId", "")
+            if not vid:
+                continue
+            album = track.get("album") or {}
+            if not isinstance(album, dict):
+                album = {"name": album}
+            tracks.append({
+                "videoId": vid,
+                "title": track.get("title", ""),
+                "artist": ", ".join(a.get("name", "") for a in (track.get("artists") or [])),
+                "album": album.get("title", "") or album.get("name", ""),
+                "duration": track.get("duration_seconds", 0) or 0,
+            })
+        if not tracks:
+            print(json.dumps({"ok": False, "error": "No tracks returned"}))
+            return
+        payload = {"ok": True, "mix": True, "seedId": browse_id,
+                   "radioId": radio_id, "trackList": tracks, "cached": False}
+        cache_write("radio", key, payload)
+        _mix_launch(tracks)
+        print(json.dumps(_mix_output(payload)))
+    except Exception as e:
+        if not _serve_stale("radio", key, ttl):
             print(json.dumps({"ok": False, "error": str(e)}))
 
 
@@ -3162,6 +3235,7 @@ COMMANDS = {
     "library": cmd_library,
     "album": cmd_album,
     "artist": cmd_artist,
+    "radio": cmd_artist_radio,
     "home": cmd_home,
     "history": cmd_history,
     "enqueue": cmd_enqueue,
@@ -3225,6 +3299,7 @@ def main():
         print("  precache [videoId]      Prefetch next-track audio (or one id)")
         print("  lyrics <videoId>        Fetch lyrics (plain, plus synced when available)")
         print("  mix <videoId>            Play radio mix from seed")
+        print("  radio <browseId>         Play an artist's radio (auto-mix)")
         print("  queue <playlistId>       Queue and play a playlist")
         print("  queue-add <videoId>      Append a track to the queue")
         print("  queue-list               List the current queue")
