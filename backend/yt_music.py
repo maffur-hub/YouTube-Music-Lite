@@ -1426,6 +1426,91 @@ def cmd_queue_playlist(args):
         print(json.dumps({"ok": False, "error": str(e)}))
 
 
+def cmd_enqueue(args):
+    ensure_daemon()
+    usage = "Usage: yt-music-ctl enqueue <play|queue|next> <album|artist|playlist> <id>"
+    if len(args) != 3:
+        fail(usage)
+    mode, kind, target_id = args
+    if mode not in ("play", "queue", "next"):
+        fail(usage)
+    if kind not in ("album", "artist", "playlist"):
+        fail(usage)
+    if not target_id:
+        fail(usage)
+    ytm = get_ytmusic()
+    try:
+        if kind == "album":
+            data = ytm.get_album(target_id)
+            tracks = data.get("tracks") or []
+        elif kind == "artist":
+            data = ytm.get_artist(target_id)
+            tracks = ((data.get("songs") or {}).get("results") or [])
+        else:  # playlist
+            data = ytm.get_playlist(target_id, limit=100)
+            tracks = data.get("tracks") or []
+        meta = []
+        for t in tracks:
+            vid = t.get("videoId", "")
+            if not vid:
+                continue
+            meta.append({
+                "videoId": vid,
+                "title": t.get("title", ""),
+                "artist": ", ".join(a.get("name", "")
+                                    for a in (t.get("artists") or [])),
+                "duration": t.get("duration_seconds", 0) or 0,
+            })
+        if not meta:
+            print(json.dumps({"ok": False, "error": "No playable tracks"}))
+            return
+        remember_tracks(meta)
+        urls = [f"https://music.youtube.com/watch?v={t['videoId']}" for t in meta]
+        if mode == "play" or not mpv_is_running():
+            mpv_kill()
+            ensure_private_runtime_dir()
+            proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
+                                     f"--input-ipc-server={MPV_SOCKET}",
+                                     "--keep-open=no"] + urls,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            json_dump(MPV_PID_PATH, mpv_pid_record(proc))
+            wait_for_mpv()
+            props = wait_for_metadata()
+            write_status_from_mpv(props)
+            print(json.dumps({
+                "ok": True,
+                "played": True,
+                "mode": mode,
+                "kind": kind,
+                "id": target_id,
+                "tracks": len(meta)
+            }))
+        elif mode == "queue":
+            for url in urls:
+                mpv_send("loadfile", [url, "append"])
+            print(json.dumps({
+                "ok": True,
+                "queued": True,
+                "mode": mode,
+                "kind": kind,
+                "id": target_id,
+                "tracks": len(meta)
+            }))
+        else:  # next: reverse so the original order survives insert-next
+            for url in reversed(urls):
+                mpv_send("loadfile", [url, "insert-next"])
+            print(json.dumps({
+                "ok": True,
+                "queuedNext": True,
+                "mode": mode,
+                "kind": kind,
+                "id": target_id,
+                "tracks": len(meta)
+            }))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+
+
 def _queue_count():
     """Return the mpv playlist count, or None when it cannot be read."""
     props = mpv_query(["playlist-count"])
@@ -1972,6 +2057,7 @@ COMMANDS = {
     "artist": cmd_artist,
     "home": cmd_home,
     "history": cmd_history,
+    "enqueue": cmd_enqueue,
     "thumbnail": cmd_thumbnail,
     "mix": cmd_mix,
     "queue": cmd_queue_playlist,
@@ -2021,6 +2107,7 @@ def main():
         print("  history [limit]          List recently played tracks")
         print("  album <browseId>         Get album tracks")
         print("  artist <browseId>        Get an artist's top songs + albums")
+        print("  enqueue <play|queue|next> <album|artist|playlist> <id>   Play/queue a whole album, artist or playlist")
         print("  thumbnail <videoId>     Fetch a bounded album thumbnail")
         print("  mix <videoId>            Play radio mix from seed")
         print("  queue <playlistId>       Queue and play a playlist")

@@ -63,10 +63,12 @@ Panel {
   property string libraryTitle: ""
   property string librarySubtitle: ""
   property var libraryRows: []
+  property string libraryRefId: ""
+  property bool libraryExpanded: false
   readonly property var libraryList: root.libraryRows
   readonly property string activeListKind: root.searchResults.length > 0 ? "search"
     : (root.playlistTracks.length > 0 ? "playlist"
-    : (root.libraryList.length > 0 ? "library"
+    : (root.libraryExpanded && root.libraryList.length > 0 ? "library"
     : (root.queueOpen && root.queueTracks.length > 0 ? "queue" : "")))
   readonly property var activeList: root.activeListKind === "search" ? root.searchResults
     : (root.activeListKind === "playlist" ? root.playlistTracks
@@ -90,6 +92,7 @@ Panel {
   property string contextSource: ""
   property real contextX: 0
   property real contextY: 0
+  property var contextRow: null
 
   function open() {
     statusText = ""
@@ -351,6 +354,8 @@ Panel {
     root.libraryTitle = ""
     root.librarySubtitle = ""
     root.libraryRows = []
+    root.libraryRefId = ""
+    root.libraryExpanded = true
     root.selectedIndex = -1
     root.statusText = ""
     libraryProc.command = command
@@ -363,6 +368,8 @@ Panel {
     root.libraryTitle = title || "Album"
     root.librarySubtitle = ""
     root.libraryRows = []
+    root.libraryRefId = browseId
+    root.libraryExpanded = true
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "album", browseId]
     root.startProcess(libraryProc, "library")
@@ -374,6 +381,8 @@ Panel {
     root.libraryTitle = name || "Artist"
     root.librarySubtitle = ""
     root.libraryRows = []
+    root.libraryRefId = browseId
+    root.libraryExpanded = true
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "artist", browseId]
     root.startProcess(libraryProc, "library")
@@ -384,16 +393,47 @@ Panel {
     root.libraryTitle = ""
     root.librarySubtitle = ""
     root.libraryRows = []
+    root.libraryRefId = ""
     root.selectedIndex = -1
   }
 
+  function librarySongCount() {
+    var n = 0
+    for (var i = 0; i < root.libraryRows.length; i++)
+      if (root.libraryRows[i].kind === "song") n++
+    return n
+  }
+
+  function enqueueNav(mode, kind, id) {
+    if (!id || root.busy) return
+    if (kind !== "album" && kind !== "artist" && kind !== "playlist") return
+    root.sendCmd("enqueue", [mode, kind, id])
+  }
+
   function openContextMenu(videoId, title, artist, source, x, y, queueIndex) {
+    root.contextRow = null
     if (!root.isVideoId(videoId)) return
     root.contextVideoId = String(videoId)
     root.contextTitle = title || ""
     root.contextArtist = artist || ""
     root.contextSource = source || ""
     root.contextQueueIndex = (source === "queue") ? Number(queueIndex) : -1
+    root.contextX = x; root.contextY = y
+    root.rebuildContextMenu()
+    contextMenu.popup(panelFlick, x, y)
+  }
+
+  function openRowMenu(row, source, x, y) {
+    if (!row) return
+    if (row.kind === "song") {
+      root.openContextMenu(row.videoId, row.title, row.artist, source, x, y)
+      return
+    }
+    root.contextRow = row
+    root.contextVideoId = ""
+    root.contextTitle = row.title || ""
+    root.contextArtist = row.artist || ""
+    root.contextSource = source || ""
     root.contextX = x; root.contextY = y
     root.rebuildContextMenu()
     contextMenu.popup(panelFlick, x, y)
@@ -424,6 +464,13 @@ Panel {
 
   function rebuildContextMenu() {
     clearMenu(contextMenu)
+    if (root.contextRow) {
+      var navRow = root.contextRow
+      addContextItem("Play all", function() { root.enqueueNav("play", navRow.kind, navRow.browseId) })
+      addContextItem("Add all to queue", function() { root.enqueueNav("queue", navRow.kind, navRow.browseId) })
+      addContextItem("Open", function() { root.openRow(navRow, root.contextSource === "search") })
+      return
+    }
     addContextItem("Play now", function() { root.sendCmd("play", [root.contextVideoId]) })
     addContextItem("Play next", function() { root.sendCmd("play-next", [root.contextVideoId, root.contextTitle, root.contextArtist]) })
     addContextItem("Add to queue", function() { root.sendCmd("queue-add", [root.contextVideoId, root.contextTitle, root.contextArtist]) })
@@ -991,6 +1038,7 @@ Panel {
         else if (t === "m") root.toggleMute()
         else if (t === "r") root.toggleLoop()
         else if (t === "f") root.sendCmd("shuffle", [])
+        else if (t === "/") searchField.forceActiveFocus()
       }
 
       Flickable {
@@ -1831,11 +1879,10 @@ Panel {
 
                 MouseArea {
                   anchors.fill: parent
-                  visible: modelData.kind === "song"
                   acceptedButtons: Qt.RightButton
                   onClicked: function(mouse) {
                     var point = searchRow.mapToItem(panelFlick, mouse.x, mouse.y)
-                    root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "search", point.x, point.y)
+                    root.openRowMenu(modelData, "search", point.x, point.y)
                     mouse.accepted = true
                   }
                 }
@@ -2079,9 +2126,16 @@ Panel {
               PanelSectionHeader {
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
-                text: "LIBRARY"
+                text: (root.libraryExpanded ? "▾  " : "▸  ") + "LIBRARY"
                 foreground: root.fg
                 fontFamily: root.fam
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.libraryExpanded = !root.libraryExpanded
               }
 
               Button {
@@ -2102,6 +2156,7 @@ Panel {
               width: parent.width - Style.space(40)
               anchors.horizontalCenter: parent.horizontalCenter
               spacing: Style.spacing.sm
+              visible: root.libraryExpanded
 
               Repeater {
                 model: [
@@ -2126,6 +2181,7 @@ Panel {
               width: parent.width - Style.space(40)
               anchors.horizontalCenter: parent.horizontalCenter
               spacing: Style.spacing.sm
+              visible: root.libraryExpanded
 
               Repeater {
                 model: [
@@ -2149,7 +2205,7 @@ Panel {
             Row {
               width: parent.width
               height: Style.space(28)
-              visible: root.libraryKind !== ""
+              visible: root.libraryExpanded && root.libraryKind !== ""
               spacing: Style.spacing.sm
 
               Button {
@@ -2163,8 +2219,35 @@ Panel {
                 onClicked: root.closeLibrary()
               }
 
+              Button {
+                visible: root.libraryKind === "album" || root.libraryKind === "artist"
+                enabled: !root.busy && root.librarySongCount() > 0
+                width: Style.space(72)
+                height: Style.space(28)
+                text: "Play all"
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                onClicked: root.enqueueNav("play", root.libraryKind, root.libraryRefId)
+              }
+
+              Button {
+                visible: root.libraryKind === "album" || root.libraryKind === "artist"
+                enabled: !root.busy && root.librarySongCount() > 0
+                width: Style.space(72)
+                height: Style.space(28)
+                text: "Queue all"
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                onClicked: root.enqueueNav("queue", root.libraryKind, root.libraryRefId)
+              }
+
               Text {
-                width: parent.width - Style.space(72) - Style.spacing.sm
+                width: parent.width - Style.space(72)
+                  - ((root.libraryKind === "album" || root.libraryKind === "artist")
+                    ? Style.space(144) + Style.spacing.sm * 2 : 0)
+                  - Style.spacing.sm
                 height: Style.space(28)
                 elide: Text.ElideRight
                 verticalAlignment: Text.AlignVCenter
@@ -2179,7 +2262,7 @@ Panel {
             }
 
             Text {
-              visible: root.libraryKind !== "" && root.libraryList.length === 0
+              visible: root.libraryExpanded && root.libraryKind !== "" && root.libraryList.length === 0
                 && !libraryProc.running
               textFormat: Text.PlainText
               text: "Nothing here."
@@ -2190,6 +2273,7 @@ Panel {
 
             Repeater {
               id: libraryRepeater
+              visible: root.libraryExpanded
               model: root.libraryList
               delegate: Item {
                 id: libraryRow
@@ -2295,11 +2379,9 @@ Panel {
                 MouseArea {
                   anchors.fill: parent
                   acceptedButtons: Qt.RightButton
-                  visible: modelData.kind === "song"
                   onClicked: function(mouse) {
                     var point = libraryRow.mapToItem(panelFlick, mouse.x, mouse.y)
-                    root.openContextMenu(modelData.videoId, modelData.title,
-                      modelData.artist, "library", point.x, point.y)
+                    root.openRowMenu(modelData, "library", point.x, point.y)
                     mouse.accepted = true
                   }
                 }
