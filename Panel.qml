@@ -56,6 +56,8 @@ Panel {
     ? Math.round(Number(root.musicStatus.volume))
     : 100
   property var queueTracks: []
+  // Local play history (newest first) from `yt-music-ctl last-played`.
+  property var lastPlayed: []
   property int queuePosition: -1
   property int contextQueueIndex: -1
   property string queueKey: ""
@@ -82,11 +84,19 @@ Panel {
   readonly property var libraryList: root.libraryRows
   readonly property bool queueVisible: Model.isActive(root.musicStatus)
     && root.queueTracks.length > 0
+  // Track shown in the hero card: the playing track, or the most recent
+  // last-played one when nothing is playing.
+  readonly property var heroTrack: Model.isActive(root.musicStatus)
+    ? ({ videoId: root.musicStatus ? String(root.musicStatus.videoId || "") : "",
+         title: root.musicStatus ? String(root.musicStatus.title || "") : "",
+         artist: root.musicStatus ? String(root.musicStatus.artist || "") : "" })
+    : (root.lastPlayed.length > 0 ? root.lastPlayed[0] : null)
   readonly property var tabItems: {
     var items = []
     if (root.queueVisible)
       items.push({ key: "queue", label: "Up Next (" + root.queueTracks.length + ")" })
     items.push({ key: "search", label: "Search" })
+    items.push({ key: "last", label: "Last Played" })
     if (root.loggedIn) {
       items.push({ key: "playlists", label: "Playlists" })
       items.push({ key: "library", label: "Library" })
@@ -96,12 +106,14 @@ Panel {
   readonly property string activeListKind: root.activeTab === "" ? ""
     : root.activeTab === "queue" ? (root.queueVisible ? "queue" : "")
     : root.activeTab === "search" ? (root.searchResults.length > 0 ? "search" : "")
+    : root.activeTab === "last" ? (root.lastPlayed.length > 0 ? "last" : "")
     : root.activeTab === "playlists" ? (root.playlistTracks.length > 0 ? "playlist" : "")
     : (root.libraryList.length > 0 ? "library" : "")
   readonly property var activeList: root.activeListKind === "search" ? root.searchResults
+    : (root.activeListKind === "last" ? root.lastPlayed
     : (root.activeListKind === "playlist" ? root.playlistTracks
     : (root.activeListKind === "library" ? root.libraryList
-    : (root.activeListKind === "queue" ? root.queueTracks : [])))
+    : (root.activeListKind === "queue" ? root.queueTracks : []))))
   readonly property bool looping: !!(root.musicStatus && root.musicStatus.loop
     && root.musicStatus.loop !== "no")
   readonly property bool shuffling: !!(root.musicStatus && root.musicStatus.shuffle)
@@ -154,6 +166,8 @@ Panel {
     root.controller.show()
     root.refresh()
     root.refreshQueue()
+    root.refreshLastPlayed()
+    root.restoreSession()
   }
 
   function openFromHotkey() {
@@ -232,7 +246,7 @@ Panel {
     }
     var tab = String(data.activeTab || "")
     // Back-compat: pre-tab state files only stored a libraryExpanded boolean.
-    if (tab !== "search" && tab !== "playlists" && tab !== "library")
+    if (tab !== "search" && tab !== "last" && tab !== "playlists" && tab !== "library")
       tab = (data.libraryExpanded === true && restored) ? "library" : "search"
     root.activeTab = tab
   }
@@ -256,6 +270,23 @@ Panel {
       return
     }
     root.startProcess(queueListProc, "queueList")
+  }
+
+  function refreshLastPlayed() {
+    if (!root.opened) return
+    if (lastPlayedProc.running) return
+    root.startProcess(lastPlayedProc, "lastPlayed")
+  }
+
+  function clearLastPlayed() {
+    if (lastPlayedClearProc.running) return
+    root.startProcess(lastPlayedClearProc, "lastPlayedClear")
+  }
+
+  function restoreSession() {
+    if (root.busy) return
+    if (restoreProc.running) return
+    root.startProcess(restoreProc, "restore")
   }
 
   function startProcess(proc, key) {
@@ -755,8 +786,9 @@ Panel {
     if (root.selectedIndex < 0) return
     if (panelFlick.contentHeight <= panelFlick.height) return
     var repeater = root.activeListKind === "search" ? searchRepeater
+      : (root.activeListKind === "last" ? lastRepeater
       : (root.activeListKind === "playlist" ? trackRepeater
-      : (root.activeListKind === "library" ? libraryRepeater : queueRepeater))
+      : (root.activeListKind === "library" ? libraryRepeater : queueRepeater)))
     if (!repeater) return
     var item = repeater.itemAt(root.selectedIndex)
     if (!item) return
@@ -954,6 +986,70 @@ Panel {
         root.queueTracks = rows
       }
     }
+  }
+
+  Process {
+    id: lastPlayedProc
+    command: [root.ctlPath, "last-played", "100"]
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("lastPlayed", data) }
+    }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("lastPlayedErr", data) }
+    }
+    onStarted: lastPlayedDeadline.start()
+    onExited: function(exitCode) {
+      lastPlayedDeadline.stop()
+      var data = root.parseProcessJson(root.processText("lastPlayed"))
+      if (data && data.ok)
+        root.lastPlayed = root.normalizeSongs(data.items, 100)
+    }
+  }
+
+  Process {
+    id: lastPlayedClearProc
+    command: [root.ctlPath, "last-played", "clear"]
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("lastPlayedClear", data) }
+    }
+    onStarted: lastPlayedClearDeadline.start()
+    onExited: function(exitCode) {
+      lastPlayedClearDeadline.stop()
+      if (exitCode === 0) root.lastPlayed = []
+    }
+  }
+
+  Process {
+    id: restoreProc
+    command: [root.ctlPath, "restore"]
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("restore", data) }
+    }
+    onStarted: restoreDeadline.start()
+    onExited: function(exitCode) {
+      restoreDeadline.stop()
+      root.refresh()
+      root.refreshQueue()
+      root.refreshLastPlayed()
+    }
+  }
+
+  Timer {
+    id: lastPlayedDeadline
+    interval: root.commandTimeout
+    onTriggered: { if (lastPlayedProc.running) lastPlayedProc.running = false }
+  }
+
+  Timer {
+    id: lastPlayedClearDeadline
+    interval: root.commandTimeout
+    onTriggered: { if (lastPlayedClearProc.running) lastPlayedClearProc.running = false }
+  }
+
+  Timer {
+    id: restoreDeadline
+    interval: root.commandTimeout
+    onTriggered: { if (restoreProc.running) restoreProc.running = false }
   }
 
   Process {
@@ -1212,6 +1308,7 @@ Panel {
 
   function loadThumbnail() {
     var id = root.musicStatus ? String(root.musicStatus.videoId || "") : ""
+    if (!root.isVideoId(id) && root.heroTrack) id = String(root.heroTrack.videoId || "")
     id = root.isVideoId(id) ? id : ""
     if (id === root.thumbnailVideoId) return
     root.thumbnailVideoId = id
@@ -1240,6 +1337,7 @@ Panel {
   onThumbnailVideoIdChanged: {
     if (root.thumbnailVideoId === "") root.thumbnailSource = ""
   }
+  onLastPlayedChanged: root.loadThumbnail()
   onMusicStatusChanged: {
     root.loadThumbnail()
     var currentVideoId = String(root.musicStatus ? root.musicStatus.videoId : "")
@@ -1256,7 +1354,7 @@ Panel {
   Timer {
     id: afterCommand
     interval: 1600
-    onTriggered: { root.refresh(); root.refreshQueue() }
+    onTriggered: { root.refresh(); root.refreshQueue(); root.refreshLastPlayed() }
   }
 
   Timer {
@@ -1265,7 +1363,7 @@ Panel {
     interval: 30000
     running: true
     repeat: true
-    onTriggered: root.refresh()
+    onTriggered: { root.refresh(); root.refreshLastPlayed() }
   }
 
   Timer {
@@ -1433,6 +1531,11 @@ Panel {
           root.openRow(root.searchResults[root.selectedIndex], true)
           return
         }
+        if (root.activeListKind === "last" && root.selectedIndex >= 0
+            && root.selectedIndex < root.lastPlayed.length) {
+          root.playNow(root.lastPlayed[root.selectedIndex].videoId)
+          return
+        }
         var list = root.activeList
         if (root.selectedIndex >= 0 && root.selectedIndex < list.length) {
           var item = list[root.selectedIndex]
@@ -1444,6 +1547,7 @@ Panel {
       onDeleteRequested: function() {
         if (root.activeListKind === "") return
         if (root.activeListKind === "library") return
+        if (root.activeListKind === "last") return
         if (root.activeListKind === "queue" && root.selectedIndex >= 0
             && root.selectedIndex < root.queueTracks.length) {
           root.queueRemove(root.selectedIndex)
@@ -1541,7 +1645,7 @@ Panel {
           // ---- now playing hero
             Rectangle {
               id: nowPlayingCard
-              visible: Model.isActive(root.musicStatus)
+              visible: Model.isActive(root.musicStatus) || root.lastPlayed.length > 0
               width: parent.width
               height: Style.space(136)
               radius: Style.cornerRadius
@@ -1557,9 +1661,10 @@ Panel {
                 anchors.fill: parent
                 acceptedButtons: Qt.RightButton
                 onClicked: function(mouse) {
-                  if (!root.musicStatus || !root.isVideoId(root.musicStatus.videoId)) return
+                  if (!root.heroTrack || !root.isVideoId(root.heroTrack.videoId)) return
                   var point = heroRow.mapToItem(panelFlick, mouse.x, mouse.y)
-                  root.openContextMenu(root.musicStatus.videoId, root.musicStatus.title, root.musicStatus.artist, "nowplaying", point.x, point.y)
+                  root.openContextMenu(root.heroTrack.videoId, root.heroTrack.title, root.heroTrack.artist,
+                    Model.isActive(root.musicStatus) ? "nowplaying" : "last", point.x, point.y)
                   mouse.accepted = true
                 }
               }
@@ -1605,6 +1710,25 @@ Panel {
                 spacing: Style.space(6)
 
                 Item {
+                  visible: !Model.isActive(root.musicStatus) && root.heroTrack !== null
+                  width: Style.space(28)
+                  height: Style.space(32)
+                  Text {
+                    anchors.centerIn: parent
+                    text: Model.ICON.play
+                    color: Color.accent
+                    font.family: root.fam
+                    font.pixelSize: Style.font.body
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (root.heroTrack) root.playNow(root.heroTrack.videoId)
+                  }
+                }
+
+                Item {
+                  visible: Model.isActive(root.musicStatus)
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -1622,6 +1746,7 @@ Panel {
                 }
 
                 Item {
+                  visible: Model.isActive(root.musicStatus)
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -1639,6 +1764,7 @@ Panel {
                 }
 
                 Item {
+                  visible: Model.isActive(root.musicStatus)
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -1656,6 +1782,7 @@ Panel {
                 }
 
                 Item {
+                  visible: Model.isActive(root.musicStatus)
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -1673,6 +1800,7 @@ Panel {
                 }
 
                 Item {
+                  visible: Model.isActive(root.musicStatus)
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -1690,6 +1818,7 @@ Panel {
                 }
 
                 Item {
+                  visible: Model.isActive(root.musicStatus)
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -1707,6 +1836,7 @@ Panel {
                 }
 
                 Item {
+                  visible: Model.isActive(root.musicStatus)
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -1724,6 +1854,7 @@ Panel {
                 }
 
                 Item {
+                  visible: Model.isActive(root.musicStatus)
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -1741,6 +1872,7 @@ Panel {
                 }
 
                 Item {
+                  visible: Model.isActive(root.musicStatus)
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -1766,7 +1898,7 @@ Panel {
                 anchors.verticalCenter: heroActions.verticalCenter
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
-                text: root.musicStatus
+                text: Model.isActive(root.musicStatus) && root.musicStatus
                   ? Model.fmtPosition(root.musicStatus.position || 0, root.musicStatus.duration || 0)
                   : ""
                 color: Qt.darker(root.fg, 1.4)
@@ -1787,7 +1919,7 @@ Panel {
 
                 Text {
                   textFormat: Text.PlainText
-                  text: "NOW PLAYING"
+                  text: Model.isActive(root.musicStatus) ? "NOW PLAYING" : "LAST PLAYED"
                   color: Color.accent
                   font.family: root.fam
                   font.pixelSize: Style.font.caption
@@ -1798,7 +1930,7 @@ Panel {
                   textFormat: Text.PlainText
                   width: parent.width
                   elide: Text.ElideRight
-                  text: root.musicStatus ? (root.musicStatus.title || "") : ""
+                  text: root.heroTrack ? (root.heroTrack.title || "") : ""
                   color: root.fg
                   font.family: root.fam
                   font.pixelSize: Style.font.heading
@@ -1808,7 +1940,7 @@ Panel {
                   textFormat: Text.PlainText
                   width: parent.width
                   elide: Text.ElideRight
-                  text: root.musicStatus ? (root.musicStatus.artist || "") : ""
+                  text: root.heroTrack ? (root.heroTrack.artist || "") : ""
                   color: Qt.darker(root.fg, 1.4)
                   font.family: root.fam
                   font.pixelSize: Style.font.bodySmall
@@ -2156,6 +2288,151 @@ Panel {
               }
             }
           }
+
+            // ---- last played (local history)
+            Column {
+              visible: root.activeTab === "last"
+              width: parent.width
+              spacing: 0
+
+              Row {
+                width: parent.width
+                height: Style.spacing.controlHeight
+                spacing: Style.spacing.sm
+
+                Text {
+                  text: "LAST PLAYED"
+                  color: Color.accent
+                  font.family: root.fam
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  verticalAlignment: Text.AlignVCenter
+                }
+
+                Item {
+                  width: parent.width - Style.space(150)
+                  height: 1
+                  visible: root.lastPlayed.length > 0
+                }
+
+                Button {
+                  width: Style.space(52)
+                  height: Style.spacing.controlHeight
+                  text: "Clear"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  enabled: root.lastPlayed.length > 0 && !root.busy
+                  onClicked: root.clearLastPlayed()
+                }
+              }
+
+              Column {
+                width: parent.width
+                spacing: 0
+
+                Repeater {
+                  id: lastRepeater
+                  model: root.lastPlayed
+                  delegate: Item {
+                    id: lastRow
+                    width: contentColumn.width
+                    height: Style.space(32)
+
+                    Rectangle {
+                      anchors.fill: parent
+                      color: index === root.selectedIndex
+                        ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                        : (lastRowClick.containsMouse
+                          ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+                          : "transparent")
+                      radius: Style.cornerRadius
+                      Behavior on color { ColorAnimation { duration: 120 } }
+                    }
+
+                    MouseArea {
+                      id: lastRowClick
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: { root.selectIndex(index); root.playNow(modelData.videoId) }
+                    }
+
+                    Row {
+                      anchors.fill: parent
+                      spacing: Style.spacing.sm
+
+                      Text {
+                        textFormat: Text.PlainText
+                        width: Style.space(20)
+                        text: Model.ICON.play
+                        color: Qt.darker(root.fg, 1.4)
+                        font.family: root.fam
+                        font.pixelSize: Style.font.caption
+                        verticalAlignment: Text.AlignVCenter
+                      }
+
+                      Column {
+                        width: parent.width - Style.space(20) - Style.space(56)
+                          - Style.spacing.sm * 2
+                        spacing: 0
+
+                        Text {
+                          textFormat: Text.PlainText
+                          width: parent.width
+                          elide: Text.ElideRight
+                          text: modelData.title || "Unknown"
+                          color: root.fg
+                          font.family: root.fam
+                          font.pixelSize: Style.font.bodySmall
+                        }
+                        Text {
+                          textFormat: Text.PlainText
+                          width: parent.width
+                          elide: Text.ElideRight
+                          text: root.songSubtitle(modelData)
+                          color: Qt.darker(root.fg, 1.4)
+                          font.family: root.fam
+                          font.pixelSize: Style.font.caption
+                        }
+                      }
+
+                      Text {
+                        textFormat: Text.PlainText
+                        width: Style.space(56)
+                        text: modelData.duration > 0 ? Model.fmtDuration(modelData.duration) : ""
+                        horizontalAlignment: Text.AlignRight
+                        color: Qt.darker(root.fg, 1.4)
+                        font.family: root.fam
+                        font.pixelSize: Style.font.caption
+                        verticalAlignment: Text.AlignVCenter
+                      }
+                    }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      acceptedButtons: Qt.RightButton
+                      onClicked: function(mouse) {
+                        var point = lastRow.mapToItem(panelFlick, mouse.x, mouse.y)
+                        root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "last",
+                          point.x, point.y)
+                        mouse.accepted = true
+                      }
+                    }
+                  }
+                }
+              }
+
+              Text {
+                visible: root.lastPlayed.length === 0
+                width: parent.width
+                topPadding: Style.space(8)
+                text: "Nothing played yet."
+                color: Qt.darker(root.fg, 1.4)
+                font.family: root.fam
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
 
             // ---- search
             Column {

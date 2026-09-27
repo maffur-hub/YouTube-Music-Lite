@@ -32,6 +32,10 @@ STATE_DIR = os.path.expanduser("~/.local/state/yt-music")
 CONFIG_DIR = os.path.expanduser("~/.config/yt-music")
 STATUS_PATH = os.path.join(STATE_DIR, "status.json")
 TRACK_META_PATH = os.path.join(STATE_DIR, "track-meta.json")
+LAST_PLAYED_PATH = os.path.join(STATE_DIR, "last-played.json")
+SESSION_PATH = os.path.join(STATE_DIR, "session.json")
+LAST_PLAYED_MAX = 200
+SESSION_SAVE_INTERVAL = 5
 TRACK_META_MAX = 500
 DAEMON_LOCK = os.path.join(STATE_DIR, "daemon.lock")
 DAEMON_PID_PATH = os.path.join(STATE_DIR, "daemon.pid")
@@ -524,6 +528,100 @@ def remember_tracks(entries):
     json_dump(TRACK_META_PATH, store, mode=0o600)
 
 
+def load_last_played():
+    """Local play history, newest first."""
+    data = json_load(LAST_PLAYED_PATH, default=[])
+    return data if isinstance(data, list) else []
+
+
+def remember_play(entry):
+    """Prepend one played track to the local history (dedup by videoId, capped)."""
+    if not isinstance(entry, dict):
+        return
+    video_id = entry.get("videoId")
+    if not valid_video_id(video_id):
+        return
+    store = [e for e in load_last_played()
+             if isinstance(e, dict) and e.get("videoId") != video_id]
+    record = {"videoId": video_id, "playedAt": round(time.time())}
+    for key in ("title", "artist", "album", "duration"):
+        if entry.get(key):
+            record[key] = entry[key]
+    store.insert(0, record)
+    del store[LAST_PLAYED_MAX:]
+    json_dump(LAST_PLAYED_PATH, store, mode=0o600)
+
+
+def load_session():
+    data = json_load(SESSION_PATH, default={})
+    return data if isinstance(data, dict) else {}
+
+
+def save_session(video_ids, index, position):
+    """Persist a resumable queue (videoIds + current index + time-pos)."""
+    ids = [v for v in video_ids if valid_video_id(v)]
+    if not ids:
+        return
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        index = 0
+    index = max(0, min(len(ids) - 1, index))
+    try:
+        position = max(0.0, float(position))
+    except (TypeError, ValueError):
+        position = 0.0
+    json_dump(SESSION_PATH, {"videoIds": ids, "index": index,
+                             "position": round(position, 2),
+                             "updatedAt": round(time.time())}, mode=0o600)
+
+
+def clear_session():
+    """Drop the resumable queue (called whenever playback is intentionally replaced)."""
+    try:
+        unlink_private(SESSION_PATH)
+    except Exception:
+        pass
+
+
+_session_save_state = {"videoId": "", "savedAt": 0.0}
+
+
+def maybe_save_session(status):
+    """Snapshot the mpv queue + position for resume, throttled. Never raises."""
+    try:
+        video_id = str(status.get("videoId") or "")
+        if not valid_video_id(video_id):
+            return
+        now = time.time()
+        changed = video_id != _session_save_state.get("videoId")
+        if not changed and now - _session_save_state.get("savedAt", 0.0) < SESSION_SAVE_INTERVAL:
+            return
+        playlist, pos = _playlist_state()
+        if not playlist:
+            return
+        ids = []
+        for entry in playlist:
+            path = entry.get("filename") if isinstance(entry, dict) else ""
+            path = path or ""
+            vid = video_id_from_url(path) if path else ""
+            if not valid_video_id(vid):
+                vid = cache_audio_video_id(path) if path else ""
+            if not valid_video_id(vid):
+                # An entry we cannot resolve would make the resumed queue lossy.
+                return
+            ids.append(vid)
+        if not ids:
+            return
+        if pos < 0 or pos >= len(ids):
+            pos = ids.index(video_id) if video_id in ids else 0
+        save_session(ids, pos, status.get("position") or 0)
+        _session_save_state["videoId"] = video_id
+        _session_save_state["savedAt"] = now
+    except Exception:
+        pass
+
+
 def notify_track_change(previous, current):
     """Best-effort desktop notification when the playing track changes."""
     try:
@@ -690,6 +788,7 @@ def mpv_is_running():
 
 
 def mpv_kill():
+    clear_session()
     # Shut down a pre-runtime-dir instance on the first managed replacement.
     if private_mpv_socket():
         mpv_send("quit")
@@ -954,6 +1053,16 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
         "playlistPos": props.get("playlist-pos"),
         "playlistCount": props.get("playlist-count"),
     }
+    if status["playing"] and video_id and video_id != str(previous.get("videoId") or ""):
+        sidecar = load_track_meta().get(video_id) or {}
+        remember_play({
+            "videoId": video_id,
+            "title": status.get("title") or sidecar.get("title") or "",
+            "artist": status.get("artist") or sidecar.get("artist") or "",
+            "album": status.get("album") or sidecar.get("album") or "",
+            "duration": status.get("duration") or sidecar.get("duration") or 0,
+        })
+    maybe_save_session(status)
     if notify:
         notify_track_change(previous, status)
     write_status(status)
@@ -1849,6 +1958,87 @@ def cmd_history(args):
     except Exception as e:
         if not _serve_stale("history", key, ttl):
             print(json.dumps({"ok": False, "error": str(e)}))
+
+
+def cmd_last_played(args):
+    if args and args[0] == "clear":
+        json_dump(LAST_PLAYED_PATH, [], mode=0o600)
+        print(json.dumps({"ok": True, "cleared": True}))
+        return
+    limit = 100
+    if args:
+        try:
+            limit = max(1, min(LAST_PLAYED_MAX, int(args[0])))
+        except ValueError:
+            fail("Usage: yt-music-ctl last-played [limit|clear]")
+    meta = load_track_meta()
+    items = []
+    for entry in load_last_played()[:limit]:
+        if not isinstance(entry, dict):
+            continue
+        video_id = entry.get("videoId")
+        if not valid_video_id(video_id):
+            continue
+        sidecar = meta.get(video_id) or {}
+        items.append({
+            "videoId": video_id,
+            "title": str(entry.get("title") or sidecar.get("title") or ""),
+            "artist": str(entry.get("artist") or sidecar.get("artist") or ""),
+            "album": str(entry.get("album") or sidecar.get("album") or ""),
+            "duration": entry.get("duration") or sidecar.get("duration") or 0,
+            "playedAt": entry.get("playedAt") or 0,
+        })
+    print(json.dumps({"ok": True, "items": items}))
+
+
+def cmd_restore(args):
+    """Rebuild the last queue paused at its saved index + position."""
+    if mpv_is_running():
+        print(json.dumps({"ok": True, "restored": False, "reason": "already-playing"}))
+        return
+    session = load_session()
+    ids = session.get("videoIds") if isinstance(session, dict) else None
+    ids = [v for v in ids if valid_video_id(v)] if isinstance(ids, list) else []
+    if not ids:
+        print(json.dumps({"ok": True, "restored": False, "reason": "no-session"}))
+        return
+    try:
+        index = max(0, min(len(ids) - 1, int(session.get("index") or 0)))
+    except (TypeError, ValueError):
+        index = 0
+    try:
+        position = max(0.0, float(session.get("position") or 0))
+    except (TypeError, ValueError):
+        position = 0.0
+    ensure_daemon()
+    ensure_private_runtime_dir()
+    urls = [f"https://music.youtube.com/watch?v={v}" for v in ids]
+    proc = subprocess.Popen(
+        ["mpv", "--no-video", "--really-quiet",
+         f"--input-ipc-server={MPV_SOCKET}", "--keep-open=no", "--pause=yes"] + urls,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    json_dump(MPV_PID_PATH, mpv_pid_record(proc))
+    wait_for_mpv()
+    time.sleep(0.3)
+    mpv_send("set_property", ["playlist-pos", index])
+    # playlist-pos is asynchronous: wait until mpv really reports the target
+    # entry as current, otherwise the seek below lands on the wrong track.
+    target = ids[index]
+    deadline = time.time() + 6
+    while time.time() < deadline:
+        if extract_video_id(get_mpv_props() or {}) == target:
+            break
+        time.sleep(0.15)
+    if position > 1:
+        mpv_send("seek", [position, "absolute"])
+        time.sleep(0.2)
+    mpv_send("set_property", ["pause", True])
+    props = wait_for_metadata()
+    if isinstance(props, dict):
+        props = dict(props)
+        props["pause"] = True
+    write_status_from_mpv(props)
+    print(json.dumps({"ok": True, "restored": True, "count": len(ids), "index": index}))
 
 
 def cmd_lyrics(args):
@@ -3475,6 +3665,8 @@ COMMANDS = {
     "radio": cmd_artist_radio,
     "home": cmd_home,
     "history": cmd_history,
+    "last-played": cmd_last_played,
+    "restore": cmd_restore,
     "enqueue": cmd_enqueue,
     "enqueue-files": cmd_enqueue_files,
     "thumbnail": cmd_thumbnail,
@@ -3528,6 +3720,8 @@ def main():
         print("  library <kind> [limit]   List library songs|albums|artists|playlists")
         print("  home [sections]          Fetch the home feed (default 3 sections)")
         print("  history [limit]          List recently played tracks")
+        print("  last-played [limit|clear] Local play history")
+        print("  restore                  Rebuild the last queue, paused")
         print("  album <browseId>         Get album tracks")
         print("  artist <browseId>        Get an artist's top songs + albums")
         print("  enqueue <play|queue|next> <album|artist|playlist> <id>   Play/queue a whole album, artist or playlist")
@@ -3551,7 +3745,7 @@ def main():
         print("  daemon-stop              Stop the status daemon")
         print("  watch                    Legacy alias for daemon")
         print()
-        print("Metadata read commands (search, library, home, history, album,")
+        print("Metadata read commands (search, library, home, history, last-played, album,")
         print("artist, playlist, mix, lyrics) accept -r/--refresh anywhere to")
         print("bypass the on-disk metadata cache.")
         sys.exit(0)
