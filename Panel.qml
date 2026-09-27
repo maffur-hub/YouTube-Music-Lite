@@ -53,12 +53,21 @@ Panel {
   readonly property int currentVolume: root.musicStatus && root.musicStatus.volume !== undefined
     ? Math.round(Number(root.musicStatus.volume))
     : 100
-  readonly property var activeList: root.searchResults.length > 0
-    ? root.searchResults
-    : root.playlistTracks
+  property var queueTracks: []
+  property int queuePosition: -1
+  property bool queueOpen: true
+  property int contextQueueIndex: -1
+  property string queueKey: ""
+  readonly property string activeListKind: root.searchResults.length > 0 ? "search"
+    : (root.playlistTracks.length > 0 ? "playlist"
+    : (root.queueOpen && root.queueTracks.length > 0 ? "queue" : ""))
+  readonly property var activeList: root.activeListKind === "search" ? root.searchResults
+    : (root.activeListKind === "playlist" ? root.playlistTracks
+    : (root.activeListKind === "queue" ? root.queueTracks : []))
   readonly property bool looping: !!(root.musicStatus && root.musicStatus.loop
     && root.musicStatus.loop !== "no")
   onSearchResultsChanged: root.selectedIndex = -1
+  onActiveListKindChanged: root.selectedIndex = -1
   property var likedVideoIds: ({})
   property string newPlaylistName: ""
   readonly property int maxProcessOutput: 65536
@@ -78,6 +87,7 @@ Panel {
     statusText = ""
     root.controller.show()
     root.refresh()
+    root.refreshQueue()
   }
 
   function openFromHotkey() {
@@ -97,6 +107,17 @@ Panel {
     if (root.refreshing) return
     root.refreshing = true
     root.startProcess(statusProc, "status")
+  }
+
+  function refreshQueue() {
+    if (!root.opened) return
+    if (queueListProc.running) return
+    if (!root.musicStatus || !Model.isActive(root.musicStatus)) {
+      root.queueTracks = []
+      root.queuePosition = -1
+      return
+    }
+    root.startProcess(queueListProc, "queueList")
   }
 
   function startProcess(proc, key) {
@@ -256,12 +277,28 @@ Panel {
     root.startProcess(cmdProc, "cmd")
   }
 
-  function openContextMenu(videoId, title, artist, source, x, y) {
+  function queueJump(index) {
+    if (root.busy) return
+    root.sendCmd("queue-jump", [String(index)])
+  }
+
+  function queueRemove(index) {
+    if (root.busy) return
+    root.sendCmd("queue-remove", [String(index)])
+  }
+
+  function queueMove(from, to) {
+    if (root.busy) return
+    root.sendCmd("queue-move", [String(from), String(to)])
+  }
+
+  function openContextMenu(videoId, title, artist, source, x, y, queueIndex) {
     if (!root.isVideoId(videoId)) return
     root.contextVideoId = String(videoId)
     root.contextTitle = title || ""
     root.contextArtist = artist || ""
     root.contextSource = source || ""
+    root.contextQueueIndex = (source === "queue") ? Number(queueIndex) : -1
     root.contextX = x; root.contextY = y
     root.rebuildContextMenu()
     contextMenu.popup(panelFlick, x, y)
@@ -293,8 +330,8 @@ Panel {
   function rebuildContextMenu() {
     clearMenu(contextMenu)
     addContextItem("Play now", function() { root.sendCmd("play", [root.contextVideoId]) })
-    addContextItem("Play next", function() { root.sendCmd("play-next", [root.contextVideoId]) })
-    addContextItem("Add to queue", function() { root.sendCmd("queue-add", [root.contextVideoId]) })
+    addContextItem("Play next", function() { root.sendCmd("play-next", [root.contextVideoId, root.contextTitle, root.contextArtist]) })
+    addContextItem("Add to queue", function() { root.sendCmd("queue-add", [root.contextVideoId, root.contextTitle, root.contextArtist]) })
     addContextItem("Start mix", function() { root.playMix(root.contextVideoId) })
     if (root.loggedIn)
       addContextItem("Like", function() { root.sendCmd("like", [root.contextVideoId]) })
@@ -304,6 +341,14 @@ Panel {
       addContextItem("Add to playlist…", function() { root.openPlaylistPicker() })
     if (root.contextSource === "track" && root.activePlaylistId !== "")
       addContextItem("Remove from playlist", function() { root.sendCmd("remove", [root.activePlaylistId, root.contextVideoId]) })
+    if (root.contextSource === "queue" && root.contextQueueIndex >= 0) {
+      var qi = root.contextQueueIndex
+      if (qi > 0)
+        addContextItem("Move up", function() { root.queueMove(qi, qi - 1) })
+      if (qi < root.queueTracks.length - 1)
+        addContextItem("Move down", function() { root.queueMove(qi, qi + 1) })
+      addContextItem("Remove from queue", function() { root.queueRemove(qi) })
+    }
   }
 
   function rebuildPlaylistPicker() {
@@ -350,7 +395,8 @@ Panel {
   function ensureSelectionVisible() {
     if (root.selectedIndex < 0) return
     if (panelFlick.contentHeight <= panelFlick.height) return
-    var repeater = root.searchResults.length > 0 ? searchRepeater : trackRepeater
+    var repeater = root.activeListKind === "search" ? searchRepeater
+      : (root.activeListKind === "playlist" ? trackRepeater : queueRepeater)
     if (!repeater) return
     var item = repeater.itemAt(root.selectedIndex)
     if (!item) return
@@ -470,6 +516,7 @@ Panel {
       if (exitCode === 0) {
         statusText = "Playing ✓"
         afterCommand.restart()
+        root.refreshQueue()
       } else {
         statusText = "Play failed"
       }
@@ -484,8 +531,10 @@ Panel {
     onExited: function(exitCode) {
       mixDeadline.stop()
       root.busy = false
-      if (exitCode === 0) statusText = "Mix started ✓"
-      else statusText = "Mix failed"
+      if (exitCode === 0) {
+        statusText = "Mix started ✓"
+        root.refreshQueue()
+      } else statusText = "Mix failed"
     }
   }
 
@@ -509,7 +558,40 @@ Panel {
       if (msg !== "") root.statusText = root.boundedString(msg.split("\n")[0], 256)
       root.busy = false
       if (exitCode !== 0) root.statusText = "Could not play playlist"
-      if (exitCode === 0) afterCommand.restart()
+      if (exitCode === 0) { afterCommand.restart(); root.refreshQueue() }
+    }
+  }
+
+  Process {
+    id: queueListProc
+    command: [root.ctlPath, "queue-list"]
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("queueList", data) }
+    }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("queueListErr", data) }
+    }
+    onStarted: queueListDeadline.start()
+    onExited: function(exitCode) {
+      queueListDeadline.stop()
+      var data = root.parseProcessJson(root.processText("queueList"))
+      if (data && data.ok) {
+        root.queuePosition = (typeof data.position === "number") ? data.position : -1
+        var tracks = Array.isArray(data.tracks) ? data.tracks : []
+        var rows = []
+        for (var i = 0; i < Math.min(tracks.length, 100); i++) {
+          var t = tracks[i] || {}
+          rows.push({
+            index: i,
+            videoId: String(t.videoId || ""),
+            title: root.boundedString(t.title, 256),
+            artist: root.boundedString(t.artist, 256),
+            duration: Math.max(0, Number(t.duration) || 0),
+            current: !!t.current
+          })
+        }
+        root.queueTracks = rows
+      }
     }
   }
 
@@ -568,6 +650,7 @@ Panel {
     onExited: function(exitCode) {
       cmdDeadline.stop()
       root.busy = false
+      root.refreshQueue()
       if (exitCode !== 0) {
         statusText = "Command failed"
         return
@@ -590,6 +673,7 @@ Panel {
   Timer { id: playDeadline; interval: root.commandTimeout; onTriggered: { if (playNowProc.running) playNowProc.running = false } }
   Timer { id: mixDeadline; interval: root.commandTimeout; onTriggered: { if (mixProc.running) mixProc.running = false } }
   Timer { id: queueDeadline; interval: root.commandTimeout; onTriggered: { if (queueProc.running) queueProc.running = false } }
+  Timer { id: queueListDeadline; interval: root.commandTimeout; onTriggered: { if (queueListProc.running) queueListProc.running = false } }
   Timer { id: logoutDeadline; interval: root.commandTimeout; onTriggered: { if (logoutProc.running) logoutProc.running = false } }
   Timer { id: createDeadline; interval: root.commandTimeout; onTriggered: { if (createPlaylistProc.running) createPlaylistProc.running = false } }
   Timer { id: cmdDeadline; interval: root.commandTimeout; onTriggered: { if (cmdProc.running) cmdProc.running = false } }
@@ -631,12 +715,20 @@ Panel {
   onThumbnailVideoIdChanged: {
     if (root.thumbnailVideoId === "") root.thumbnailSource = ""
   }
-  onMusicStatusChanged: root.loadThumbnail()
+  onMusicStatusChanged: {
+    root.loadThumbnail()
+    var key = String(root.musicStatus ? root.musicStatus.videoId : "")
+      + ":" + String(root.musicStatus ? root.musicStatus.playlistPos : "")
+    if (key !== root.queueKey) {
+      root.queueKey = key
+      root.refreshQueue()
+    }
+  }
 
   Timer {
     id: afterCommand
     interval: 1600
-    onTriggered: root.refresh()
+    onTriggered: { root.refresh(); root.refreshQueue() }
   }
 
   Timer {
@@ -723,6 +815,11 @@ Panel {
         }
       }
       onActivateRequested: function() {
+        if (root.activeListKind === "queue" && root.selectedIndex >= 0
+            && root.selectedIndex < root.queueTracks.length) {
+          root.queueJump(root.selectedIndex)
+          return
+        }
         var list = root.activeList
         if (root.selectedIndex >= 0 && root.selectedIndex < list.length) {
           var item = list[root.selectedIndex]
@@ -732,7 +829,10 @@ Panel {
         }
       }
       onDeleteRequested: function() {
-        if (root.playlistTracks.length > 0 && root.selectedIndex >= 0
+        if (root.activeListKind === "queue" && root.selectedIndex >= 0
+            && root.selectedIndex < root.queueTracks.length) {
+          root.queueRemove(root.selectedIndex)
+        } else if (root.playlistTracks.length > 0 && root.selectedIndex >= 0
             && root.selectedIndex < root.playlistTracks.length) {
           root.sendCmd("remove", [root.activePlaylistId, root.playlistTracks[root.selectedIndex].videoId])
         } else {
@@ -1204,6 +1304,148 @@ Panel {
               color: root.fg
               font.family: root.fam
               font.pixelSize: Style.font.body
+            }
+          }
+
+          // ---- up next (queue)
+          Column {
+            visible: Model.isActive(root.musicStatus) && root.queueTracks.length > 0
+            width: parent.width
+            spacing: 0
+
+            Item {
+              width: parent.width
+              height: Style.space(24)
+
+              PanelSectionHeader {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "UP NEXT (" + root.queueTracks.length + ")"
+                foreground: root.fg
+                fontFamily: root.fam
+              }
+
+              Text {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: root.queueOpen ? "▾" : "▸"
+                color: root.fg
+                font.family: root.fam
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.queueOpen = !root.queueOpen
+              }
+            }
+
+            Column {
+              visible: root.queueOpen
+              width: parent.width
+              spacing: 0
+
+              Repeater {
+                id: queueRepeater
+                model: root.queueTracks
+                delegate: Item {
+                  id: queueRow
+                  width: contentColumn.width
+                  height: Style.space(32)
+
+                  Rectangle {
+                    anchors.fill: parent
+                    color: index === root.selectedIndex
+                      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                      : "transparent"
+                    radius: Style.cornerRadius
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.selectIndex(index)
+                  }
+
+                  Row {
+                    anchors.fill: parent
+                    spacing: Style.spacing.sm
+
+                    Text {
+                      textFormat: Text.PlainText
+                      width: Style.space(20)
+                      text: (modelData.current || index === root.queuePosition)
+                        ? Model.ICON.play
+                        : String(index + 1)
+                      color: (modelData.current || index === root.queuePosition)
+                        ? Color.accent
+                        : Qt.darker(root.fg, 1.4)
+                      font.family: root.fam
+                      font.pixelSize: Style.font.caption
+                      verticalAlignment: Text.AlignVCenter
+                    }
+
+                    Column {
+                      width: parent.width - Style.space(20) - Style.space(56)
+                        - Style.space(44) - Style.spacing.sm * 3
+                      spacing: 0
+
+                      Text {
+                        textFormat: Text.PlainText
+                        width: parent.width
+                        elide: Text.ElideRight
+                        text: modelData.title || "Unknown"
+                        color: root.fg
+                        font.family: root.fam
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                      Text {
+                        textFormat: Text.PlainText
+                        width: parent.width
+                        elide: Text.ElideRight
+                        text: modelData.artist
+                        color: Qt.darker(root.fg, 1.4)
+                        font.family: root.fam
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      width: Style.space(56)
+                      text: modelData.duration > 0 ? Model.fmtDuration(modelData.duration) : ""
+                      horizontalAlignment: Text.AlignRight
+                      color: Qt.darker(root.fg, 1.4)
+                      font.family: root.fam
+                      font.pixelSize: Style.font.caption
+                      verticalAlignment: Text.AlignVCenter
+                    }
+
+                    Button {
+                      width: Style.space(44)
+                      height: Style.space(28)
+                      iconText: Model.ICON.play
+                      tooltipText: "Jump to track"
+                      fontFamily: root.fam
+                      foreground: root.fg
+                      enabled: !root.busy
+                      onClicked: root.queueJump(index)
+                    }
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.RightButton
+                    onClicked: function(mouse) {
+                      var point = queueRow.mapToItem(panelFlick, mouse.x, mouse.y)
+                      root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "queue", point.x, point.y, index)
+                      mouse.accepted = true
+                    }
+                  }
+                }
+              }
             }
           }
 

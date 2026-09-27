@@ -30,6 +30,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 STATE_DIR = os.path.expanduser("~/.local/state/yt-music")
 CONFIG_DIR = os.path.expanduser("~/.config/yt-music")
 STATUS_PATH = os.path.join(STATE_DIR, "status.json")
+TRACK_META_PATH = os.path.join(STATE_DIR, "track-meta.json")
+TRACK_META_MAX = 500
 DAEMON_LOCK = os.path.join(STATE_DIR, "daemon.lock")
 DAEMON_PID_PATH = os.path.join(STATE_DIR, "daemon.pid")
 DAEMON_LOG = os.path.join(STATE_DIR, "daemon.log")
@@ -229,6 +231,39 @@ def read_status():
             return json.load(fh)
     except Exception:
         return {}
+
+
+def load_track_meta():
+    """Sidecar cache of track metadata keyed by videoId (most recent last)."""
+    data = json_load(TRACK_META_PATH, default={})
+    return data if isinstance(data, dict) else {}
+
+
+def remember_tracks(entries):
+    """Merge track metadata into the sidecar cache, most-recent last."""
+    if not isinstance(entries, list) or not entries:
+        return
+    store = load_track_meta()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        video_id = entry.get("videoId")
+        if not valid_video_id(video_id):
+            continue
+        prior = store.get(video_id)
+        prior = prior if isinstance(prior, dict) else {}
+        record = {}
+        for key in ("title", "artist", "duration"):
+            value = entry.get(key)
+            if not value:
+                value = prior.get(key)
+            if value:
+                record[key] = value
+        store.pop(video_id, None)
+        store[video_id] = record
+    while len(store) > TRACK_META_MAX:
+        store.pop(next(iter(store)))
+    json_dump(TRACK_META_PATH, store, mode=0o600)
 
 
 def notify_track_change(previous, current):
@@ -487,14 +522,20 @@ def mpv_control(*args):
 
 # ---------------------------------------------------------------- playback monitor
 
-def get_mpv_props():
+def mpv_query(names):
+    """Fetch several mpv properties over one IPC connection.
+
+    Replies are routed by request_id so an unsolicited event cannot shift the
+    property mapping, and the reply stream is buffered because a single reply
+    (a large playlist) can exceed one recv(). Returns {name: value} or None
+    on any failure or incomplete reply.
+    """
+    if not names:
+        return {}
     if not mpv_is_running():
         return None
     if not private_mpv_socket():
         return None
-    names = ["pause", "media-title", "metadata/by-key/artist",
-             "metadata/by-key/album", "duration", "time-pos",
-             "volume", "path", "filename", "loop-playlist"]
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(2)
@@ -503,13 +544,11 @@ def get_mpv_props():
                 cmd = json.dumps({"command": ["get_property", name],
                                   "request_id": index}) + "\n"
                 sock.sendall(cmd.encode())
-            # Unsolicited events share this connection; route replies by
-            # request_id so an event cannot shift the property mapping.
             pending = dict(enumerate(names, start=1))
             props = {}
             buffer = b""
             while pending:
-                chunk = sock.recv(4096)
+                chunk = sock.recv(65536)
                 if not chunk:
                     break
                 buffer += chunk
@@ -530,6 +569,14 @@ def get_mpv_props():
             return props
     except Exception:
         return None
+
+
+def get_mpv_props():
+    names = ["pause", "media-title", "metadata/by-key/artist",
+             "metadata/by-key/album", "duration", "time-pos",
+             "volume", "path", "filename", "loop-playlist",
+             "playlist-pos", "playlist-count"]
+    return mpv_query(names)
 
 
 def wait_for_metadata(timeout=6):
@@ -556,22 +603,29 @@ def wait_for_metadata(timeout=6):
         time.sleep(0.25)
 
 
+def video_id_from_url(url):
+    """Pull the video id out of a watch/youtu.be URL (or a bare id)."""
+    if not isinstance(url, str) or not url:
+        return None
+    if "v=" in url:
+        for part in url.split("?"):
+            if "v=" in part:
+                return part.split("v=")[1].split("&")[0]
+    if "youtu.be/" in url:
+        return url.split("youtu.be/")[1].split("?")[0]
+    if "youtube.com/watch" in url:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qs(parsed.query)
+        return qs.get("v", [None])[0]
+    return None
+
+
 def extract_video_id(props):
     if not props:
         return None
     path = props.get("path", "") or props.get("filename", "")
-    if "v=" in path:
-        for part in path.split("?"):
-            if "v=" in part:
-                return part.split("v=")[1].split("&")[0]
-    if "youtu.be/" in path:
-        return path.split("youtu.be/")[1].split("?")[0]
-    if "youtube.com/watch" in path:
-        import urllib.parse
-        parsed = urllib.parse.urlparse(path)
-        qs = urllib.parse.parse_qs(parsed.query)
-        return qs.get("v", [None])[0]
-    return None
+    return video_id_from_url(path)
 
 
 def write_status_from_mpv(props, notify=True):
@@ -602,6 +656,8 @@ def write_status_from_mpv(props, notify=True):
         "position": round(float(position)),
         "volume": round(float(volume)),
         "loop": str(props.get("loop-playlist") or "no"),
+        "playlistPos": props.get("playlist-pos"),
+        "playlistCount": props.get("playlist-count"),
     }
     if notify:
         notify_track_change(previous, status)
@@ -667,6 +723,23 @@ def cmd_status(args):
     write_status_from_mpv(props)
 
 
+def track_from_args(video_id, extra):
+    """Build a sidecar entry from optional CLI args: [title artist duration]."""
+    entry = {"videoId": video_id}
+    if len(extra) > 0 and extra[0]:
+        entry["title"] = extra[0]
+    if len(extra) > 1 and extra[1]:
+        entry["artist"] = extra[1]
+    if len(extra) > 2:
+        try:
+            seconds = int(float(extra[2]))
+        except ValueError:
+            seconds = 0
+        if seconds > 0:
+            entry["duration"] = seconds
+    return entry
+
+
 def cmd_play(args):
     if not args:
         fail("Usage: yt-music-ctl play <videoId>")
@@ -674,37 +747,52 @@ def cmd_play(args):
     mpv_play(video_id)
     props = wait_for_metadata()
     write_status_from_mpv(props)
+    title = (props or {}).get("media-title") or ""
+    if _looks_like_url_title(title):
+        title = ""
+    remember_tracks([{
+        "videoId": video_id,
+        "title": title,
+        "artist": (props or {}).get("metadata/by-key/artist") or "",
+        "duration": round(float((props or {}).get("duration") or 0)),
+    }])
     print(json.dumps({"ok": True, "videoId": video_id}))
 
 
 def cmd_play_next(args):
     if not args:
-        fail("Usage: yt-music-ctl play-next <videoId>")
+        fail("Usage: yt-music-ctl play-next <videoId> [title] [artist] [duration]")
     video_id = args[0]
     if not valid_video_id(video_id):
         fail("Invalid video ID")
+    entry = track_from_args(video_id, args[1:])
     if not mpv_is_running():
+        remember_tracks([entry])
         mpv_play(video_id)
         write_status_from_mpv(wait_for_metadata())
         print(json.dumps({"ok": True, "played": True, "videoId": video_id}))
         return
     url = f"https://music.youtube.com/watch?v={video_id}"
+    remember_tracks([entry])
     mpv_send("loadfile", [url, "insert-next"])
     print(json.dumps({"ok": True, "queuedNext": True, "videoId": video_id}))
 
 
 def cmd_queue_add(args):
     if not args:
-        fail("Usage: yt-music-ctl queue-add <videoId>")
+        fail("Usage: yt-music-ctl queue-add <videoId> [title] [artist] [duration]")
     video_id = args[0]
     if not valid_video_id(video_id):
         fail("Invalid video ID")
+    entry = track_from_args(video_id, args[1:])
     if not mpv_is_running():
+        remember_tracks([entry])
         mpv_play(video_id)
         write_status_from_mpv(wait_for_metadata())
         print(json.dumps({"ok": True, "played": True, "videoId": video_id}))
         return
     url = f"https://music.youtube.com/watch?v={video_id}"
+    remember_tracks([entry])
     mpv_send("loadfile", [url, "append"])
     print(json.dumps({"ok": True, "queued": True, "videoId": video_id}))
 
@@ -1056,6 +1144,7 @@ def cmd_mix(args):
         if not tracks:
             print(json.dumps({"ok": False, "error": "No mix tracks found"}))
             return
+        remember_tracks(tracks)
         mpv_kill()
         urls = [f"https://music.youtube.com/watch?v={t['videoId']}" for t in tracks]
         ensure_private_runtime_dir()
@@ -1087,13 +1176,22 @@ def cmd_queue_playlist(args):
         pl = ytm.get_playlist(playlist_id, limit=100)
         tracks = pl.get("tracks") or []
         urls = []
+        meta = []
         for t in tracks:
             vid = t.get("videoId", "")
             if vid:
                 urls.append(f"https://music.youtube.com/watch?v={vid}")
+                meta.append({
+                    "videoId": vid,
+                    "title": t.get("title", ""),
+                    "artist": ", ".join(a.get("name", "")
+                                        for a in (t.get("artists") or [])),
+                    "duration": t.get("duration_seconds", 0) or 0,
+                })
         if not urls:
             print(json.dumps({"ok": False, "error": "Empty playlist"}))
             return
+        remember_tracks(meta)
         mpv_kill()
         ensure_private_runtime_dir()
         proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
@@ -1112,6 +1210,121 @@ def cmd_queue_playlist(args):
         }))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
+
+
+def _queue_count():
+    """Return the mpv playlist count, or None when it cannot be read."""
+    props = mpv_query(["playlist-count"])
+    if props is None:
+        return None
+    try:
+        return int(props.get("playlist-count"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _queue_index(args, usage):
+    if not args:
+        fail(usage)
+    try:
+        return int(args[0])
+    except ValueError:
+        fail("Index must be an integer")
+
+
+def cmd_queue_list(args):
+    empty = {"ok": True, "playing": False, "position": -1, "count": 0,
+             "tracks": []}
+    if not mpv_is_running():
+        print(json.dumps(empty))
+        return
+    props = mpv_query(["playlist", "playlist-pos", "playlist-count"])
+    if props is None:
+        print(json.dumps(empty))
+        return
+    playlist = props.get("playlist")
+    if not isinstance(playlist, list):
+        playlist = []
+    try:
+        position = int(props.get("playlist-pos"))
+    except (TypeError, ValueError):
+        position = -1
+    meta = load_track_meta()
+    tracks = []
+    for index, entry in enumerate(playlist):
+        if not isinstance(entry, dict):
+            continue
+        video_id = video_id_from_url(entry.get("filename") or "")
+        if not valid_video_id(video_id):
+            video_id = ""
+        info = meta.get(video_id) if video_id else None
+        info = info if isinstance(info, dict) else {}
+        tracks.append({
+            "index": index,
+            "videoId": video_id,
+            "title": str(info.get("title") or entry.get("title") or ""),
+            "artist": str(info.get("artist") or ""),
+            "duration": info.get("duration") or 0,
+            "current": bool(entry.get("current")),
+        })
+    print(json.dumps({"ok": True, "playing": True, "position": position,
+                      "count": len(tracks), "tracks": tracks}))
+
+
+def cmd_queue_jump(args):
+    if not mpv_is_running():
+        fail("Nothing playing")
+    index = _queue_index(args, "Usage: yt-music-ctl queue-jump <index>")
+    count = _queue_count()
+    if count is None:
+        fail("Unable to read playlist")
+    # An out-of-range playlist-pos makes mpv exit, so validate first.
+    if not 0 <= index < count:
+        fail("Index out of range")
+    mpv_send("set_property", ["playlist-pos", index])
+    write_status_from_mpv(get_mpv_props())
+    print(json.dumps({"ok": True, "position": index}))
+
+
+def cmd_queue_remove(args):
+    if not mpv_is_running():
+        fail("Nothing playing")
+    index = _queue_index(args, "Usage: yt-music-ctl queue-remove <index>")
+    count = _queue_count()
+    if count is None:
+        fail("Unable to read playlist")
+    if not 0 <= index < count:
+        fail("Index out of range")
+    mpv_send("playlist-remove", index)
+    if mpv_is_running():
+        write_status_from_mpv(get_mpv_props())
+    else:
+        write_status({"ok": True, "playing": False})
+    print(json.dumps({"ok": True, "removed": index}))
+
+
+def cmd_queue_move(args):
+    if not mpv_is_running():
+        fail("Nothing playing")
+    if len(args) < 2:
+        fail("Usage: yt-music-ctl queue-move <from> <to>")
+    try:
+        frm = int(args[0])
+        to = int(args[1])
+    except ValueError:
+        fail("Indexes must be integers")
+    count = _queue_count()
+    if count is None:
+        fail("Unable to read playlist")
+    if not (0 <= frm < count) or not (0 <= to < count):
+        fail("Index out of range")
+    # mpv moves an entry to *take the place of* the entry at the target
+    # index, so the entry lands one slot earlier when it moves forward.
+    # Shifting the target forward (count == append) makes the entry finish
+    # exactly at `to`, which is what the user asked for.
+    target = to + 1 if frm < to else to
+    mpv_send("playlist-move", [frm, target])
+    print(json.dumps({"ok": True, "from": frm, "to": to}))
 
 
 def cmd_stop(args):
@@ -1168,6 +1381,7 @@ def cmd_shuffle(args):
 OBSERVED_PROPERTIES = [
     "pause", "media-title", "metadata/by-key/artist", "metadata/by-key/album",
     "duration", "time-pos", "volume", "path", "loop-playlist",
+    "playlist-pos", "playlist-count",
 ]
 
 
@@ -1330,6 +1544,8 @@ def monitor_mpv_events():
                 round(float(props.get("volume", 100))),
                 round(float(props.get("duration", 0))),
                 round(float(props.get("time-pos", 0))),
+                str(props.get("playlist-pos")),
+                str(props.get("playlist-count")),
             )
         except (TypeError, ValueError):
             signature = None
@@ -1539,6 +1755,10 @@ COMMANDS = {
     "thumbnail": cmd_thumbnail,
     "mix": cmd_mix,
     "queue": cmd_queue_playlist,
+    "queue-list": cmd_queue_list,
+    "queue-jump": cmd_queue_jump,
+    "queue-remove": cmd_queue_remove,
+    "queue-move": cmd_queue_move,
     "loop": cmd_loop,
     "shuffle": cmd_shuffle,
     "daemon": cmd_daemon,
@@ -1579,6 +1799,10 @@ def main():
         print("  mix <videoId>            Play radio mix from seed")
         print("  queue <playlistId>       Queue and play a playlist")
         print("  queue-add <videoId>      Append a track to the queue")
+        print("  queue-list               List the current queue")
+        print("  queue-jump <index>       Jump to a queue index")
+        print("  queue-remove <index>     Remove a queue entry")
+        print("  queue-move <from> <to>   Move a queue entry")
         print("  loop <mode>              Set loop mode (off/inf)")
         print("  shuffle                  Shuffle current playlist")
         print("  daemon                   Run the status daemon in the foreground")
