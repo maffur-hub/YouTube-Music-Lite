@@ -86,6 +86,7 @@ Panel {
     : (root.activeListKind === "queue" ? root.queueTracks : [])))
   readonly property bool looping: !!(root.musicStatus && root.musicStatus.loop
     && root.musicStatus.loop !== "no")
+  readonly property bool shuffling: !!(root.musicStatus && root.musicStatus.shuffle)
   onSearchResultsChanged: root.selectedIndex = -1
   onActiveListKindChanged: root.selectedIndex = -1
   property var likedVideoIds: ({})
@@ -1617,7 +1618,7 @@ Panel {
                   Text {
                     anchors.centerIn: parent
                     text: Model.ICON.shuffle
-                    color: root.fg
+                    color: root.shuffling ? Color.accent : root.fg
                     font.family: root.fam
                     font.pixelSize: Style.font.body
                   }

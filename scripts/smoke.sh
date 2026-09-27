@@ -191,7 +191,7 @@ check_json() {
 }
 
 # check_exit0 <label> <cmd...> - just assert exit code 0 (status / toggle /
-# shuffle / thumbnail print nothing on success).
+# thumbnail print nothing on success).
 check_exit0() {
     local label=$1 out rc
     shift
@@ -637,7 +637,8 @@ if [[ $FULL -eq 1 ]]; then
     check_ok "volume 70" "$CTL" volume 70
     check_ok "loop inf" "$CTL" loop inf
     check_ok "loop off" "$CTL" loop off
-    check_exit0 "shuffle" "$CTL" shuffle
+    check_ok "shuffle" "$CTL" shuffle
+    check_ok "shuffle off" "$CTL" shuffle
     check_ok "queue-add $NO_LYRICS_VID" "$CTL" queue-add "$NO_LYRICS_VID"
     check_ok "queue-list" "$CTL" queue-list
     check_json "queue-jump 0" "$CTL" queue-jump 0

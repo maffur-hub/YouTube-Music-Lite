@@ -816,7 +816,7 @@ def get_mpv_props():
     names = ["pause", "media-title", "metadata/by-key/artist",
              "metadata/by-key/album", "duration", "time-pos",
              "volume", "path", "filename", "loop-playlist",
-             "playlist-pos", "playlist-count"]
+             "playlist-pos", "playlist-count", "shuffle"]
     return mpv_query(names)
 
 
@@ -910,6 +910,7 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
         "position": round(float(position)),
         "volume": round(float(volume)),
         "loop": str(props.get("loop-playlist") or "no"),
+        "shuffle": bool(props.get("shuffle")),
         "playlistPos": props.get("playlist-pos"),
         "playlistCount": props.get("playlist-count"),
     }
@@ -2823,8 +2824,16 @@ def cmd_loop(args):
 
 def cmd_shuffle(args):
     if not mpv_is_running():
+        print(json.dumps({"ok": False, "error": "Nothing playing"}))
         return
-    mpv_send("playlist-shuffle")
+    props = get_mpv_props() or {}
+    enable = not bool(props.get("shuffle"))
+    mpv_send("set_property", ["shuffle", "yes" if enable else "no"])
+    # Refresh status so the panel's shuffle button updates immediately.
+    new_props = get_mpv_props()
+    if new_props:
+        write_status_from_mpv(new_props)
+    print(json.dumps({"ok": True, "shuffle": enable}))
 
 
 # ---------------------------------------------------------------- status daemon
@@ -2832,7 +2841,7 @@ def cmd_shuffle(args):
 OBSERVED_PROPERTIES = [
     "pause", "media-title", "metadata/by-key/artist", "metadata/by-key/album",
     "duration", "time-pos", "volume", "path", "loop-playlist",
-    "playlist-pos", "playlist-count",
+    "playlist-pos", "playlist-count", "shuffle",
 ]
 
 
