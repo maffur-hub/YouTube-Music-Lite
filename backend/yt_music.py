@@ -1304,6 +1304,64 @@ def cmd_history(args):
         print(json.dumps({"ok": False, "error": str(e)}))
 
 
+def cmd_lyrics(args):
+    if len(args) != 1 or not valid_video_id(args[0]):
+        fail("Usage: yt-music-ctl lyrics <videoId>")
+    video_id = args[0]
+    ytm = get_ytmusic()
+    try:
+        watch = ytm.get_watch_playlist(video_id)
+        lyrics_id = watch.get("lyrics") if isinstance(watch, dict) else None
+        if not lyrics_id:
+            # Plenty of tracks genuinely have no lyrics — that is not an error.
+            print(json.dumps({"ok": True, "videoId": video_id,
+                              "hasLyrics": False, "lines": [], "source": None}))
+            return
+        data = ytm.get_lyrics(lyrics_id) or {}
+        raw_lines = [line.strip() for line in str(data.get("lyrics") or "").split("\n")]
+        while raw_lines and not raw_lines[0]:
+            raw_lines.pop(0)
+        while raw_lines and not raw_lines[-1]:
+            raw_lines.pop()
+        lines = []
+        index = 0
+        while index < len(raw_lines):
+            if raw_lines[index]:
+                lines.append(raw_lines[index])
+                index += 1
+                continue
+            run = 0
+            while index < len(raw_lines) and not raw_lines[index]:
+                run += 1
+                index += 1
+            # Keep stanza gaps readable: collapse runaway blank runs to one.
+            if run > 2:
+                lines.append("")
+            else:
+                lines.extend([""] * run)
+        # Synced lyrics are fetched separately because timestamps=True often
+        # comes back as HTTP 400 even when plain lyrics resolve fine.
+        synced = None
+        try:
+            sdata = ytm.get_lyrics(lyrics_id, timestamps=True)
+            if sdata and sdata.get("hasTimestamps") and isinstance(sdata.get("lyrics"), list):
+                synced = sdata["lyrics"]
+        except Exception:
+            synced = None
+        if not isinstance(synced, list) or not synced:
+            synced = None
+        print(json.dumps({
+            "ok": True,
+            "videoId": video_id,
+            "hasLyrics": True,
+            "source": data.get("source") or None,
+            "lines": lines,
+            "synced": synced,
+        }))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+
+
 def cmd_thumbnail(args):
     if not args or not valid_video_id(args[0]):
         fail("Invalid video ID")
@@ -2127,6 +2185,7 @@ COMMANDS = {
     "enqueue": cmd_enqueue,
     "enqueue-files": cmd_enqueue_files,
     "thumbnail": cmd_thumbnail,
+    "lyrics": cmd_lyrics,
     "mix": cmd_mix,
     "queue": cmd_queue_playlist,
     "queue-list": cmd_queue_list,
@@ -2178,6 +2237,7 @@ def main():
         print("  enqueue <play|queue|next> <album|artist|playlist> <id>   Play/queue a whole album, artist or playlist")
         print("  enqueue-files <play|queue|next> <videoId...>   Play/queue an explicit list of videoIds")
         print("  thumbnail <videoId>     Fetch a bounded album thumbnail")
+        print("  lyrics <videoId>        Fetch lyrics (plain, plus synced when available)")
         print("  mix <videoId>            Play radio mix from seed")
         print("  queue <playlistId>       Queue and play a playlist")
         print("  queue-add <videoId>      Append a track to the queue")

@@ -86,6 +86,15 @@ Panel {
   property string thumbnailSource: ""
   property string thumbnailVideoId: ""
 
+  property bool stateRestored: false
+
+  property bool lyricsOpen: false
+  property bool lyricsLoading: false
+  property bool lyricsHas: false
+  property string lyricsText: ""
+  property string lyricsVideoId: ""
+  property var lyricsSynced: null
+
   property string contextVideoId: ""
   property string contextTitle: ""
   property string contextArtist: ""
@@ -108,6 +117,74 @@ Panel {
 
   function close() {
     root.controller.hide()
+    root.saveUiState()
+  }
+
+  function uiStateScript(mode) {
+    if (mode === "save") {
+      return "import json,sys,os\n" +
+        "try:\n" +
+        " p=os.path.expanduser('~/.local/state/yt-music/ui-state.json')\n" +
+        " os.makedirs(os.path.dirname(p),exist_ok=True)\n" +
+        " d={'libraryKind':sys.argv[1],'libraryRefId':sys.argv[2],"
+        + "'libraryExpanded':sys.argv[3]=='1','searchFilter':sys.argv[4]}\n" +
+        " t=p+'.tmp'\n" +
+        " f=open(t,'w')\n" +
+        " f.write(json.dumps(d))\n" +
+        " f.close()\n" +
+        " os.chmod(t,0o600)\n" +
+        " os.replace(t,p)\n" +
+        "except Exception:\n" +
+        " pass"
+    }
+    return "import json,os,sys\n" +
+      "try:\n" +
+      " f=open(os.path.expanduser('~/.local/state/yt-music/ui-state.json'))\n" +
+      " d=json.load(f)\n" +
+      " f.close()\n" +
+      " sys.stdout.write(json.dumps(d if isinstance(d,dict) else {}))\n" +
+      "except Exception:\n" +
+      " sys.stdout.write('{}')"
+  }
+
+  function saveUiState() {
+    if (uiSaveProc.running) return
+    uiSaveProc.command = ["python3", "-c", root.uiStateScript("save"),
+      root.libraryKind, root.libraryRefId,
+      root.libraryExpanded ? "1" : "0", root.searchFilter]
+    root.startProcess(uiSaveProc, "uiSave")
+  }
+
+  function restoreUiState() {
+    if (root.stateRestored || uiLoadProc.running) return
+    uiLoadProc.command = ["python3", "-c", root.uiStateScript("load")]
+    root.startProcess(uiLoadProc, "uiLoad")
+  }
+
+  function applyUiState(data) {
+    if (root.stateRestored) return
+    root.stateRestored = true
+    if (!data || typeof data !== "object") return
+    var filter = String(data.searchFilter || "")
+    if (filter === "songs" || filter === "albums" || filter === "artists"
+        || filter === "playlists")
+      root.searchFilter = filter
+    var expanded = data.libraryExpanded === true
+    var kind = String(data.libraryKind || "")
+    var refId = String(data.libraryRefId || "")
+    var restored = false
+    if (kind === "album" || kind === "artist") {
+      if (refId !== "") {
+        if (kind === "album") root.openAlbum(refId, "")
+        else root.openArtist(refId, "")
+        restored = true
+      }
+    } else if (kind === "home" || kind === "history" || kind === "liked"
+               || kind === "songs" || kind === "albums" || kind === "artists") {
+      root.loadLibrary(kind)
+      restored = true
+    }
+    if (!restored || !expanded) root.libraryExpanded = expanded
   }
 
   function toggle() {
@@ -878,6 +955,59 @@ Panel {
   Timer { id: cmdDeadline; interval: root.commandTimeout; onTriggered: { if (cmdProc.running) cmdProc.running = false } }
 
   Process {
+    id: uiSaveProc
+    stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("uiSave", data) } }
+    stderr: SplitParser { onRead: function(data) { root.appendProcessOutput("uiSaveErr", data) } }
+  }
+
+  Process {
+    id: uiLoadProc
+    stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("uiLoad", data) } }
+    stderr: SplitParser { onRead: function(data) { root.appendProcessOutput("uiLoadErr", data) } }
+    onExited: function(exitCode) {
+      var raw = root.processText("uiLoad").trim()
+      var data = raw === "" ? null : root.parseProcessJson(raw)
+      if (data) root.applyUiState(data)
+      else root.stateRestored = true
+    }
+  }
+
+  Process {
+    id: lyricsProc
+    stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("lyrics", data) } }
+    stderr: SplitParser { onRead: function(data) { root.appendProcessOutput("lyricsErr", data) } }
+    onStarted: lyricsDeadline.start()
+    onExited: function(exitCode) {
+      lyricsDeadline.stop()
+      var cmd = lyricsProc.command || []
+      var sent = String(cmd.length > 2 ? cmd[2] : "")
+      if (sent !== root.lyricsVideoId) {
+        if (root.lyricsOpen && root.isVideoId(root.lyricsVideoId)) {
+          lyricsProc.command = [root.ctlPath, "lyrics", root.lyricsVideoId]
+          root.startProcess(lyricsProc, "lyrics")
+        } else {
+          root.lyricsLoading = false
+        }
+        return
+      }
+      var data = root.parseProcessJson(root.processText("lyrics"))
+      if (data && data.ok) {
+        root.lyricsHas = data.hasLyrics === true
+        root.lyricsText = root.lyricsHas && Array.isArray(data.lines)
+          ? data.lines.join("\n") : ""
+        root.lyricsSynced = Array.isArray(data.synced) ? data.synced : null
+      } else {
+        root.lyricsHas = false
+        root.lyricsText = ""
+        root.lyricsSynced = null
+      }
+      root.lyricsLoading = false
+    }
+  }
+
+  Timer { id: lyricsDeadline; interval: root.commandTimeout; onTriggered: { if (lyricsProc.running) { lyricsProc.running = false; root.lyricsLoading = false } } }
+
+  Process {
     id: thumbnailProc
     command: [root.ctlPath, "thumbnail", root.thumbnailVideoId]
     stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("thumbnail", data) } }
@@ -911,12 +1041,33 @@ Panel {
     if (root.thumbnailVideoId !== "") root.startProcess(thumbnailProc, "thumbnail")
   }
 
+  function loadLyrics(videoId) {
+    var id = root.isVideoId(videoId) ? String(videoId) : ""
+    root.lyricsVideoId = id
+    root.lyricsText = ""
+    root.lyricsHas = false
+    root.lyricsSynced = null
+    root.lyricsLoading = id !== ""
+    if (id === "" || lyricsProc.running) return
+    lyricsProc.command = [root.ctlPath, "lyrics", id]
+    root.startProcess(lyricsProc, "lyrics")
+  }
+
+  function toggleLyrics() {
+    root.lyricsOpen = !root.lyricsOpen
+    if (root.lyricsOpen)
+      root.loadLyrics(root.musicStatus && root.musicStatus.videoId)
+  }
+
   onThumbnailVideoIdChanged: {
     if (root.thumbnailVideoId === "") root.thumbnailSource = ""
   }
   onMusicStatusChanged: {
     root.loadThumbnail()
-    var key = String(root.musicStatus ? root.musicStatus.videoId : "")
+    var currentVideoId = String(root.musicStatus ? root.musicStatus.videoId : "")
+    if (root.lyricsOpen && currentVideoId !== root.lyricsVideoId)
+      root.loadLyrics(currentVideoId)
+    var key = currentVideoId
       + ":" + String(root.musicStatus ? root.musicStatus.playlistPos : "")
     if (key !== root.queueKey) {
       root.queueKey = key
@@ -986,7 +1137,7 @@ Panel {
     id: playlistPickerMenu
   }
 
-  Component.onCompleted: { root.loadThumbnail(); root.loadPlaylists() }
+  Component.onCompleted: { root.loadThumbnail(); root.loadPlaylists(); root.restoreUiState() }
 
   // ---------------------------------------------------------------- surface
 
@@ -1515,6 +1666,98 @@ Panel {
               color: root.fg
               font.family: root.fam
               font.pixelSize: Style.font.body
+            }
+          }
+
+          // ---- lyrics toggle
+          Row {
+            visible: Model.isActive(root.musicStatus)
+            width: parent.width
+            height: Style.spacing.controlHeight
+            spacing: Style.spacing.sm
+
+            Button {
+              width: Style.space(96)
+              height: Style.spacing.controlHeight
+              text: "Lyrics"
+              fontFamily: root.fam
+              fontSize: Style.font.bodySmall
+              foreground: root.lyricsOpen ? Color.accent : root.fg
+              onClicked: root.toggleLyrics()
+            }
+          }
+
+          // ---- lyrics
+          Column {
+            visible: root.lyricsOpen
+            width: parent.width
+            spacing: Style.spacing.sm
+
+            Item {
+              width: parent.width
+              height: Style.space(24)
+
+              PanelSectionHeader {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                text: "LYRICS"
+                foreground: root.fg
+                fontFamily: root.fam
+              }
+
+              Button {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(32)
+                height: Style.space(24)
+                iconText: Model.ICON.close
+                tooltipText: "Close lyrics"
+                fontFamily: root.fam
+                foreground: root.fg
+                onClicked: root.lyricsOpen = false
+              }
+            }
+
+            Text {
+              visible: root.lyricsLoading
+              textFormat: Text.PlainText
+              text: "Loading…"
+              color: Qt.darker(root.fg, 1.4)
+              font.family: root.fam
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              visible: !root.lyricsLoading && !root.lyricsHas
+              textFormat: Text.PlainText
+              text: "No lyrics available."
+              color: Qt.darker(root.fg, 1.4)
+              font.family: root.fam
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Flickable {
+              visible: !root.lyricsLoading && root.lyricsHas && root.lyricsText !== ""
+              width: parent.width
+              height: Math.min(contentHeight, Style.space(220))
+              contentWidth: width
+              contentHeight: lyricsBody.implicitHeight
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              flickableDirection: Flickable.VerticalFlick
+              interactive: contentHeight > height
+              ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+              Text {
+                id: lyricsBody
+                width: parent.width
+                textFormat: Text.PlainText
+                text: root.lyricsText
+                wrapMode: Text.WordWrap
+                color: root.fg
+                font.family: root.fam
+                font.pixelSize: Style.font.bodySmall
+              }
             }
           }
 
