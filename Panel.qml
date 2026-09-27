@@ -2694,35 +2694,13 @@ Panel {
                 model: [
                   { key: "home", label: "Home" },
                   { key: "history", label: "Recent" },
-                  { key: "liked", label: "Liked" }
-                ]
-                delegate: Button {
-                  width: (parent.width - Style.spacing.sm * 2) / 3
-                  height: Style.spacing.controlHeight
-                  text: modelData.label
-                  fontFamily: root.fam
-                  fontSize: Style.font.bodySmall
-                  foreground: root.libraryKind === modelData.key ? Color.accent : root.fg
-                  enabled: !libraryProc.running
-                  onClicked: root.loadLibrary(modelData.key)
-                }
-              }
-            }
-
-            Row {
-              width: parent.width - Style.space(40)
-              anchors.horizontalCenter: parent.horizontalCenter
-              spacing: Style.spacing.sm
-              visible: root.libraryExpanded
-
-              Repeater {
-                model: [
+                  { key: "liked", label: "Liked" },
                   { key: "songs", label: "Songs" },
                   { key: "albums", label: "Albums" },
                   { key: "artists", label: "Artists" }
                 ]
                 delegate: Button {
-                  width: (parent.width - Style.spacing.sm * 2) / 3
+                  width: (parent.width - Style.spacing.sm * 5) / 6
                   height: Style.spacing.controlHeight
                   text: modelData.label
                   fontFamily: root.fam
