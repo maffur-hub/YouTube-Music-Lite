@@ -561,7 +561,9 @@ check_cache_hit "artist $ARTIST_ID (miss then hit)" "$CTL" artist "$ARTIST_ID"
 check_cache_hit "search -f albums fleetwood mac (miss then hit)" \
     "$CTL" search -f albums fleetwood mac
 check_cache_hit "lyrics $LYRICS_VID (miss then hit)" "$CTL" lyrics "$LYRICS_VID"
+check_cache_hit "liked (miss then hit)" "$CTL" liked 200
 check_cached "album -r bypasses a fresh cache" False "$CTL" album "$ALBUM_ID" -r
+check_cached "liked -r bypasses a fresh cache" False "$CTL" liked 200 -r
 check_mode "cache dir mode 700" "$CACHE_DIR" 700
 check_cache_records
 # Offline fallback without cutting the real network: age every record, then

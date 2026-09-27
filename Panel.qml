@@ -66,6 +66,7 @@ Panel {
   property var libraryRows: []
   property string libraryRefId: ""
   property bool libraryExpanded: false
+  property bool libraryStale: false
   property bool playlistsExpanded: false
   property string libraryThumbUrl: ""
   property string libraryImageSource: ""
@@ -449,15 +450,35 @@ Panel {
     if (libraryProc.running) return
     var command = root.libraryCommand(kind)
     if (!command) return
+    var sameScreen = (root.libraryKind === kind) && root.libraryRows.length > 0
     root.libraryKind = kind
-    root.libraryTitle = ""
-    root.librarySubtitle = ""
-    root.libraryRows = []
-    root.libraryRefId = ""
+    if (!sameScreen) {
+      root.libraryTitle = ""
+      root.librarySubtitle = ""
+      root.libraryRows = []
+      root.libraryRefId = ""
+      root.resetLibraryInfo()
+    }
     root.libraryExpanded = true
-    root.resetLibraryInfo()
     root.selectedIndex = -1
     root.statusText = ""
+    libraryProc.command = command
+    root.startProcess(libraryProc, "library")
+  }
+
+  function refetchLibrary() {
+    if (libraryProc.running) return
+    if (!root.libraryKind) return
+    var command = null
+    if (root.libraryKind === "album")
+      command = [root.ctlPath, "album", root.libraryRefId, "-r"]
+    else if (root.libraryKind === "artist")
+      command = [root.ctlPath, "artist", root.libraryRefId, "-r"]
+    else {
+      var base = root.libraryCommand(root.libraryKind)
+      if (!base) return
+      command = base.concat(["-r"])
+    }
     libraryProc.command = command
     root.startProcess(libraryProc, "library")
   }
@@ -472,13 +493,17 @@ Panel {
 
   function openAlbum(browseId, title) {
     if (!browseId || libraryProc.running) return
+    var sameScreen = (root.libraryKind === "album")
+      && root.libraryRefId === browseId && root.libraryRows.length > 0
     root.libraryKind = "album"
-    root.libraryTitle = title || "Album"
-    root.librarySubtitle = ""
-    root.libraryRows = []
+    if (!sameScreen) {
+      root.libraryTitle = title || "Album"
+      root.librarySubtitle = ""
+      root.libraryRows = []
+      root.resetLibraryInfo()
+    }
     root.libraryRefId = browseId
     root.libraryExpanded = true
-    root.resetLibraryInfo()
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "album", browseId]
     root.startProcess(libraryProc, "library")
@@ -486,13 +511,17 @@ Panel {
 
   function openArtist(browseId, name) {
     if (!browseId || libraryProc.running) return
+    var sameScreen = (root.libraryKind === "artist")
+      && root.libraryRefId === browseId && root.libraryRows.length > 0
     root.libraryKind = "artist"
-    root.libraryTitle = name || "Artist"
-    root.librarySubtitle = ""
-    root.libraryRows = []
+    if (!sameScreen) {
+      root.libraryTitle = name || "Artist"
+      root.librarySubtitle = ""
+      root.libraryRows = []
+      root.resetLibraryInfo()
+    }
     root.libraryRefId = browseId
     root.libraryExpanded = true
-    root.resetLibraryInfo()
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "artist", browseId]
     root.startProcess(libraryProc, "library")
@@ -902,6 +931,8 @@ Panel {
       libraryDeadline.stop()
       var data = root.parseProcessJson(root.processText("library"))
       if (!data || !data.ok) return
+      root.libraryStale = (data.stale === true)
+      if (root.libraryStale) libraryRefreshTimer.restart()
       root.libraryRows = root.normalizeMixedRows(data.items, 500)
       var kind = root.libraryKind
       if (kind === "liked") {
@@ -1030,6 +1061,12 @@ Panel {
   Timer { id: logoutDeadline; interval: root.commandTimeout; onTriggered: { if (logoutProc.running) logoutProc.running = false } }
   Timer { id: createDeadline; interval: root.commandTimeout; onTriggered: { if (createPlaylistProc.running) createPlaylistProc.running = false } }
   Timer { id: cmdDeadline; interval: root.commandTimeout; onTriggered: { if (cmdProc.running) cmdProc.running = false } }
+  Timer {
+    id: libraryRefreshTimer
+    interval: 6000
+    repeat: false
+    onTriggered: root.refetchLibrary()
+  }
 
   Process {
     id: uiSaveProc

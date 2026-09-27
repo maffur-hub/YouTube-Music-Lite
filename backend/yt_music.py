@@ -74,6 +74,7 @@ METADATA_CACHE_TTL = {
     "home": 600,       # 10 min
     "history": 120,    # 2 min
     "library": 900,    # 15 min
+    "liked": 900,      # 15 min
     "playlist": 600,   # 10 min
     "album": 3600,     # 1 h
     "artist": 3600,    # 1 h
@@ -332,6 +333,45 @@ def _ytmusic_for_cache(namespace, key, ttl, **kwargs):
         if _serve_stale(namespace, key, ttl):
             return None
         raise
+
+
+def spawn_background_refresh(namespace, args):
+    """Refresh one stale cache entry in a detached child. Returns True when a
+    refresher was spawned.
+
+    The child re-runs the command with -r and rewrites the cache, so the next
+    read is fresh. A sentinel file keeps a burst of stale reads from forking
+    one refresher each: while refresh.lock is younger than 120 s nothing new
+    is spawned, and the child deliberately never touches it (the staleness
+    window makes deleting it racy). Never raises.
+    """
+    try:
+        lock = os.path.join(STATE_DIR, "refresh.lock")
+        try:
+            if time.time() - os.lstat(lock).st_mtime < 120:
+                return False
+        except OSError:
+            pass
+        try:
+            os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+            fd = os.open(lock, os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+                         | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+            os.close(fd)
+            os.utime(lock, None)  # touch, so an existing empty file ages too
+        except Exception:
+            pass
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "__refresh", namespace]
+            + [str(a) for a in args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        return True
+    except Exception:
+        return False
 
 
 def private_runtime_dir():
@@ -1276,6 +1316,11 @@ def cmd_playlist_tracks(args):
         if fresh and payload is not None:
             print(json.dumps(_cache_served(payload)))
             return
+        if payload is not None:
+            # Stale but usable: serve it now, refresh in the background.
+            print(json.dumps(_cache_served(payload, stale=True)))
+            spawn_background_refresh("playlist", [playlist_id])
+            return
     ytm = _ytmusic_for_cache("playlist", key, ttl)
     if ytm is None:
         return
@@ -1414,24 +1459,43 @@ def mixed_row(item):
 
 
 def cmd_liked(args):
+    args, refresh = _strip_refresh(args)
     limit = 100
     if args:
         try:
             limit = max(1, min(300, int(args[0])))
         except ValueError:
             fail("Usage: yt-music-ctl liked [limit]")
-    ytm = get_ytmusic()
+    key = [limit]
+    ttl = METADATA_CACHE_TTL["liked"]
+    if not refresh:
+        payload, fresh = cache_read("liked", key, ttl)
+        if fresh and payload is not None:
+            print(json.dumps(_cache_served(payload)))
+            return
+        if payload is not None:
+            # Stale but usable: serve it now, refresh in the background.
+            print(json.dumps(_cache_served(payload, stale=True)))
+            spawn_background_refresh("liked", [limit])
+            return
+    ytm = _ytmusic_for_cache("liked", key, ttl)
+    if ytm is None:
+        return
     try:
         liked = ytm.get_liked_songs(limit=limit)
         items = [song_row(t) for t in (liked.get("tracks") or []) if t.get("videoId")]
-        print(json.dumps({
+        payload = {
             "ok": True,
             "title": liked.get("title", "Liked Music"),
             "playlistId": "LM",
             "items": items,
-        }))
+            "cached": False,
+        }
+        cache_write("liked", key, payload)
+        print(json.dumps(payload))
     except Exception as e:
-        print(json.dumps({"ok": False, "error": str(e)}))
+        if not _serve_stale("liked", key, ttl):
+            print(json.dumps({"ok": False, "error": str(e)}))
 
 
 def cmd_library(args):
@@ -1451,6 +1515,11 @@ def cmd_library(args):
         payload, fresh = cache_read("library", key, ttl)
         if fresh and payload is not None:
             print(json.dumps(_cache_served(payload)))
+            return
+        if payload is not None:
+            # Stale but usable: serve it now, refresh in the background.
+            print(json.dumps(_cache_served(payload, stale=True)))
+            spawn_background_refresh("library", [kind, limit])
             return
     ytm = _ytmusic_for_cache("library", key, ttl)
     if ytm is None:
@@ -1487,6 +1556,11 @@ def cmd_album(args):
         payload, fresh = cache_read("album", key, ttl)
         if fresh and payload is not None:
             print(json.dumps(_cache_served(payload)))
+            return
+        if payload is not None:
+            # Stale but usable: serve it now, refresh in the background.
+            print(json.dumps(_cache_served(payload, stale=True)))
+            spawn_background_refresh("album", [browse_id])
             return
     ytm = _ytmusic_for_cache("album", key, ttl)
     if ytm is None:
@@ -1530,6 +1604,11 @@ def cmd_artist(args):
         payload, fresh = cache_read("artist", key, ttl)
         if fresh and payload is not None:
             print(json.dumps(_cache_served(payload)))
+            return
+        if payload is not None:
+            # Stale but usable: serve it now, refresh in the background.
+            print(json.dumps(_cache_served(payload, stale=True)))
+            spawn_background_refresh("artist", [browse_id])
             return
     ytm = _ytmusic_for_cache("artist", key, ttl)
     if ytm is None:
@@ -1599,6 +1678,12 @@ def cmd_artist_radio(args):
             _mix_launch(track_list)
             print(json.dumps(_cache_served(_mix_output(payload))))
             return
+        if isinstance(track_list, list) and track_list:
+            # Stale but usable: start playback now, refresh in the background.
+            print(json.dumps(_cache_served(_mix_output(payload), stale=True)))
+            spawn_background_refresh("radio", [browse_id])
+            _mix_launch(track_list)
+            return
     ytm = _ytmusic_for_cache("radio", key, ttl)
     if ytm is None:
         return
@@ -1660,6 +1745,12 @@ def cmd_search(args):
         if fresh and payload is not None:
             print(json.dumps(_cache_served(payload)))
             return
+        if payload is not None:
+            # Stale but usable: serve it now, refresh in the background.
+            # Re-passed as CLI-style -f args so the child rebuilds this key.
+            print(json.dumps(_cache_served(payload, stale=True)))
+            spawn_background_refresh("search", ["-f", filter_kind] + query.split())
+            return
     ytm = _ytmusic_for_cache("search", key, ttl, require_auth=False)
     if ytm is None:
         return
@@ -1697,6 +1788,11 @@ def cmd_home(args):
         payload, fresh = cache_read("home", key, ttl)
         if fresh and payload is not None:
             print(json.dumps(_cache_served(payload)))
+            return
+        if payload is not None:
+            # Stale but usable: serve it now, refresh in the background.
+            print(json.dumps(_cache_served(payload, stale=True)))
+            spawn_background_refresh("home", [sections])
             return
     ytm = _ytmusic_for_cache("home", key, ttl)
     if ytm is None:
@@ -1736,6 +1832,11 @@ def cmd_history(args):
         if fresh and payload is not None:
             print(json.dumps(_cache_served(payload)))
             return
+        if payload is not None:
+            # Stale but usable: serve it now, refresh in the background.
+            print(json.dumps(_cache_served(payload, stale=True)))
+            spawn_background_refresh("history", [limit])
+            return
     ytm = _ytmusic_for_cache("history", key, ttl)
     if ytm is None:
         return
@@ -1761,6 +1862,11 @@ def cmd_lyrics(args):
         payload, fresh = cache_read("lyrics", key, ttl)
         if fresh and payload is not None:
             print(json.dumps(_cache_served(payload)))
+            return
+        if payload is not None:
+            # Stale but usable: serve it now, refresh in the background.
+            print(json.dumps(_cache_served(payload, stale=True)))
+            spawn_background_refresh("lyrics", [video_id])
             return
     ytm = _ytmusic_for_cache("lyrics", key, ttl)
     if ytm is None:
@@ -2418,6 +2524,12 @@ def cmd_mix(args):
             # Metadata comes from the cache, playback still happens here.
             _mix_launch(track_list)
             print(json.dumps(_cache_served(_mix_output(payload))))
+            return
+        if isinstance(track_list, list) and track_list:
+            # Stale but usable: start playback now, refresh in the background.
+            print(json.dumps(_cache_served(_mix_output(payload), stale=True)))
+            spawn_background_refresh("mix", list(args))
+            _mix_launch(track_list)
             return
     ytm = get_ytmusic(require_auth=False)
     try:
@@ -3214,6 +3326,122 @@ def cmd_daemon_stop(args):
     print(json.dumps({"ok": True, "stopped": bool(stopped)}))
 
 
+# Cached-read commands a detached background refresher may re-run. Kept out
+# of the help text: "__refresh" is internal plumbing, not a user command.
+REFRESHABLE_COMMANDS = ("liked", "library", "home", "history", "album",
+                        "artist", "search", "playlist", "mix", "radio", "lyrics")
+
+
+def _refresh_mix_metadata(args):
+    """Repopulate a stale mix cache entry without touching playback.
+
+    Mirrors cmd_mix's key (list(args)) and payload exactly, but omits
+    _mix_launch: the refresher runs detached while the user is already
+    listening, so it must never kill or restart mpv.
+    """
+    try:
+        if not args:
+            return
+        seed_id = args[0]
+        key = list(args)
+        ytm = get_ytmusic(require_auth=False)
+        watchlist = ytm.get_watch_playlist(seed_id, limit=50)
+        tracks = []
+        for track in (watchlist.get("tracks") or []):
+            vid = track.get("videoId", "")
+            if not vid:
+                continue
+            album = track.get("album") or {}
+            if not isinstance(album, dict):
+                album = {"name": album}
+            tracks.append({
+                "videoId": vid,
+                "title": track.get("title", ""),
+                "artist": ", ".join(a.get("name", "") for a in (track.get("artists") or [])),
+                "album": album.get("title", "") or album.get("name", ""),
+                "duration": track.get("duration_seconds", 0) or 0,
+            })
+        if not tracks:
+            return
+        payload = {"seedId": seed_id, "trackList": tracks}
+        cache_write("mix", key, payload)
+    except Exception:
+        pass
+    except SystemExit:
+        pass
+
+
+def _refresh_radio_metadata(args):
+    """Repopulate a stale radio cache entry without touching playback.
+
+    Mirrors cmd_artist_radio's key ([browse_id]) and payload exactly, but
+    omits _mix_launch and any output: metadata only.
+    """
+    try:
+        if not args:
+            return
+        browse_id = args[0]
+        key = [browse_id]
+        ytm = get_ytmusic(require_auth=True)
+        artist = ytm.get_artist(browse_id)
+        radio_id = artist.get("radioId", "") or ""
+        if not radio_id:
+            return
+        watchlist = ytm.get_watch_playlist(playlistId=radio_id, radio=True)
+        tracks = []
+        for track in (watchlist.get("tracks") or []):
+            vid = track.get("videoId", "")
+            if not vid:
+                continue
+            album = track.get("album") or {}
+            if not isinstance(album, dict):
+                album = {"name": album}
+            tracks.append({
+                "videoId": vid,
+                "title": track.get("title", ""),
+                "artist": ", ".join(a.get("name", "") for a in (track.get("artists") or [])),
+                "album": album.get("title", "") or album.get("name", ""),
+                "duration": track.get("duration_seconds", 0) or 0,
+            })
+        if not tracks:
+            return
+        payload = {"ok": True, "mix": True, "seedId": browse_id,
+                   "radioId": radio_id, "trackList": tracks, "cached": False}
+        cache_write("radio", key, payload)
+    except Exception:
+        pass
+    except SystemExit:
+        pass
+
+
+def cmd_internal_refresh(args):
+    """Re-run one cached-read command with -r to repopulate a stale entry.
+
+    Spawned by spawn_background_refresh with stdout already at /dev/null, so
+    the JSON the command prints is discarded. It must never fail loudly:
+    anything else, including fail()'s SystemExit, is swallowed.
+
+    mix and radio carry a playback side effect on the normal serve path, so
+    they are refreshed through metadata-only helpers instead of the command
+    itself: the detached child must never restart the user's audio.
+    """
+    if len(args) < 1 or args[0] not in REFRESHABLE_COMMANDS:
+        return
+    name = args[0]
+    sub_args = list(args[1:])
+    try:
+        if name == "mix":
+            _refresh_mix_metadata(sub_args)
+        elif name == "radio":
+            _refresh_radio_metadata(sub_args)
+        else:
+            COMMANDS[name](sub_args + ["-r"])
+    except Exception:
+        pass
+    except SystemExit:
+        pass
+
+
 # ---------------------------------------------------------------- main
 
 COMMANDS = {
@@ -3265,6 +3493,7 @@ COMMANDS = {
     "watch": cmd_daemon,
     "ensure-daemon": cmd_ensure_daemon,
     "daemon-stop": cmd_daemon_stop,
+    "__refresh": cmd_internal_refresh,
 }
 
 
