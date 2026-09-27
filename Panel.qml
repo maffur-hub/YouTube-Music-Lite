@@ -57,7 +57,6 @@ Panel {
     : 100
   property var queueTracks: []
   property int queuePosition: -1
-  property bool queueOpen: true
   property int contextQueueIndex: -1
   property string queueKey: ""
   property string libraryKind: ""
@@ -79,15 +78,23 @@ Panel {
     && (root.libraryImageSource !== "" || root.libraryThumbUrl !== ""
       || root.libraryMeta !== "" || root.libraryDescription !== "")
   readonly property var libraryList: root.libraryRows
-  readonly property string activeListKind: (root.activeTab === "search" && root.searchResults.length > 0) ? "search"
-    : (root.activeTab === "playlists" && root.playlistTracks.length > 0 ? "playlist"
-    : (root.activeTab === "library" && root.libraryList.length > 0 ? "library"
-    : (root.queueOpen && root.queueTracks.length > 0 ? "queue" : "")))
-  readonly property var tabItems: root.loggedIn
-    ? [ { key: "search", label: "Search" },
-        { key: "playlists", label: "Playlists" },
-        { key: "library", label: "Library" } ]
-    : [ { key: "search", label: "Search" } ]
+  readonly property bool queueVisible: Model.isActive(root.musicStatus)
+    && root.queueTracks.length > 0
+  readonly property var tabItems: {
+    var items = []
+    if (root.queueVisible)
+      items.push({ key: "queue", label: "Up Next (" + root.queueTracks.length + ")" })
+    items.push({ key: "search", label: "Search" })
+    if (root.loggedIn) {
+      items.push({ key: "playlists", label: "Playlists" })
+      items.push({ key: "library", label: "Library" })
+    }
+    return items
+  }
+  readonly property string activeListKind: root.activeTab === "queue" ? (root.queueVisible ? "queue" : "")
+    : root.activeTab === "search" ? (root.searchResults.length > 0 ? "search" : "")
+    : root.activeTab === "playlists" ? (root.playlistTracks.length > 0 ? "playlist" : "")
+    : (root.libraryList.length > 0 ? "library" : "")
   readonly property var activeList: root.activeListKind === "search" ? root.searchResults
     : (root.activeListKind === "playlist" ? root.playlistTracks
     : (root.activeListKind === "library" ? root.libraryList
@@ -97,7 +104,12 @@ Panel {
   readonly property bool shuffling: !!(root.musicStatus && root.musicStatus.shuffle)
   onSearchResultsChanged: root.selectedIndex = -1
   onActiveListKindChanged: root.selectedIndex = -1
-  onLoggedInChanged: if (!root.loggedIn && root.activeTab !== "search") root.activeTab = "search"
+  function hasTab(key) {
+    for (var i = 0; i < root.tabItems.length; i++)
+      if (root.tabItems[i].key === key) return true
+    return false
+  }
+  onTabItemsChanged: if (!root.hasTab(root.activeTab)) root.activeTab = "search"
   property var likedVideoIds: ({})
   property string newPlaylistName: ""
   readonly property int maxProcessOutput: 65536
@@ -171,7 +183,7 @@ Panel {
     if (uiSaveProc.running) return
     uiSaveProc.command = ["python3", "-c", root.uiStateScript("save"),
       root.libraryKind, root.libraryRefId,
-      root.activeTab, root.searchFilter]
+      root.activeTab === "queue" ? "search" : root.activeTab, root.searchFilter]
     root.startProcess(uiSaveProc, "uiSave")
   }
 
@@ -1987,43 +1999,37 @@ Panel {
             }
           }
 
+          // ---- content tabs (Up Next / Search / Playlists / Library)
+          Row {
+            visible: root.tabItems.length > 1
+            width: parent.width - Style.space(40)
+            height: Style.spacing.controlHeight
+            anchors.horizontalCenter: parent.horizontalCenter
+            spacing: Style.spacing.sm
+
+            Repeater {
+              model: root.tabItems
+              delegate: Button {
+                width: (parent.width - Style.spacing.sm * (root.tabItems.length - 1))
+                  / root.tabItems.length
+                height: Style.spacing.controlHeight
+                text: modelData.label
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                selected: root.activeTab === modelData.key
+                foreground: root.fg
+                onClicked: root.activeTab = modelData.key
+              }
+            }
+          }
+
           // ---- up next (queue)
           Column {
-            visible: Model.isActive(root.musicStatus) && root.queueTracks.length > 0
+            visible: root.activeTab === "queue" && root.queueVisible
             width: parent.width
             spacing: 0
 
-            Item {
-              width: parent.width
-              height: Style.space(24)
-
-              PanelSectionHeader {
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                text: "UP NEXT (" + root.queueTracks.length + ")"
-                foreground: root.fg
-                fontFamily: root.fam
-              }
-
-              Text {
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: root.queueOpen ? "▾" : "▸"
-                color: root.fg
-                font.family: root.fam
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.queueOpen = !root.queueOpen
-              }
-            }
-
             Column {
-              visible: root.queueOpen
               width: parent.width
               spacing: 0
 
@@ -2131,30 +2137,6 @@ Panel {
                     }
                   }
                 }
-              }
-            }
-          }
-
-          // ---- content tabs (Search / Playlists / Library)
-          Row {
-            visible: root.loggedIn
-            width: parent.width - Style.space(40)
-            height: Style.spacing.controlHeight
-            anchors.horizontalCenter: parent.horizontalCenter
-            spacing: Style.spacing.sm
-
-            Repeater {
-              model: root.tabItems
-              delegate: Button {
-                width: (parent.width - Style.spacing.sm * (root.tabItems.length - 1))
-                  / root.tabItems.length
-                height: Style.spacing.controlHeight
-                text: modelData.label
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                selected: root.activeTab === modelData.key
-                foreground: root.fg
-                onClicked: root.activeTab = modelData.key
               }
             }
           }
