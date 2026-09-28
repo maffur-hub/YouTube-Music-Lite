@@ -761,6 +761,25 @@ Panel {
     root.detailTab = ""
   }
 
+  // Clicking the active content tab pops one level out of it first: out of an
+  // open playlist or library list back to that tab's list/pills, and only the
+  // click at the tab's top level collapses the tab.
+  function toggleTab(key) {
+    if (root.activeTab !== key) {
+      root.activeTab = key
+      return
+    }
+    if (key === "playlists" && root.playlistDetail) {
+      root.closePlaylist()
+      return
+    }
+    if (key === "library" && root.libraryKind !== "") {
+      root.closeLibrary()
+      return
+    }
+    root.activeTab = ""
+  }
+
   function songCount(rows) {
     var n = 0
     for (var i = 0; i < rows.length; i++)
@@ -1797,6 +1816,7 @@ Panel {
   onStatusTextChanged: if (statusText !== "") statusClear.restart()
 
 
+
   Timer {
     id: autoRefresh
     // Live updates come from the yt-music daemon via status.json; this is only a backstop.
@@ -2762,7 +2782,7 @@ Panel {
                 selected: root.activeTab === modelData.key
                 bordered: true
                 foreground: root.fg
-                onClicked: root.activeTab = (root.activeTab === modelData.key) ? "" : modelData.key
+                onClicked: root.toggleTab(modelData.key)
               }
             }
           }
@@ -3760,8 +3780,7 @@ Panel {
 
               Button {
                 id: playPlaylistButton
-                anchors.right: closePlaylistButton.left
-                anchors.rightMargin: Style.space(4)
+                anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 width: Style.space(32)
                 height: Style.space(24)
@@ -3772,18 +3791,6 @@ Panel {
                 onClicked: root.playSelectedPlaylist()
               }
 
-              Button {
-                id: closePlaylistButton
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(32)
-                height: Style.space(24)
-                iconText: Model.ICON.close
-                tooltipText: "Close playlist"
-                fontFamily: root.fam
-                foreground: root.fg
-                onClicked: root.closePlaylist()
-              }
             }
 
             Row {
