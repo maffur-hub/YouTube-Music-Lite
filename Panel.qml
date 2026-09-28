@@ -92,6 +92,13 @@ Panel {
   property string librarySubtitle: ""
   property var libraryRows: []
   property string libraryRefId: ""
+  // A detail (album/artist/playlist) opens in place under the tab it was
+  // opened from, so the tab bar always reflects what the user is browsing.
+  // detailTab is that tab; empty means no detail is open.
+  property string detailTab: ""
+  readonly property bool libraryDetail: root.libraryKind === "album" || root.libraryKind === "artist"
+  readonly property bool playlistDetail: root.activePlaylistId !== ""
+  readonly property bool detailActive: root.detailTab !== ""
   // Top-level content tab: "search" | "playlists" | "library" | "queue".
   // "" means every section is collapsed (clicking the active tab again hides
   // it). Collapsing is deliberately NOT persisted: saveUiState() maps "" back
@@ -103,7 +110,7 @@ Panel {
   property string libraryMeta: ""
   property string libraryDescription: ""
   property bool libraryInfoOpen: false
-  readonly property bool libraryRichHeader: root.activeTab === "library"
+  readonly property bool libraryRichHeader: root.libraryDetail
     && (root.libraryKind === "album" || root.libraryKind === "artist")
     && (root.libraryImageSource !== "" || root.libraryThumbUrl !== ""
       || root.libraryMeta !== "" || root.libraryDescription !== "")
@@ -129,7 +136,11 @@ Panel {
     }
     return items
   }
-  readonly property string activeListKind: root.activeTab === "" ? ""
+  readonly property string activeListKind: root.libraryDetail
+      ? (root.libraryList.length > 0 ? "library" : "")
+    : root.playlistDetail
+      ? (root.playlistTracks.length > 0 ? "playlist" : "")
+    : root.activeTab === "" ? ""
     : root.activeTab === "queue" ? (root.queueVisible ? "queue" : "")
     : root.activeTab === "search" ? (root.searchResults.length > 0 ? "search" : "")
     : root.activeTab === "last" ? (root.lastPlayed.length > 0 ? "last" : "")
@@ -166,7 +177,12 @@ Panel {
       root.selectedIndex = -1
     }
   }
-  onActiveTabChanged: root.clearSelection()
+  onActiveTabChanged: {
+    root.clearSelection()
+    // A detail belongs to the tab it was opened from; leaving that tab shows
+    // the tab's own content instead of a stale detail.
+    if (root.detailActive && root.activeTab !== root.detailTab) root.closeDetail()
+  }
   onActiveListKindChanged: root.selectedIndex = -1
   function hasTab(key) {
     for (var i = 0; i < root.tabItems.length; i++)
@@ -297,6 +313,9 @@ Panel {
     // Back-compat: pre-tab state files only stored a libraryExpanded boolean.
     if (tab !== "search" && tab !== "last" && tab !== "playlists" && tab !== "library")
       tab = (data.libraryExpanded === true && restored) ? "library" : "search"
+    // A restored detail must be hosted by the restored tab, otherwise
+    // onActiveTabChanged would close it right away.
+    if (kind === "album" || kind === "artist") root.detailTab = tab
     root.activeTab = tab
   }
 
@@ -426,7 +445,8 @@ Panel {
       if (!playlist || !playlist.id) continue
       result.push({
         id: root.boundedString(playlist.id, 256),
-        title: root.boundedString(playlist.title, 256)
+        title: root.boundedString(playlist.title, 256),
+        description: root.boundedString(playlist.description, 256)
       })
     }
     return result
@@ -447,10 +467,11 @@ Panel {
   }
 
   function openPlaylist(id, title) {
+    root.closeLibrary()
     root.activePlaylistId = id
     root.activePlaylistTitle = title
     root.playlistTracks = []
-    root.activeTab = "playlists"
+    root.detailTab = root.activeTab
     root.selectedIndex = -1
     root.renameOpen = false
     root.statusText = ""
@@ -465,15 +486,6 @@ Panel {
     root.startProcess(queueProc, "queue")
   }
 
-  function selectPlaylist(id) {
-    for (var i = 0; i < root.playlists.length; i++) {
-      if (root.playlists[i].id === id) {
-        root.openPlaylist(id, root.playlists[i].title)
-        return
-      }
-    }
-  }
-
   function closePlaylist() {
     root.activePlaylistId = ""
     root.activePlaylistTitle = ""
@@ -481,6 +493,7 @@ Panel {
     root.selectedIndex = -1
     root.renameOpen = false
     root.queueSaveOpen = false
+    if (!root.libraryDetail) root.detailTab = ""
   }
 
   function logout() {
@@ -570,7 +583,6 @@ Panel {
   function openRow(row, fromSearch) {
     if (!row) return
     if (row.kind === "song") { root.playNow(row.videoId); return }
-    if (fromSearch) root.searchResults = []
     if (row.kind === "album") root.openAlbum(row.browseId, row.title)
     else if (row.kind === "artist") root.openArtist(row.browseId, row.title)
     else if (row.kind === "playlist") root.openPlaylist(row.browseId, row.title)
@@ -636,6 +648,8 @@ Panel {
     if (!command) return
     var sameScreen = (root.libraryKind === kind) && root.libraryRows.length > 0
     root.libraryKind = kind
+    // Browse mode: no detail is open under this tab.
+    root.detailTab = ""
     if (!sameScreen) {
       root.libraryTitle = ""
       root.librarySubtitle = ""
@@ -677,6 +691,7 @@ Panel {
 
   function openAlbum(browseId, title) {
     if (!browseId || libraryProc.running) return
+    root.closePlaylist()
     var sameScreen = (root.libraryKind === "album")
       && root.libraryRefId === browseId && root.libraryRows.length > 0
     root.libraryKind = "album"
@@ -687,7 +702,7 @@ Panel {
       root.resetLibraryInfo()
     }
     root.libraryRefId = browseId
-    root.activeTab = "library"
+    root.detailTab = root.activeTab
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "album", browseId]
     root.startProcess(libraryProc, "library")
@@ -695,6 +710,7 @@ Panel {
 
   function openArtist(browseId, name) {
     if (!browseId || libraryProc.running) return
+    root.closePlaylist()
     var sameScreen = (root.libraryKind === "artist")
       && root.libraryRefId === browseId && root.libraryRows.length > 0
     root.libraryKind = "artist"
@@ -705,7 +721,7 @@ Panel {
       root.resetLibraryInfo()
     }
     root.libraryRefId = browseId
-    root.activeTab = "library"
+    root.detailTab = root.activeTab
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "artist", browseId]
     root.startProcess(libraryProc, "library")
@@ -719,6 +735,13 @@ Panel {
     root.libraryRefId = ""
     root.resetLibraryInfo()
     root.selectedIndex = -1
+    if (!root.playlistDetail) root.detailTab = ""
+  }
+
+  function closeDetail() {
+    root.closeLibrary()
+    root.closePlaylist()
+    root.detailTab = ""
   }
 
   function songCount(rows) {
@@ -1708,6 +1731,7 @@ Panel {
     repeat: false
     onTriggered: root.search(searchField.text)
   }
+
 
 
   Timer {
@@ -3103,7 +3127,7 @@ Panel {
 
             // ---- search
             Column {
-              visible: root.activeTab === "search"
+              visible: root.activeTab === "search" && !root.detailActive
               width: parent.width
               spacing: Style.spacing.sm
 
@@ -3203,7 +3227,8 @@ Panel {
 
           // ---- search results
           Column {
-            visible: root.activeTab === "search" && (root.searchResults.length > 0 || root.searching)
+            visible: root.activeTab === "search" && !root.detailActive
+              && (root.searchResults.length > 0 || root.searching)
             width: parent.width
             spacing: Style.spacing.panelGap
 
@@ -3495,7 +3520,7 @@ Panel {
 
           // ---- playlists
           Column {
-            visible: root.loggedIn && root.activeTab === "playlists"
+            visible: root.loggedIn && root.activeTab === "playlists" && !root.detailActive
             width: parent.width
             spacing: Style.spacing.panelGap
 
@@ -3529,27 +3554,95 @@ Panel {
               }
             }
 
-            Item {
-              width: parent.width
-              height: Style.spacing.controlHeight
+            Text {
+              visible: root.playlists.length === 0 && !playlistsProc.running
+              textFormat: Text.PlainText
+              text: "No playlists yet."
+              color: Qt.darker(root.fg, 1.4)
+              font.family: root.fam
+              font.pixelSize: Style.font.bodySmall
+            }
 
-              Dropdown {
-                width: parent.width - Style.space(40)
-                anchors.horizontalCenter: parent.horizontalCenter
-                label: ""
-                showLabel: false
-                options: root.playlistOptions
-                value: root.activePlaylistId
-                foreground: root.fg
-                fontFamily: root.fam
-                onChanged: function(selectedValue) { root.selectPlaylist(selectedValue) }
+            Repeater {
+              model: root.playlists
+              delegate: Item {
+                id: playlistRow
+                width: contentColumn.width
+                height: Style.space(40)
+
+                RowHighlight {
+                  id: playlistRowBg
+                  foreground: root.fg
+                  hasCursor: index === root.selectedIndex
+                  hovered: playlistRowClick.containsMouse
+                }
+
+                MouseArea {
+                  id: playlistRowClick
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.openPlaylist(modelData.id, modelData.title)
+                }
+
+                Row {
+                  anchors.fill: parent
+                  spacing: Style.spacing.sm
+
+                  Text {
+                    textFormat: Text.PlainText
+                    width: Style.space(24)
+                    text: Model.ICON.playlist
+                    color: Color.accent
+                    font.family: root.fam
+                    font.pixelSize: Style.font.bodySmall
+                    verticalAlignment: Text.AlignVCenter
+                  }
+
+                  Column {
+                    width: parent.width - Style.space(24) - Style.space(56)
+                      - Style.space(40) - Style.spacing.sm * 3
+                    spacing: 0
+
+                    Text {
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      elide: Text.ElideRight
+                      text: modelData.title
+                      color: root.fg
+                      font.family: root.fam
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                    Text {
+                      visible: modelData.description !== ""
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      elide: Text.ElideRight
+                      text: modelData.description
+                      color: Qt.darker(root.fg, 1.4)
+                      font.family: root.fam
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+
+                  Text {
+                    textFormat: Text.PlainText
+                    width: Style.space(40)
+                    text: "›"
+                    horizontalAlignment: Text.AlignRight
+                    color: Color.accent
+                    font.family: root.fam
+                    font.pixelSize: Style.font.body
+                    verticalAlignment: Text.AlignVCenter
+                  }
+                }
               }
             }
            }
 
             // ---- playlist tracks view
           Column {
-            visible: root.activeTab === "playlists" && root.playlistTracks.length > 0
+            visible: root.playlistDetail && root.playlistTracks.length > 0
             width: parent.width
             spacing: Style.spacing.panelGap
 
@@ -3762,9 +3855,18 @@ Panel {
             }
           }
 
+          Text {
+            visible: root.playlistDetail && root.playlistTracks.length === 0 && !tracksProc.running
+            textFormat: Text.PlainText
+            text: "Playlist is empty."
+            color: Qt.darker(root.fg, 1.4)
+            font.family: root.fam
+            font.pixelSize: Style.font.bodySmall
+          }
+
           // ---- library
           Column {
-            visible: root.loggedIn && root.activeTab === "library"
+            visible: root.loggedIn && (root.activeTab === "library" || root.libraryDetail)
             width: parent.width
             spacing: Style.spacing.panelGap
 
@@ -3790,6 +3892,7 @@ Panel {
               width: parent.width - Style.space(40)
               anchors.horizontalCenter: parent.horizontalCenter
               spacing: Style.spacing.sm
+              visible: !root.libraryDetail
 
               Repeater {
                 model: [
@@ -3819,7 +3922,8 @@ Panel {
             Row {
               width: parent.width
               height: Style.space(28)
-              visible: root.activeTab === "library" && root.libraryKind !== ""
+              visible: (root.activeTab === "library" || root.libraryDetail)
+                && root.libraryKind !== ""
               spacing: Style.spacing.sm
 
               Button {
@@ -3962,7 +4066,8 @@ Panel {
             }
 
             Text {
-              visible: root.activeTab === "library" && root.libraryKind !== "" && root.libraryList.length === 0
+              visible: (root.activeTab === "library" || root.libraryDetail)
+                && root.libraryKind !== "" && root.libraryList.length === 0
                 && !libraryProc.running
               textFormat: Text.PlainText
               text: "Nothing here."
@@ -3973,7 +4078,7 @@ Panel {
 
             Repeater {
               id: libraryRepeater
-              visible: root.activeTab === "library"
+              visible: root.activeTab === "library" || root.libraryDetail
               model: root.libraryList
               delegate: Item {
                 id: libraryRow
