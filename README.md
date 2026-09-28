@@ -11,6 +11,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - Create private playlists from the player
 - Play, pause, previous, next, shuffle, like, and dislike controls
 - Remove tracks from playlists with right-click
+- Select multiple search results with Ctrl-click (toggle) and Shift-click (range), then add them all to a playlist in one go
 - Album artwork and progress display
 - Private per-user runtime state and MPV IPC socket
 

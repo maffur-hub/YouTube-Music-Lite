@@ -77,6 +77,92 @@ function truncate(text, maxLen) {
   return t.substring(0, maxLen - 1) + "…"
 }
 
+// ---- multi-select helpers (pure; used by Panel.qml and scripts/model_test.js)
+
+// Stable identity for a search row: songs key on videoId, everything else on
+// its browseId, prefixed with the row kind so kinds never collide.
+function rowKey(row) {
+  if (!row) return ""
+  if (row.kind === "song") return "v:" + row.videoId
+  return String(row.kind) + ":" + String(row.browseId)
+}
+
+function selectedCount(selected) {
+  if (!selected || typeof selected !== "object") return 0
+  return Object.keys(selected).length
+}
+
+// Returns a NEW object; never mutates `selected`.
+function withRowSelected(selected, row, on) {
+  var out = {}
+  if (selected && typeof selected === "object") {
+    var keys = Object.keys(selected)
+    for (var i = 0; i < keys.length; i++) out[keys[i]] = selected[keys[i]]
+  }
+  var key = rowKey(row)
+  if (on) out[key] = row
+  else delete out[key]
+  return out
+}
+
+function toggleSelected(selected, row) {
+  return withRowSelected(selected, row, !(selected && selected[rowKey(row)]))
+}
+
+// Adds every row in the inclusive [a, b] index span (order-agnostic, clamped
+// to the array); existing selections are always preserved.
+function selectedRange(selected, rows, a, b) {
+  var out = {}
+  if (selected && typeof selected === "object") {
+    var keys = Object.keys(selected)
+    for (var i = 0; i < keys.length; i++) out[keys[i]] = selected[keys[i]]
+  }
+  if (!rows || rows.length === 0) return out
+  var lo = Math.max(0, Math.min(a, b))
+  var hi = Math.min(rows.length - 1, Math.max(a, b))
+  for (var j = lo; j <= hi; j++) {
+    var row = rows[j]
+    if (!row) continue
+    out[rowKey(row)] = row
+  }
+  return out
+}
+
+// Backend `playlist-add-items` tokens, one per row, in list order.
+function rowsToTokens(rows) {
+  var out = []
+  if (!rows || rows.length === 0) return out
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i]
+    if (!row) continue
+    if (row.kind === "song" && row.videoId) out.push("v:" + row.videoId)
+    else if (row.kind === "album" && row.browseId) out.push("a:" + row.browseId)
+    else if (row.kind === "artist" && row.browseId) out.push("r:" + row.browseId)
+    else if (row.kind === "playlist" && row.browseId) out.push("p:" + row.browseId)
+  }
+  return out
+}
+
+// True only for a non-empty list made up exclusively of playable songs.
+function allSongs(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return false
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i]
+    if (!row || row.kind !== "song" || !row.videoId) return false
+  }
+  return true
+}
+
+function videoIds(rows) {
+  var out = []
+  if (!Array.isArray(rows)) return out
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i]
+    if (row && row.kind === "song" && row.videoId) out.push(String(row.videoId))
+  }
+  return out
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     ICON: ICON,
@@ -87,6 +173,14 @@ if (typeof module !== "undefined") {
     tooltipText: tooltipText,
     isActive: isActive,
     isPlaying: isPlaying,
-    truncate: truncate
+    truncate: truncate,
+    rowKey: rowKey,
+    selectedCount: selectedCount,
+    withRowSelected: withRowSelected,
+    toggleSelected: toggleSelected,
+    selectedRange: selectedRange,
+    rowsToTokens: rowsToTokens,
+    allSongs: allSongs,
+    videoIds: videoIds
   }
 }

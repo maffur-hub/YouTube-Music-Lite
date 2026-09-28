@@ -51,6 +51,22 @@ Panel {
   property string searchFilter: "songs"
   property bool searching: false
   property int selectedIndex: -1
+  // Multi-select over search results: keys are Model.rowKey(row) values and
+  // the value is the row itself, so the count/token helpers stay pure JS.
+  property bool selectMode: false
+  property var selectedKeys: ({})
+  property int selectionAnchor: -1
+  property var playlistAddTokens: []
+  readonly property int selectedCount: Model.selectedCount(root.selectedKeys)
+  readonly property var selectedRows: {
+    var out = []
+    for (var i = 0; i < root.searchResults.length; i++) {
+      var row = root.searchResults[i]
+      if (row && root.selectedKeys[Model.rowKey(row)] !== undefined) out.push(row)
+    }
+    return out
+  }
+  readonly property bool selectionAllSongs: Model.allSongs(root.selectedRows)
   property int lastVolume: 100
   readonly property int currentVolume: root.musicStatus && root.musicStatus.volume !== undefined
     ? Math.round(Number(root.musicStatus.volume))
@@ -117,7 +133,8 @@ Panel {
   readonly property bool looping: !!(root.musicStatus && root.musicStatus.loop
     && root.musicStatus.loop !== "no")
   readonly property bool shuffling: !!(root.musicStatus && root.musicStatus.shuffle)
-  onSearchResultsChanged: root.selectedIndex = -1
+  onSearchResultsChanged: { root.selectedIndex = -1; root.clearSelection() }
+  onActiveTabChanged: root.clearSelection()
   onActiveListKindChanged: root.selectedIndex = -1
   function hasTab(key) {
     for (var i = 0; i < root.tabItems.length; i++)
@@ -654,6 +671,50 @@ Panel {
     root.sendCmd("enqueue-files", [mode].concat(ids))
   }
 
+  // ---- search multi-select (Ctrl/Shift clicks, action bar, batch add)
+  function clearSelection() {
+    root.selectMode = false
+    root.selectedKeys = ({})
+    root.selectionAnchor = -1
+  }
+
+  function isRowSelected(row) {
+    return !!root.selectedKeys[Model.rowKey(row)]
+  }
+
+  function toggleRowAt(index, setAnchor) {
+    if (index < 0 || index >= root.searchResults.length) return
+    var row = root.searchResults[index]
+    if (!row) return
+    root.selectedKeys = Model.toggleSelected(root.selectedKeys, row)
+    if (setAnchor !== false) root.selectionAnchor = index
+    root.selectedIndex = index
+    if (!root.selectMode) root.selectMode = true
+  }
+
+  function selectRangeAt(index) {
+    if (root.selectionAnchor < 0) {
+      root.toggleRowAt(index, true)
+      return
+    }
+    root.selectedKeys = Model.selectedRange(root.selectedKeys, root.searchResults, root.selectionAnchor, index)
+    root.selectedIndex = index
+    if (!root.selectMode) root.selectMode = true
+  }
+
+  // Returns true when the click was consumed as a selection gesture, i.e. the
+  // caller should skip the normal "select + open row" behaviour.
+  function handleRowClick(index, modifiers) {
+    var ctrl = (modifiers & Qt.ControlModifier) !== 0
+    var shift = (modifiers & Qt.ShiftModifier) !== 0
+    if (root.selectMode || ctrl || shift) {
+      if (shift) root.selectRangeAt(index)
+      else root.toggleRowAt(index, true)
+      return true
+    }
+    return false
+  }
+
   function openContextMenu(videoId, title, artist, source, x, y, queueIndex) {
     root.contextRow = null
     if (!root.isVideoId(videoId) && source !== "queue") return
@@ -683,11 +744,28 @@ Panel {
     contextMenu.popupAt(panelFlick, x, y)
   }
 
+  // Both entry points just stage `playlistAddTokens`; showPlaylistPicker()
+  // is the single place that validates and pops the menu.
   function openPlaylistPicker() {
-    if (!root.loggedIn || root.playlists.length === 0) return
+    if (root.isVideoId(root.contextVideoId))
+      root.playlistAddTokens = ["v:" + root.contextVideoId]
+    root.showPlaylistPicker(root.contextX, root.contextY)
+  }
+
+  function openPlaylistPickerForSelection(anchorItem) {
+    var tokens = Model.rowsToTokens(root.selectedRows)
+    if (tokens.length === 0) return
+    root.playlistAddTokens = tokens
+    // Anchor under the button so the menu doesn't jump to the last right-click.
+    var p = anchorItem ? anchorItem.mapToItem(panelFlick, 0, anchorItem.height) : { x: 0, y: 0 }
+    root.showPlaylistPicker(p.x, p.y)
+  }
+
+  function showPlaylistPicker(x, y) {
+    if (!root.loggedIn || root.playlists.length === 0 || root.playlistAddTokens.length === 0) return
     rebuildPlaylistPicker()
     Qt.callLater(function() {
-      playlistPickerMenu.popupAt(panelFlick, root.contextX, root.contextY)
+      playlistPickerMenu.popupAt(panelFlick, x, y)
     })
   }
 
@@ -759,7 +837,10 @@ Panel {
     // The returned closure captures the parameter, so every row keeps its own
     // playlist id instead of the loop variable.
     return function() {
-      root.sendCmd("playlist-add", [playlistId, root.contextVideoId])
+      var tokens = root.playlistAddTokens.slice()
+      if (tokens.length === 0) return
+      root.sendCmd("playlist-add-items", [playlistId].concat(tokens))
+      root.clearSelection()
     }
   }
 
@@ -1204,8 +1285,30 @@ Panel {
         statusText = "Command failed"
         return
       }
+      var cmdName = String(cmdProc.command[1] || "")
       var action = String(cmdProc.command[1] || "Command")
       action = action.charAt(0).toUpperCase() + action.slice(1).replace(/-/g, " ")
+      if (cmdName === "playlist-add" || cmdName === "playlist-add-items") {
+        // Batch/single add report {ok, added, duplicates, ...}: summarise the
+        // counts instead of the generic "<Name> ✓".
+        var d = root.parseProcessJson(root.processText("cmd"))
+        if (d && d.ok) {
+          var addN = Number(d.added) || 0
+          var dupN = Number(d.duplicates) || 0
+          var addMsg = "Added " + addN + (addN === 1 ? " track" : " tracks")
+          if (dupN > 0) addMsg += " · " + dupN + " already in playlist"
+          statusText = addMsg + " ✓"
+          var dest = String(cmdProc.command[2] || "")
+          if (dest !== "" && dest === root.activePlaylistId) {
+            tracksProc.command = [root.ctlPath, "playlist", root.activePlaylistId]
+            root.startProcess(tracksProc, "tracks")
+          }
+        } else {
+          statusText = root.boundedString((d && d.error) || "Add failed", 256)
+        }
+        afterCommand.restart()
+        return
+      }
       statusText = action + " ✓"
       if (action === "Remove" && root.activePlaylistId) {
         tracksProc.command = [root.ctlPath, "playlist", root.activePlaylistId]
@@ -1548,6 +1651,10 @@ Panel {
         }
       }
       onActivateRequested: function() {
+        if (root.selectMode && root.activeListKind === "search") {
+          root.toggleRowAt(root.selectedIndex, true)
+          return
+        }
         if (root.activeListKind === "queue" && root.selectedIndex >= 0
             && root.selectedIndex < root.queueTracks.length) {
           root.queueJump(root.selectedIndex)
@@ -1597,6 +1704,12 @@ Panel {
         else if (t === "r") root.toggleLoop()
         else if (t === "f") root.sendCmd("shuffle", [])
         else if (t === "/") { root.activeTab = "search"; searchField.forceActiveFocus() }
+        else if (t === "x") {
+          if (root.activeTab === "search") {
+            if (root.selectMode) root.clearSelection()
+            else root.selectMode = true
+          }
+        }
       }
 
       Flickable {
@@ -2600,32 +2713,100 @@ Panel {
             width: parent.width
             spacing: Style.spacing.panelGap
 
-            Row {
+            Item {
               width: parent.width
               height: Style.space(28)
-              spacing: Style.spacing.sm
-              visible: root.searchFilter === "songs" && root.songCount(root.searchResults) > 0
+              visible: root.searchResults.length > 0
 
-              Button {
-                width: Style.space(72)
-                height: Style.space(28)
-                text: "Play all"
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                enabled: !root.busy && root.songCount(root.searchResults) > 0
-                onClicked: root.enqueueFiles("play")
+              Row {
+                anchors.left: parent.left
+                spacing: Style.spacing.sm
+                visible: !root.selectMode
+
+                Button {
+                  width: Style.space(72)
+                  height: Style.space(28)
+                  text: "Play all"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  visible: root.searchFilter === "songs" && root.songCount(root.searchResults) > 0
+                  enabled: !root.busy && root.songCount(root.searchResults) > 0
+                  onClicked: root.enqueueFiles("play")
+                }
+
+                Button {
+                  width: Style.space(72)
+                  height: Style.space(28)
+                  text: "Queue all"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  visible: root.searchFilter === "songs" && root.songCount(root.searchResults) > 0
+                  enabled: !root.busy && root.songCount(root.searchResults) > 0
+                  onClicked: root.enqueueFiles("queue")
+                }
+              }
+
+              Row {
+                anchors.left: parent.left
+                spacing: Style.spacing.sm
+                visible: root.selectMode
+
+                Text {
+                  textFormat: Text.PlainText
+                  height: Style.space(28)
+                  verticalAlignment: Text.AlignVCenter
+                  text: root.selectedCount + " selected"
+                  color: root.fg
+                  font.family: root.fam
+                  font.pixelSize: Style.font.caption
+                }
+
+                Button {
+                  id: addSelectedButton
+                  width: Style.space(120)
+                  height: Style.space(28)
+                  text: "Add to playlist…"
+                  iconText: Model.ICON.plus
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  enabled: root.selectedCount > 0 && root.loggedIn && root.playlists.length > 0 && !root.busy
+                  onClicked: root.openPlaylistPickerForSelection(addSelectedButton)
+                }
+
+                Button {
+                  width: Style.space(72)
+                  height: Style.space(28)
+                  text: "Queue"
+                  visible: root.selectionAllSongs
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  enabled: !root.busy
+                  onClicked: {
+                    var ids = Model.videoIds(root.selectedRows)
+                    if (ids.length > 0) root.sendCmd("enqueue-files", ["queue"].concat(ids))
+                    root.clearSelection()
+                  }
+                }
               }
 
               Button {
+                id: selectToggleButton
+                anchors.right: parent.right
                 width: Style.space(72)
                 height: Style.space(28)
-                text: "Queue all"
+                text: root.selectMode ? "Done" : "Select"
+                iconText: root.selectMode ? Model.ICON.check : ""
                 fontFamily: root.fam
                 fontSize: Style.font.bodySmall
                 foreground: root.fg
-                enabled: !root.busy && root.songCount(root.searchResults) > 0
-                onClicked: root.enqueueFiles("queue")
+                onClicked: {
+                  if (root.selectMode) root.clearSelection()
+                  else root.selectMode = true
+                }
               }
             }
 
@@ -2655,11 +2836,13 @@ Panel {
                 Rectangle {
                   id: searchRowBg
                   anchors.fill: parent
-                  color: index === root.selectedIndex
-                    ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                    : (searchRowClick.containsMouse
-                      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
-                      : "transparent")
+                  color: root.isRowSelected(modelData)
+                    ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.28)
+                    : (index === root.selectedIndex
+                      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                      : (searchRowClick.containsMouse
+                        ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+                        : "transparent"))
                   radius: Style.cornerRadius
                   Behavior on color { ColorAnimation { duration: 120 } }
                 }
@@ -2669,7 +2852,8 @@ Panel {
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: {
+                  onClicked: function(mouse) {
+                    if (root.handleRowClick(index, mouse.modifiers)) return
                     root.selectIndex(index)
                     if (modelData.kind !== "song") root.openRow(modelData, true)
                   }
@@ -2682,8 +2866,9 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     width: Style.space(24)
-                    text: modelData.kind === "song" ? Model.ICON.note
-                      : (modelData.kind === "playlist" ? Model.ICON.playlist : Model.ICON.music)
+                    text: root.isRowSelected(modelData) ? Model.ICON.check
+                      : (modelData.kind === "song" ? Model.ICON.note
+                      : (modelData.kind === "playlist" ? Model.ICON.playlist : Model.ICON.music))
                     color: Color.accent
                     font.family: root.fam
                     font.pixelSize: Style.font.bodySmall
