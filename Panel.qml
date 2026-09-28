@@ -1796,6 +1796,7 @@ Panel {
 
   onStatusTextChanged: if (statusText !== "") statusClear.restart()
 
+
   Timer {
     id: autoRefresh
     // Live updates come from the yt-music daemon via status.json; this is only a backstop.
@@ -3950,24 +3951,6 @@ Panel {
             visible: root.loggedIn && (root.activeTab === "library" || root.libraryDetail)
             width: parent.width
             spacing: Style.spacing.panelGap
-
-            Item {
-              width: parent.width
-              height: Style.space(24)
-              visible: root.libraryKind !== ""
-
-              Button {
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(32)
-                height: Style.space(24)
-                iconText: Model.ICON.close
-                tooltipText: "Close library"
-                fontFamily: root.fam
-                foreground: root.fg
-                onClicked: root.closeLibrary()
-              }
-            }
 
             Row {
               width: parent.width - Style.space(40)
