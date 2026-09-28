@@ -219,6 +219,20 @@ function queueTokens(tracks) {
   return out
 }
 
+// Name up to `max` ids when EVERY id is known; otherwise return "" so the
+// caller can fall back to a plain count. Adds a trailing " …" when the ids
+// were truncated.
+function idsToNames(ids, labels, max) {
+  if (!ids || !ids.length) return ""
+  var out = []
+  for (var i = 0; i < ids.length; i++) {
+    var name = labels ? labels[String(ids[i])] : ""
+    if (!name) return ""
+    if (i < max) out.push(name)
+  }
+  return ids.length > max ? out.join(", ") + " …" : out.join(", ")
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     ICON: ICON,
@@ -240,6 +254,7 @@ if (typeof module !== "undefined") {
     allSongs: allSongs,
     videoIds: videoIds,
     filterByTitle: filterByTitle,
-    queueTokens: queueTokens
+    queueTokens: queueTokens,
+    idsToNames: idsToNames
   }
 }

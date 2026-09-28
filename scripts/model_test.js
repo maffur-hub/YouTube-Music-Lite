@@ -159,4 +159,13 @@ eq(Model.queueTokens([]), [], "queueTokens([])")
 eq(Model.queueTokens(null), [], "queueTokens(null)")
 eq(Model.queueTokens(undefined), [], "queueTokens(undefined)")
 
+// --- idsToNames
+const nameLabels = { aaa: "A", bbb: "B", ccc: "C" }
+eq(Model.idsToNames(["aaa", "bbb"], nameLabels, 2), "A, B", "idsToNames names every known id")
+eq(Model.idsToNames(["aaa", "bbb", "ccc"], nameLabels, 2), "A, B …",
+  "idsToNames appends an ellipsis when ids exceed max")
+eq(Model.idsToNames(["aaa", "zzz"], nameLabels, 2), "", "idsToNames returns \"\" when any id is unknown")
+eq(Model.idsToNames([], nameLabels, 2), "", "idsToNames([])")
+eq(Model.idsToNames(undefined, nameLabels, 2), "", "idsToNames(undefined)")
+
 console.log(passed + " assertions passed")

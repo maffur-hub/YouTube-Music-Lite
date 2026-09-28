@@ -81,6 +81,9 @@ Panel {
   // and repeated selections of the same track.
   property int playlistAddUnaddable: 0
   property int playlistAddDuplicateSelections: 0
+  // videoId -> title for the staged rows, so the result message can name the
+  // tracks YouTube would not add instead of only counting them.
+  property var playlistAddLabels: ({})
   property int contextTrackIndex: -1
   property int lastVolume: 100
   readonly property int currentVolume: root.musicStatus && root.musicStatus.volume !== undefined
@@ -615,10 +618,18 @@ Panel {
     root.startProcess(mixProc, "mix")
   }
 
+  // Commands whose effect is already visible in the UI (transport, queue
+  // shuffling); their generic "<Command> ✓" acknowledgment would only flash a
+  // pointless toast.
+  readonly property var quietCommands: ["toggle", "pause", "resume", "next", "prev",
+    "seek", "seek-pct", "volume", "stop", "loop", "shuffle", "queue-jump",
+    "queue-remove", "queue-move", "queue-clear", "enqueue", "enqueue-files",
+    "precache", "thumbnail", "image", "status"]
+  function isQuietCommand(name) { return root.quietCommands.indexOf(name) !== -1 }
+
   function sendCmd(command, args) {
     if (root.busy) return false
     root.busy = true
-    statusText = "Sending " + command + "…"
     cmdProc.command = [root.ctlPath, command].concat((args || []).map(String))
     root.startProcess(cmdProc, "cmd")
     return true
@@ -893,6 +904,13 @@ Panel {
       if (Model.rowAddable(rows[i])) addable++
     root.playlistAddUnaddable = rows.length - addable
     root.playlistAddDuplicateSelections = addable - tokens.length
+    var labels = ({})
+    for (var k = 0; k < rows.length; k++) {
+      var row = rows[k]
+      var vid = row && row.videoId ? String(row.videoId) : ""
+      if (vid !== "" && row.title) labels[vid] = String(row.title)
+    }
+    root.playlistAddLabels = labels
     root.playlistAddTokens = tokens
     return tokens
   }
@@ -1511,9 +1529,17 @@ Panel {
           var dupN = Number(d.duplicates) || 0
           var addMsg = addN > 0 ? "Added " + addN + (addN === 1 ? " track" : " tracks")
                                 : "Nothing added"
-          if (dupN > 0) addMsg += " · " + dupN + " already in playlist"
+          var dupNames = Model.idsToNames(d.duplicateVideoIds, root.playlistAddLabels, 2)
+          if (dupN > 0) {
+            if (dupNames !== "") addMsg += " · already in playlist: " + dupNames
+            else addMsg += " · " + dupN + " already in playlist"
+          }
           var skipN = Number(d.skipped) || 0
-          if (skipN > 0) addMsg += " · " + skipN + " skipped by YouTube"
+          var skipNames = Model.idsToNames(d.skippedVideoIds, root.playlistAddLabels, 2)
+          if (skipN > 0) {
+            if (skipNames !== "") addMsg += " · YouTube skipped: " + skipNames
+            else addMsg += " · " + skipN + " skipped by YouTube"
+          }
           if (root.playlistAddDuplicateSelections > 0)
             addMsg += " · " + root.playlistAddDuplicateSelections
               + (root.playlistAddDuplicateSelections === 1 ? " duplicate selection" : " duplicate selections")
@@ -1522,6 +1548,7 @@ Panel {
           root.playlistAddDuplicateSelections = 0
           root.playlistAddUnaddable = 0
           statusText = addMsg + " ✓"
+          root.playlistAddLabels = ({})
           var dest = String(cmdProc.command[2] || "")
           if (dest !== "" && dest === root.activePlaylistId) {
             tracksProc.command = [root.ctlPath, "playlist", root.activePlaylistId]
@@ -1575,7 +1602,8 @@ Panel {
         afterCommand.restart()
         return
       }
-      statusText = action + " ✓"
+      if (!root.isQuietCommand(cmdName))
+        statusText = action + " ✓"
       if (action === "Remove" && root.activePlaylistId) {
         tracksProc.command = [root.ctlPath, "playlist", root.activePlaylistId]
         root.startProcess(tracksProc, "tracks")
@@ -1757,6 +1785,16 @@ Panel {
     interval: 1600
     onTriggered: { root.refresh(); root.refreshQueue(); root.refreshLastPlayed() }
   }
+
+  Timer {
+    id: statusClear
+    // Messages are transient by design: long enough to read, gone before the
+    // next interaction.
+    interval: 4000
+    onTriggered: root.statusText = ""
+  }
+
+  onStatusTextChanged: if (statusText !== "") statusClear.restart()
 
   Timer {
     id: autoRefresh
@@ -4238,6 +4276,40 @@ Panel {
             }
           }
 
+        }
+      }
+
+      // The panel's single feedback channel. statusText is written all over
+      // this file; without an element bound to it nothing the app said
+      // ("Added 1 track · already in playlist: Schism", "Play failed") was
+      // ever visible.
+      Rectangle {
+        id: statusToast
+        z: 10
+        visible: root.statusText !== ""
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Style.space(14)
+        width: Math.min(panelFlick.width - Style.space(40), Style.space(540))
+        height: statusToastLabel.implicitHeight + Style.space(20)
+        radius: Style.cornerRadius
+        color: Color.notifications.background
+        border.width: 1
+        border.color: Color.notifications.border
+
+        Text {
+          id: statusToastLabel
+          anchors.fill: parent
+          anchors.margins: Style.space(10)
+          text: root.statusText
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          maximumLineCount: 3
+          elide: Text.ElideRight
+          color: Color.notifications.text
+          font.family: root.fam
+          font.pixelSize: Style.font.body
+          verticalAlignment: Text.AlignVCenter
         }
       }
 

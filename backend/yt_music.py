@@ -1221,8 +1221,8 @@ def cmd_queue_add(args):
     print(json.dumps({"ok": True, "queued": True, "videoId": video_id}))
 
 
-def _confirmed_added(response, requested):
-    """Count the tracks YouTube actually accepted.
+def _confirmed_ids(response, requested):
+    """Video ids YouTube actually accepted, deduped and in response order.
 
     YouTube silently drops edit actions it will not apply (private, region
     locked, or otherwise unaddable videos) while still answering
@@ -1230,27 +1230,29 @@ def _confirmed_added(response, requested):
     An action only counts when its result carries a setVideoId. If the shape
     is not what we expect, assume the whole request landed."""
     if not isinstance(response, dict):
-        return len(requested)
+        return list(requested)
     results = response.get("playlistEditResults")
     if not isinstance(results, list):
-        return len(requested)
-    confirmed = 0
+        return list(requested)
+    confirmed = []
     for item in results:
         if not isinstance(item, dict):
             continue
         data = item.get("playlistEditVideoAddedResultData")
         if not isinstance(data, dict):
             data = item
-        if data.get("videoId") and data.get("setVideoId"):
-            confirmed += 1
+        vid = data.get("videoId")
+        if vid and data.get("setVideoId") and vid not in confirmed:
+            confirmed.append(vid)
     return confirmed
 
 
 def _add_video_ids(ytm, playlist_id, video_ids):
     """Add video ids to a playlist, skipping duplicates. Returns
-    (added, duplicates, skipped) where `skipped` counts the ids YouTube
-    refused to add even though the edit succeeded. Liked Music edits via
-    song rating."""
+    (added, duplicates, skipped, duplicate_ids, skipped_ids) where
+    `duplicate_ids` names the ids already present in the playlist and
+    `skipped_ids` names the ids YouTube refused to add even though the edit
+    succeeded. Liked Music edits via song rating."""
     ids = []
     for vid in video_ids:
         if vid not in ids:
@@ -1258,6 +1260,8 @@ def _add_video_ids(ytm, playlist_id, video_ids):
     added = 0
     duplicates = 0
     skipped = 0
+    duplicate_ids = []
+    skipped_ids = []
     if playlist_id == "LM":
         # Liked Music is a system playlist; edit it via the song rating.
         for vid in ids:
@@ -1266,15 +1270,20 @@ def _add_video_ids(ytm, playlist_id, video_ids):
     elif ids:
         existing = ytm.get_playlist(playlist_id, limit=100)
         have = {t.get("videoId") for t in (existing.get("tracks") or [])}
+        duplicate_ids = [vid for vid in ids if vid in have]
         fresh = [vid for vid in ids if vid not in have]
-        duplicates = len(ids) - len(fresh)
+        duplicates = len(duplicate_ids)
         if fresh:
             response = ytm.add_playlist_items(playlist_id, fresh, duplicates=False)
-            added = _confirmed_added(response, fresh)
-            skipped = len(fresh) - added
+            confirmed = _confirmed_ids(response, fresh)
+            confirmed_set = set(confirmed)
+            added_ids = [vid for vid in fresh if vid in confirmed_set]
+            skipped_ids = [vid for vid in fresh if vid not in confirmed_set]
+            added = len(added_ids)
+            skipped = len(skipped_ids)
     if added > 0:
         invalidate_cache("playlist", [playlist_id])
-    return added, duplicates, skipped
+    return added, duplicates, skipped, duplicate_ids, skipped_ids
 
 
 def cmd_playlist_add(args):
@@ -1287,13 +1296,15 @@ def cmd_playlist_add(args):
         fail(usage)
     ytm = get_ytmusic()
     try:
-        added, duplicates, skipped = _add_video_ids(ytm, playlist_id, ids)
+        added, duplicates, skipped, duplicate_ids, skipped_ids = _add_video_ids(ytm, playlist_id, ids)
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
         return
     print(json.dumps({"ok": True, "added": added, "duplicates": duplicates,
                       "skipped": skipped, "resolved": len(ids),
-                      "playlistId": playlist_id}))
+                      "playlistId": playlist_id,
+                      "duplicateVideoIds": duplicate_ids,
+                      "skippedVideoIds": skipped_ids}))
 
 
 def cmd_playlist_add_items(args):
@@ -1338,13 +1349,15 @@ def cmd_playlist_add_items(args):
         if not resolved:
             print(json.dumps({"ok": False, "error": "No playable tracks"}))
             return
-        added, duplicates, skipped = _add_video_ids(ytm, playlist_id, resolved)
+        added, duplicates, skipped, duplicate_ids, skipped_ids = _add_video_ids(ytm, playlist_id, resolved)
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
         return
     print(json.dumps({"ok": True, "added": added, "duplicates": duplicates,
                       "skipped": skipped, "resolved": len(resolved),
-                      "playlistId": playlist_id}))
+                      "playlistId": playlist_id,
+                      "duplicateVideoIds": duplicate_ids,
+                      "skippedVideoIds": skipped_ids}))
 
 
 def cmd_playlist_edit(args):
