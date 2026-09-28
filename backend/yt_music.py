@@ -232,6 +232,17 @@ def cache_write(namespace, args, payload):
         pass
 
 
+def invalidate_cache(namespace, args):
+    """Unlink one cache record (regular file, owned by us). Never raises."""
+    try:
+        path = _cache_path(namespace, args)
+        st = os.lstat(path)
+        if stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid():
+            os.unlink(path)
+    except Exception:
+        pass
+
+
 def _cache_entries():
     """(ts, size, path) for each regular cache file, oldest stored ts first.
 
@@ -1210,24 +1221,199 @@ def cmd_queue_add(args):
     print(json.dumps({"ok": True, "queued": True, "videoId": video_id}))
 
 
+def _add_video_ids(ytm, playlist_id, video_ids):
+    """Add video ids to a playlist, skipping duplicates. Returns
+    (added, duplicates). Liked Music edits via song rating."""
+    ids = []
+    for vid in video_ids:
+        if vid not in ids:
+            ids.append(vid)
+    added = 0
+    duplicates = 0
+    if playlist_id == "LM":
+        # Liked Music is a system playlist; edit it via the song rating.
+        for vid in ids:
+            ytm.rate_song(vid, "LIKE")
+        added = len(ids)
+    elif ids:
+        existing = ytm.get_playlist(playlist_id, limit=100)
+        have = {t.get("videoId") for t in (existing.get("tracks") or [])}
+        fresh = [vid for vid in ids if vid not in have]
+        duplicates = len(ids) - len(fresh)
+        if fresh:
+            ytm.add_playlist_items(playlist_id, fresh, duplicates=False)
+        added = len(fresh)
+    if added > 0:
+        invalidate_cache("playlist", [playlist_id])
+    return added, duplicates
+
+
 def cmd_playlist_add(args):
+    usage = "Usage: yt-music-ctl playlist-add <playlistId> <videoId...>"
     if len(args) < 2:
-        fail("Usage: yt-music-ctl playlist-add <playlistId> <videoId>")
-    playlist_id, video_id = args[0], args[1]
-    if not valid_video_id(video_id):
-        fail("Invalid video ID")
+        fail(usage)
+    playlist_id = args[0]
+    ids = args[1:]
+    if not all(valid_video_id(video_id) for video_id in ids):
+        fail(usage)
     ytm = get_ytmusic()
     try:
-        # Liked Music is a system playlist; edit it via the song rating.
-        if playlist_id == "LM":
-            ytm.rate_song(video_id, "LIKE")
-        else:
-            ytm.add_playlist_items(playlist_id, [video_id])
+        added, duplicates = _add_video_ids(ytm, playlist_id, ids)
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
         return
-    print(json.dumps({"ok": True, "added": True, "playlistId": playlist_id,
-                      "videoId": video_id}))
+    print(json.dumps({"ok": True, "added": added, "duplicates": duplicates,
+                      "resolved": len(ids), "playlistId": playlist_id}))
+
+
+def cmd_playlist_add_items(args):
+    usage = ("Usage: yt-music-ctl playlist-add-items <playlistId> "
+             "<v:videoId|a:albumBrowseId|r:artistBrowseId|p:playlistId...>")
+    if len(args) < 2:
+        fail(usage)
+    playlist_id = args[0]
+    tokens = args[1:]
+    # Validate every token's shape before touching the network. Every token
+    # must carry one of the v:/a:/r:/p: prefixes so a stray word is a usage
+    # error rather than an attempted (and confusing) YouTube lookup.
+    for token in tokens:
+        kind, sep, value = token.partition(":")
+        if not sep or kind not in ("v", "a", "r", "p") or not value:
+            fail(usage)
+        if kind == "v" and not valid_video_id(value):
+            fail(usage)
+    ytm = get_ytmusic()
+    try:
+        resolved = []
+        for token in tokens:
+            if token.startswith("v:"):
+                ids = [token[2:]]
+            elif token.startswith("a:"):
+                album = ytm.get_album(token[2:]) or {}
+                tracks = album.get("tracks") if isinstance(album, dict) else []
+                ids = [t.get("videoId") for t in (tracks or []) if isinstance(t, dict)]
+            elif token.startswith("r:"):
+                data = ytm.get_artist(token[2:]) or {}
+                songs = data.get("songs") if isinstance(data, dict) else None
+                songs = songs if isinstance(songs, dict) else {}
+                rows = songs.get("results") or []
+                ids = [t.get("videoId") for t in rows if isinstance(t, dict)]
+            else:  # p:<playlistId>
+                pl = ytm.get_playlist(token[2:], limit=100) or {}
+                tracks = pl.get("tracks") if isinstance(pl, dict) else []
+                ids = [t.get("videoId") for t in (tracks or []) if isinstance(t, dict)]
+            for vid in ids:
+                if valid_video_id(vid) and vid not in resolved:
+                    resolved.append(vid)
+        if not resolved:
+            print(json.dumps({"ok": False, "error": "No playable tracks"}))
+            return
+        added, duplicates = _add_video_ids(ytm, playlist_id, resolved)
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return
+    print(json.dumps({"ok": True, "added": added, "duplicates": duplicates,
+                      "resolved": len(resolved), "playlistId": playlist_id}))
+
+
+def cmd_playlist_edit(args):
+    usage = ("Usage: yt-music-ctl playlist-edit <playlistId> [--title <text>] "
+             "[--description <text>] [--privacy PUBLIC|PRIVATE|UNLISTED]")
+    if not args:
+        fail(usage)
+    playlist_id = args[0]
+    options = {}
+    index = 1
+    while index < len(args):
+        flag = args[index]
+        if flag not in ("--title", "--description", "--privacy"):
+            fail(usage)
+        if index + 1 >= len(args):
+            fail(usage)
+        options[flag] = args[index + 1]
+        index += 2
+    if not options:
+        fail(usage)
+    if ("--privacy" in options
+            and options["--privacy"] not in ("PUBLIC", "PRIVATE", "UNLISTED")):
+        fail(usage)
+    kwargs = {}
+    if "--title" in options:
+        kwargs["title"] = options["--title"]
+    if "--description" in options:
+        kwargs["description"] = options["--description"]
+    if "--privacy" in options:
+        kwargs["privacyStatus"] = options["--privacy"]
+    ytm = get_ytmusic()
+    try:
+        ytm.edit_playlist(playlist_id, **kwargs)
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return
+    invalidate_cache("playlist", [playlist_id])
+    result = {"ok": True, "playlistId": playlist_id}
+    for flag in ("--title", "--description", "--privacy"):
+        if flag in options:
+            result[flag[2:]] = options[flag]
+    print(json.dumps(result))
+
+
+def cmd_playlist_delete(args):
+    if not args:
+        fail("Usage: yt-music-ctl playlist-delete <playlistId>")
+    playlist_id = args[0]
+    if playlist_id == "LM":
+        print(json.dumps({"ok": False, "error": "Cannot delete Liked Music"}))
+        return
+    ytm = get_ytmusic()
+    try:
+        ytm.delete_playlist(playlist_id)
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return
+    invalidate_cache("playlist", [playlist_id])
+    print(json.dumps({"ok": True, "deleted": True, "playlistId": playlist_id}))
+
+
+def cmd_playlist_move(args):
+    usage = "Usage: yt-music-ctl playlist-move <playlistId> <fromIndex> <toIndex>"
+    if len(args) != 3:
+        fail(usage)
+    playlist_id = args[0]
+    try:
+        source = int(args[1])
+        target = int(args[2])
+    except ValueError:
+        fail(usage)
+    if source < 0 or target < 0:
+        fail(usage)
+    ytm = get_ytmusic()
+    try:
+        tracks = [t for t in (ytm.get_playlist(playlist_id, limit=100).get("tracks") or [])
+                  if t.get("videoId") and t.get("setVideoId")]
+        if not (0 <= source < len(tracks)) or not (0 <= target < len(tracks)):
+            print(json.dumps({"ok": False, "error": "Index out of range"}))
+            return
+        if source > target:
+            # Moving up: the destination is always a valid successor.
+            ytm.edit_playlist(playlist_id,
+                              moveItem=(tracks[source]["setVideoId"],
+                                        tracks[target]["setVideoId"]))
+        elif source < target:
+            # Moving down: swap each step against its neighbour so every call
+            # has a real successor (a move to the last index has none).
+            index = source
+            for _ in range(target - source):
+                ytm.edit_playlist(playlist_id,
+                                  moveItem=(tracks[index + 1]["setVideoId"],
+                                            tracks[index]["setVideoId"]))
+                tracks[index], tracks[index + 1] = tracks[index + 1], tracks[index]
+                index += 1
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return
+    invalidate_cache("playlist", [playlist_id])
+    print(json.dumps({"ok": True, "moved": True, "from": source, "to": target}))
 
 
 def cmd_pause(args):
@@ -1403,15 +1589,22 @@ def cmd_playlists(args):
 def cmd_create_playlist(args):
     if not args:
         fail("Usage: yt-music-ctl create-playlist <name>")
-    title = " ".join(args).strip()
+    ids = []
+    if len(args) >= 2 and all(valid_video_id(video_id) for video_id in args[1:]):
+        title = args[0]
+        ids = args[1:]
+    else:
+        title = " ".join(args).strip()
     if not title:
         fail("Playlist name cannot be empty")
     ytm = get_ytmusic()
     try:
-        playlist_id = ytm.create_playlist(title, "", "PRIVATE")
+        playlist_id = ytm.create_playlist(title, "", "PRIVATE",
+                                          video_ids=ids or None)
         if isinstance(playlist_id, dict):
             playlist_id = playlist_id.get("playlistId", "")
-        print(json.dumps({"ok": True, "id": playlist_id, "title": title}))
+        print(json.dumps({"ok": True, "id": playlist_id, "title": title,
+                          "tracks": len(ids)}))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
 
@@ -1445,6 +1638,7 @@ def cmd_playlist_tracks(args):
                 continue
             tracks.append({
                 "videoId": vid,
+                "setVideoId": track.get("setVideoId", ""),
                 "title": track.get("title", ""),
                 "artist": ", ".join(a.get("name", "") for a in (track.get("artists") or [])),
                 "album": track.get("album", {}).get("title", "") if track.get("album") else "",
@@ -1476,6 +1670,7 @@ def cmd_remove(args):
         # changing the song rating rather than with browse/edit_playlist.
         if playlist_id == "LM":
             ytm.rate_song(video_id, "INDIFFERENT")
+            invalidate_cache("playlist", [playlist_id])
             print(json.dumps({"ok": True, "removed": 1}))
             return
 
@@ -1489,6 +1684,7 @@ def cmd_remove(args):
             print(json.dumps({"ok": False, "error": "Track is not removable from this playlist"}))
             return
         ytm.remove_playlist_items(playlist_id, matches)
+        invalidate_cache("playlist", [playlist_id])
         print(json.dumps({"ok": True, "removed": len(matches)}))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
@@ -3681,6 +3877,10 @@ COMMANDS = {
     "play-next": cmd_play_next,
     "queue-add": cmd_queue_add,
     "playlist-add": cmd_playlist_add,
+    "playlist-add-items": cmd_playlist_add_items,
+    "playlist-edit": cmd_playlist_edit,
+    "playlist-delete": cmd_playlist_delete,
+    "playlist-move": cmd_playlist_move,
     "pause": cmd_pause,
     "resume": cmd_resume,
     "toggle": cmd_toggle,
@@ -3755,7 +3955,11 @@ def main():
         print("  playlists                List library playlists")
         print("  create-playlist <name>   Create a private playlist")
         print("  playlist <playlistId>    Get playlist tracks")
-        print("  playlist-add <id> <vid>  Add a track to a playlist (LM = liked)")
+        print("  playlist-add <id> <vid...>  Add one or more tracks to a playlist (LM = liked)")
+        print("  playlist-add-items <id> <v:id|a:album|r:artist|p:playlist...>  Add tracks/albums/artists/playlists to a playlist")
+        print("  playlist-edit <id> [--title T] [--description D] [--privacy P]  Edit a playlist")
+        print("  playlist-delete <id>      Delete a playlist")
+        print("  playlist-move <id> <from> <to>  Reorder a playlist track")
         print("  search [-f kind] <query>  Search songs|albums|artists|playlists")
         print("  liked [limit]            List liked songs")
         print("  library <kind> [limit]   List library songs|albums|artists|playlists")

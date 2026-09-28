@@ -22,6 +22,10 @@
 #   login                    interactive browser authentication
 #   create-playlist          would leave a stray playlist on the account
 #   playlist-add             mutates an existing playlist (incl. Liked Music)
+#   playlist-add-items       mutates an existing playlist
+#   playlist-edit            renames/re-privacy an existing playlist
+#   playlist-delete          deletes a playlist
+#   playlist-move            reorders an existing playlist's tracks
 #   remove                   deletes entries from a playlist
 #   like / dislike / unlike  mutates the account's liked songs
 #   daemon / watch           foreground loops that never return; the same code
@@ -166,6 +170,27 @@ try:
     d = json.load(sys.stdin)
     s = d.get("similar") or []
     print("True" if s and (s[0] or {}).get("browseId") else "False")
+except Exception:
+    print("False")' 2>/dev/null)
+    if [[ $ok == True ]]; then
+        pass "$label"
+    else
+        fail "$label" "exit $rc: $(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+}
+
+# check_setvideoid <label> <cmd...> - stdout JSON's first track row must carry
+# a non-empty setVideoId (needed for playlist reorder).
+check_setvideoid() {
+    local label=$1 out rc ok
+    shift
+    out=$("$@" 2>"$ERR_FILE")
+    rc=$?
+    ok=$(printf '%s' "$out" | python3 -c 'import sys, json
+try:
+    d = json.load(sys.stdin)
+    t = d.get("tracks") or []
+    print("True" if t and (t[0] or {}).get("setVideoId") else "False")
 except Exception:
     print("False")' 2>/dev/null)
     if [[ $ok == True ]]; then
@@ -550,6 +575,10 @@ check_ok "album $ALBUM_ID" "$CTL" album "$ALBUM_ID"
 check_ok "artist $ARTIST_ID" "$CTL" artist "$ARTIST_ID"
 check_similar "artist $ARTIST_ID similar artists" "$CTL" artist -r "$ARTIST_ID"
 check_ok "playlist $PLAYLIST_ID" "$CTL" playlist "$PLAYLIST_ID"
+# Fetched live so the assertion cannot be fooled by a pre-setVideoId cache
+# record; every emitted track row must carry one for playlist reorder.
+check_setvideoid "playlist $PLAYLIST_ID first track setVideoId" \
+    "$CTL" playlist -r "$PLAYLIST_ID"
 
 # ------------------------------------------------------- metadata cache (G5)
 section "cache (read-only)"
@@ -600,6 +629,13 @@ else
     skip "volume abc" "no player; cmd_volume returns 0 before validating args"
 fi
 check_usage "seek abc" "$CTL" seek abc
+check_usage "playlist-add-items (no args)" "$CTL" playlist-add-items
+check_usage "playlist-add-items bad token" "$CTL" playlist-add-items "$PLAYLIST_ID" bogus-token
+check_usage "playlist-edit (no args)" "$CTL" playlist-edit
+check_usage "playlist-edit bad privacy" "$CTL" playlist-edit "$PLAYLIST_ID" --privacy SOMETIMES
+check_usage "playlist-delete (no args)" "$CTL" playlist-delete
+check_usage "playlist-move (no args)" "$CTL" playlist-move
+check_usage "playlist-move bad index" "$CTL" playlist-move "$PLAYLIST_ID" abc 1
 
 stop_idle_mpv
 
@@ -614,6 +650,10 @@ section "skipped"
 skip "login" "interactive browser authentication"
 skip "create-playlist" "would create a stray playlist on the account"
 skip "playlist-add" "mutates a playlist (incl. Liked Music)"
+skip "playlist-add-items" "mutates a playlist"
+skip "playlist-edit" "renames/re-privates a playlist"
+skip "playlist-delete" "deletes a playlist"
+skip "playlist-move" "reorders a playlist's tracks"
 skip "remove" "deletes playlist entries"
 skip "like / dislike / unlike" "mutates the account's liked songs"
 skip "daemon / watch" "foreground loop that never returns (use ensure-daemon)"
