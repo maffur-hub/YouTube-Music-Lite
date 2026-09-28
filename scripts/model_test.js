@@ -34,6 +34,8 @@ eq(Model.rowKey(song), "v:abcdefghijk", "rowKey song")
 eq(Model.rowKey(album), "album:ALBUMID001", "rowKey album")
 eq(Model.rowKey(artist), "artist:ARTISTID01", "rowKey artist")
 eq(Model.rowKey(playlist), "playlist:PLLISTID01", "rowKey playlist")
+eq(Model.rowKey({ key: "q:3", kind: "song", videoId: "", browseId: "" }), "q:3", "rowKey honours explicit key")
+eq(Model.rowKey({ kind: "song", videoId: "abcdefghijk", browseId: "", key: "" }), "v:abcdefghijk", "empty key falls back to videoId")
 
 // --- selectedCount
 eq(Model.selectedCount(null), 0, "selectedCount(null)")

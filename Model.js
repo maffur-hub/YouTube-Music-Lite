@@ -91,6 +91,7 @@ function truncate(text, maxLen) {
 // its browseId, prefixed with the row kind so kinds never collide.
 function rowKey(row) {
   if (!row) return ""
+  if (row.key) return String(row.key)
   if (row.kind === "song") return "v:" + row.videoId
   return String(row.kind) + ":" + String(row.browseId)
 }

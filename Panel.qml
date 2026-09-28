@@ -51,17 +51,19 @@ Panel {
   property string searchFilter: "songs"
   property bool searching: false
   property int selectedIndex: -1
-  // Multi-select over search results: keys are Model.rowKey(row) values and
-  // the value is the row itself, so the count/token helpers stay pure JS.
+  // Multi-select over the active list (search results / up-next queue): keys
+  // are Model.rowKey(row) values and the value is the row itself, so the
+  // count/token helpers stay pure JS.
   property bool selectMode: false
   property var selectedKeys: ({})
   property int selectionAnchor: -1
   property var playlistAddTokens: []
+  property var pendingQueueRemoves: []
   readonly property int selectedCount: Model.selectedCount(root.selectedKeys)
   readonly property var selectedRows: {
     var out = []
-    for (var i = 0; i < root.searchResults.length; i++) {
-      var row = root.searchResults[i]
+    for (var i = 0; i < root.activeList.length; i++) {
+      var row = root.activeList[i]
       if (row && root.selectedKeys[Model.rowKey(row)] !== undefined) out.push(row)
     }
     return out
@@ -141,7 +143,29 @@ Panel {
   readonly property bool looping: !!(root.musicStatus && root.musicStatus.loop
     && root.musicStatus.loop !== "no")
   readonly property bool shuffling: !!(root.musicStatus && root.musicStatus.shuffle)
-  onSearchResultsChanged: { root.selectedIndex = -1; root.clearSelection() }
+  onSearchResultsChanged: {
+    var rows = root.searchResults
+    if (rows.length === 0) {
+      root.selectedIndex = -1
+      root.clearSelection()
+      return
+    }
+    // A refreshed result list (stale-while-revalidate, repeat search) must not
+    // discard an in-progress selection: keep only rows that are still present.
+    var keep = {}
+    for (var i = 0; i < rows.length; i++) {
+      var k = Model.rowKey(rows[i])
+      if (root.selectedKeys[k] !== undefined) keep[k] = rows[i]
+    }
+    root.selectedKeys = keep
+    if (Object.keys(keep).length > 0) {
+      if (root.selectedIndex >= rows.length) root.selectedIndex = rows.length - 1
+    } else {
+      root.selectMode = false
+      root.selectionAnchor = -1
+      root.selectedIndex = -1
+    }
+  }
   onActiveTabChanged: root.clearSelection()
   onActiveListKindChanged: root.selectedIndex = -1
   function hasTab(key) {
@@ -745,8 +769,8 @@ Panel {
   }
 
   function toggleRowAt(index, setAnchor) {
-    if (index < 0 || index >= root.searchResults.length) return
-    var row = root.searchResults[index]
+    if (index < 0 || index >= root.activeList.length) return
+    var row = root.activeList[index]
     if (!row) return
     root.selectedKeys = Model.toggleSelected(root.selectedKeys, row)
     if (setAnchor !== false) root.selectionAnchor = index
@@ -759,9 +783,33 @@ Panel {
       root.toggleRowAt(index, true)
       return
     }
-    root.selectedKeys = Model.selectedRange(root.selectedKeys, root.searchResults, root.selectionAnchor, index)
+    root.selectedKeys = Model.selectedRange(root.selectedKeys, root.activeList, root.selectionAnchor, index)
     root.selectedIndex = index
     if (!root.selectMode) root.selectMode = true
+  }
+
+  // Batch queue removal: mpv removes by index and the indices shift as it goes,
+  // so queue the removals in DESCENDING order and pump them one at a time,
+  // because sendCmd() refuses to start while a command is already running.
+  // cmdProc.onExited() calls pumpQueueRemoves() again after each one.
+  function removeSelectedFromQueue() {
+    var idx = []
+    for (var i = 0; i < root.queueTracks.length; i++) {
+      var row = root.queueTracks[i]
+      if (row && root.isRowSelected(row)) idx.push(i)
+    }
+    if (idx.length === 0) return
+    idx.sort(function(a, b) { return b - a })
+    root.pendingQueueRemoves = idx
+    root.pumpQueueRemoves()
+  }
+
+  function pumpQueueRemoves() {
+    if (root.busy || root.pendingQueueRemoves.length === 0) return
+    var next = root.pendingQueueRemoves[0]
+    root.pendingQueueRemoves = root.pendingQueueRemoves.slice(1)
+    if (root.pendingQueueRemoves.length === 0) root.clearSelection()
+    root.queueRemove(next)
   }
 
   // Returns true when the click was consumed as a selection gesture, i.e. the
@@ -817,7 +865,7 @@ Panel {
 
   function openPlaylistPickerForSelection(anchorItem) {
     var tokens = Model.rowsToTokens(root.selectedRows)
-    if (tokens.length === 0) return
+    if (tokens.length === 0) { root.statusText = "Nothing to add to a playlist"; return }
     root.playlistAddTokens = tokens
     // Anchor under the button so the menu doesn't jump to the last right-click.
     var p = anchorItem ? anchorItem.mapToItem(panelFlick, 0, anchorItem.height) : { x: 0, y: 0 }
@@ -860,6 +908,13 @@ Panel {
       }
       addContextItem("Play all", function() { root.enqueueNav("play", navRow.kind, navRow.browseId) })
       addContextItem("Add all to queue", function() { root.enqueueNav("queue", navRow.kind, navRow.browseId) })
+      if (root.loggedIn)
+        addContextItem("Add all to playlist…", function() {
+          var tokens = Model.rowsToTokens([navRow])
+          if (tokens.length === 0) return
+          root.playlistAddTokens = tokens
+          root.showPlaylistPicker(root.contextX, root.contextY)
+        })
       addContextItem("Open", function() { root.openRow(navRow, root.contextSource === "search") })
       return
     }
@@ -1150,6 +1205,9 @@ Panel {
           var t = tracks[i] || {}
           rows.push({
             index: i,
+            kind: "song",
+            browseId: "",
+            key: t.videoId ? ("v:" + String(t.videoId)) : ("q:" + i),
             videoId: String(t.videoId || ""),
             title: root.boundedString(t.title, 256),
             artist: root.boundedString(t.artist, 256),
@@ -1380,6 +1438,7 @@ Panel {
     onExited: function(exitCode) {
       cmdDeadline.stop()
       root.busy = false
+      Qt.callLater(function() { root.pumpQueueRemoves() })
       root.refreshQueue()
       if (exitCode !== 0) {
         statusText = "Command failed"
@@ -1649,6 +1708,7 @@ Panel {
     repeat: false
     onTriggered: root.search(searchField.text)
   }
+
 
   Timer {
     id: loginRefresh
@@ -2617,6 +2677,7 @@ Panel {
               spacing: Style.spacing.sm
 
               PanelSectionHeader {
+                id: queueHeaderTitle
                 text: "UP NEXT"
                 foreground: root.fg
                 fontFamily: root.fam
@@ -2625,31 +2686,95 @@ Panel {
               }
 
               Item {
-                width: parent.width - Style.space(150) - Style.space(52) - Style.spacing.sm
+                width: Math.max(0, parent.width - queueHeaderTitle.implicitWidth
+                  - queueHeaderActions.implicitWidth - Style.spacing.sm * 2)
                 height: Style.spacing.hairline
               }
 
-              Button {
-                text: "Save"
-                width: Style.space(52)
+              Row {
+                id: queueHeaderActions
+                spacing: Style.spacing.sm
+
+                Button {
+                  width: Style.space(52)
+                  height: Style.spacing.controlHeight
+                  text: root.selectMode ? "Done" : "Select"
+                  iconText: root.selectMode ? Model.ICON.check : ""
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  visible: root.queueTracks.length > 0
+                  onClicked: {
+                    if (root.selectMode) root.clearSelection()
+                    else root.selectMode = true
+                  }
+                }
+
+                Button {
+                  width: Style.space(52)
+                  height: Style.spacing.controlHeight
+                  text: "Save"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  visible: root.queueTracks.length > 0 && !root.selectMode
+                  enabled: !root.busy
+                  onClicked: root.queueSaveOpen = true
+                }
+
+                Button {
+                  width: Style.space(52)
+                  height: Style.spacing.controlHeight
+                  text: "Clear"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  visible: !root.selectMode
+                  enabled: root.queueUpcomingCount() > 0 && !root.busy
+                  onClicked: root.clearQueue()
+                }
+              }
+            }
+
+            Row {
+              visible: root.selectMode
+              width: parent.width - Style.space(40)
+              height: Style.spacing.controlHeight
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.spacing.sm
+
+              Text {
+                textFormat: Text.PlainText
                 height: Style.spacing.controlHeight
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                visible: root.queueTracks.length > 0
-                enabled: !root.busy
-                onClicked: root.queueSaveOpen = true
+                verticalAlignment: Text.AlignVCenter
+                text: root.selectedCount + " selected"
+                color: root.fg
+                font.family: root.fam
+                font.pixelSize: Style.font.caption
               }
 
               Button {
-                width: Style.space(52)
+                id: queueAddSelectedButton
+                width: Style.space(120)
                 height: Style.spacing.controlHeight
-                text: "Clear"
+                text: "Add to playlist…"
+                iconText: Model.ICON.plus
                 fontFamily: root.fam
                 fontSize: Style.font.bodySmall
                 foreground: root.fg
-                enabled: root.queueUpcomingCount() > 0 && !root.busy
-                onClicked: root.clearQueue()
+                enabled: root.selectedCount > 0 && root.loggedIn && !root.busy
+                onClicked: root.openPlaylistPickerForSelection(queueAddSelectedButton)
+              }
+
+              Button {
+                width: Style.space(72)
+                height: Style.spacing.controlHeight
+                text: "Remove"
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                enabled: root.selectedCount > 0 && !root.busy
+                onClicked: root.removeSelectedFromQueue()
               }
             }
 
@@ -2707,6 +2832,7 @@ Panel {
                   RowHighlight {
                     id: queueRowBg
                     foreground: root.fg
+                    multi: root.isRowSelected(modelData)
                     hasCursor: index === root.selectedIndex
                     hovered: queueRowClick.containsMouse
                     current: modelData.current || index === root.queuePosition
@@ -2717,25 +2843,56 @@ Panel {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.selectIndex(index)
+                    onClicked: function(mouse) {
+                      if (root.handleRowClick(index, mouse.modifiers)) return
+                      root.selectIndex(index)
+                    }
                   }
 
                   Row {
                     anchors.fill: parent
                     spacing: Style.spacing.sm
 
-                    Text {
-                      textFormat: Text.PlainText
+                    Item {
                       width: Style.space(20)
-                      text: (modelData.current || index === root.queuePosition)
-                        ? Model.ICON.play
-                        : String(index + 1)
-                      color: (modelData.current || index === root.queuePosition)
-                        ? Color.accent
-                        : Qt.darker(root.fg, 1.4)
-                      font.family: root.fam
-                      font.pixelSize: Style.font.caption
-                      verticalAlignment: Text.AlignVCenter
+                      height: parent.height
+
+                      Text {
+                        visible: !root.selectMode
+                        anchors.left: parent.left
+                        width: Style.space(20)
+                        textFormat: Text.PlainText
+                        text: (modelData.current || index === root.queuePosition)
+                          ? Model.ICON.play
+                          : String(index + 1)
+                        color: (modelData.current || index === root.queuePosition)
+                          ? Color.accent
+                          : Qt.darker(root.fg, 1.4)
+                        font.family: root.fam
+                        font.pixelSize: Style.font.caption
+                        verticalAlignment: Text.AlignVCenter
+                      }
+
+                      Rectangle {
+                        visible: root.selectMode && !root.isRowSelected(modelData)
+                        anchors.centerIn: parent
+                        width: Style.space(12)
+                        height: Style.space(12)
+                        radius: width / 2
+                        color: "transparent"
+                        border.width: Style.normalBorderWidth
+                        border.color: Qt.darker(root.fg, 1.3)
+                      }
+
+                      Text {
+                        visible: root.isRowSelected(modelData)
+                        anchors.centerIn: parent
+                        textFormat: Text.PlainText
+                        text: Model.ICON.check
+                        color: Color.accent
+                        font.family: root.fam
+                        font.pixelSize: Style.font.caption
+                      }
                     }
 
                     Column {
@@ -3140,11 +3297,23 @@ Panel {
                 fontFamily: root.fam
                 fontSize: Style.font.bodySmall
                 foreground: root.fg
+                bordered: true
                 onClicked: {
                   if (root.selectMode) root.clearSelection()
                   else root.selectMode = true
                 }
               }
+            }
+
+            Text {
+              visible: root.selectMode
+              width: parent.width
+              wrapMode: Text.WordWrap
+              textFormat: Text.PlainText
+              text: "Click rows to select. Shift-click for a range, Ctrl-click to toggle."
+              color: Qt.darker(root.fg, 1.4)
+              font.family: root.fam
+              font.pixelSize: Style.font.caption
             }
 
             PanelSectionHeader {
@@ -3194,16 +3363,44 @@ Panel {
                   anchors.fill: parent
                   spacing: Style.spacing.sm
 
-                  Text {
-                    textFormat: Text.PlainText
+                  Item {
                     width: Style.space(24)
-                    text: root.isRowSelected(modelData) ? Model.ICON.check
-                      : (modelData.kind === "song" ? Model.ICON.note
-                      : (modelData.kind === "playlist" ? Model.ICON.playlist : Model.ICON.music))
-                    color: Color.accent
-                    font.family: root.fam
-                    font.pixelSize: Style.font.bodySmall
-                    verticalAlignment: Text.AlignVCenter
+                    height: parent.height
+
+                    Text {
+                      visible: !root.selectMode
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      textFormat: Text.PlainText
+                      width: Style.space(24)
+                      text: modelData.kind === "song" ? Model.ICON.note
+                        : (modelData.kind === "playlist" ? Model.ICON.playlist : Model.ICON.music)
+                      color: Color.accent
+                      font.family: root.fam
+                      font.pixelSize: Style.font.bodySmall
+                      verticalAlignment: Text.AlignVCenter
+                    }
+
+                    Rectangle {
+                      visible: root.selectMode && !root.isRowSelected(modelData)
+                      anchors.centerIn: parent
+                      width: Style.space(14)
+                      height: Style.space(14)
+                      radius: width / 2
+                      color: "transparent"
+                      border.width: Style.normalBorderWidth
+                      border.color: Qt.darker(root.fg, 1.3)
+                    }
+
+                    Text {
+                      visible: root.isRowSelected(modelData)
+                      anchors.centerIn: parent
+                      textFormat: Text.PlainText
+                      text: Model.ICON.check
+                      color: Color.accent
+                      font.family: root.fam
+                      font.pixelSize: Style.font.bodySmall
+                    }
                   }
 
                   Column {

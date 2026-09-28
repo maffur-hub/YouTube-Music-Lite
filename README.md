@@ -16,6 +16,8 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - Reorder playlist tracks with right-click Move up / Move down
 - Save the current queue as a new playlist
 - Select multiple search results with Ctrl-click (toggle) and Shift-click (range), then add them all to a playlist in one go from a searchable picker that also creates a new playlist inline from the name you type
+- Select whole albums, artists, or playlists the same way, and add all of their tracks to a playlist from the row's right-click menu
+- Select multiple Up Next entries to add them to a playlist or remove them together
 - Album artwork and progress display
 - Panel chrome follows the active Omarchy theme through the shared shell UI kit (tokens, hover/selection states, section headers)
 - Private per-user runtime state and MPV IPC socket
