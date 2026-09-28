@@ -1664,6 +1664,35 @@ Panel {
     }
   }
 
+  // Theme-driven row highlight mirroring qs.Ui.CursorSurface's visuals. The
+  // panel keeps its own hover/cursor model (per-row MouseArea + selectedIndex),
+  // so this only centralizes the Style/Border tokens instead of the CursorSurface
+  // hasCursor contract.
+  component RowHighlight: BorderSurface {
+    id: hl
+
+    property bool hasCursor: false      // panel keyboard cursor (selectedIndex)
+    property bool hovered: false        // pointer hover
+    property bool current: false        // active/playing row
+    property bool multi: false          // multi-select (search results)
+    property color foreground: Color.foreground
+    property color accent: Color.accent
+
+    readonly property bool _hot: hl.hasCursor || hl.hovered
+
+    anchors.fill: parent
+    radius: Style.cornerRadius
+    color: hl.multi ? Style.selectionFillFor(hl.foreground, hl.accent)
+         : hl._hot ? Style.hoverFillFor(hl.foreground, hl.accent)
+         : hl.current ? Style.selectedFillFor(hl.foreground, hl.accent)
+         : "transparent"
+    borderSpec: hl.multi ? Border.none()
+         : hl._hot ? Border.controlSpec("hover-cursor", hl.foreground, hl.accent)
+         : hl.current ? Border.controlSpec("selected", hl.foreground, hl.accent)
+         : Border.none()
+    Behavior on color { ColorAnimation { duration: 60 } }
+  }
+
   // Themed context menus. Qt's Menu/MenuItem render with the platform-native
   // look, so both menus are Popups that reuse the Omarchy popup surface
   // vocabulary from qs.Ui/Dropdown (Color.popups tokens + BorderSurface) and
@@ -1716,11 +1745,10 @@ Panel {
         onAccepted: menu.triggerFirstOrCreate()
       }
 
-      Rectangle {
+      PanelSeparator {
         visible: menu.searchable
         Layout.fillWidth: true
-        implicitHeight: 1
-        color: Util.alpha(Color.popups.text, 0.10)
+        foreground: Color.popups.text
       }
 
       Repeater {
@@ -1877,7 +1905,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-     contentWidth: 540
+     contentWidth: Style.space(540)
     contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight)
 
     PanelKeyCatcher {
@@ -2043,15 +2071,16 @@ Panel {
           }
 
           // ---- now playing hero
-            Rectangle {
+            BorderSurface {
               id: nowPlayingCard
               visible: Model.isActive(root.musicStatus) || root.lastPlayed.length > 0
               width: parent.width
               height: Style.space(136)
               radius: Style.cornerRadius
-              color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06)
-              border.width: 1
-              border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45)
+              color: Style.normalFillFor(root.fg, Color.accent)
+              borderSpec: Border.flat(
+                Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45),
+                Style.normalBorderWidth)
 
               Item {
               id: heroRow
@@ -2565,6 +2594,7 @@ Panel {
                 fontFamily: root.fam
                 fontSize: Style.font.bodySmall
                 selected: root.activeTab === modelData.key
+                bordered: true
                 foreground: root.fg
                 onClicked: root.activeTab = (root.activeTab === modelData.key) ? "" : modelData.key
               }
@@ -2575,25 +2605,28 @@ Panel {
           Column {
             visible: root.activeTab === "queue" && root.queueVisible
             width: parent.width
-            spacing: 0
+            spacing: Style.space(6)
+
+            PanelSeparator {
+              foreground: root.fg
+            }
 
             Row {
               width: parent.width
               height: Style.spacing.controlHeight
               spacing: Style.spacing.sm
 
-              Text {
+              PanelSectionHeader {
                 text: "UP NEXT"
-                color: Color.accent
-                font.family: root.fam
-                font.pixelSize: Style.font.caption
-                font.bold: true
+                foreground: root.fg
+                fontFamily: root.fam
+                height: parent.height
                 verticalAlignment: Text.AlignVCenter
               }
 
               Item {
                 width: parent.width - Style.space(150) - Style.space(52) - Style.spacing.sm
-                height: 1
+                height: Style.spacing.hairline
               }
 
               Button {
@@ -2671,16 +2704,12 @@ Panel {
                   width: contentColumn.width
                   height: Style.space(32)
 
-                  Rectangle {
+                  RowHighlight {
                     id: queueRowBg
-                    anchors.fill: parent
-                    color: index === root.selectedIndex
-                      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                      : (queueRowClick.containsMouse
-                        ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
-                        : "transparent")
-                    radius: Style.cornerRadius
-                    Behavior on color { ColorAnimation { duration: 120 } }
+                    foreground: root.fg
+                    hasCursor: index === root.selectedIndex
+                    hovered: queueRowClick.containsMouse
+                    current: modelData.current || index === root.queuePosition
                   }
 
                   MouseArea {
@@ -2745,7 +2774,7 @@ Panel {
                       verticalAlignment: Text.AlignVCenter
                     }
 
-                    Button {
+                    PanelActionButton {
                       width: Style.space(44)
                       height: Style.space(28)
                       iconText: Model.ICON.play
@@ -2775,25 +2804,28 @@ Panel {
             Column {
               visible: root.activeTab === "last"
               width: parent.width
-              spacing: 0
+              spacing: Style.space(6)
+
+              PanelSeparator {
+                foreground: root.fg
+              }
 
               Row {
                 width: parent.width
                 height: Style.spacing.controlHeight
                 spacing: Style.spacing.sm
 
-                Text {
+                PanelSectionHeader {
                   text: "LAST PLAYED"
-                  color: Color.accent
-                  font.family: root.fam
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
+                  foreground: root.fg
+                  fontFamily: root.fam
+                  height: parent.height
                   verticalAlignment: Text.AlignVCenter
                 }
 
                 Item {
                   width: parent.width - Style.space(150)
-                  height: 1
+                  height: Style.spacing.hairline
                   visible: root.lastPlayed.length > 0
                 }
 
@@ -2821,15 +2853,11 @@ Panel {
                     width: contentColumn.width
                     height: Style.space(32)
 
-                    Rectangle {
-                      anchors.fill: parent
-                      color: index === root.selectedIndex
-                        ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                        : (lastRowClick.containsMouse
-                          ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
-                          : "transparent")
-                      radius: Style.cornerRadius
-                      Behavior on color { ColorAnimation { duration: 120 } }
+                    RowHighlight {
+                      id: lastRowBg
+                      foreground: root.fg
+                      hasCursor: index === root.selectedIndex
+                      hovered: lastRowClick.containsMouse
                     }
 
                     MouseArea {
@@ -3000,7 +3028,10 @@ Panel {
                     text: modelData.label
                     fontFamily: root.fam
                     fontSize: Style.font.bodySmall
-                    foreground: root.searchFilter === modelData.key ? Color.accent : root.fg
+                    selected: root.searchFilter === modelData.key
+                    active: root.searchFilter === modelData.key
+                    bordered: true
+                    foreground: root.fg
                     enabled: !root.searching
                     onClicked: {
                       if (root.searchFilter !== modelData.key) {
@@ -3139,18 +3170,12 @@ Panel {
                 width: contentColumn.width
                 height: Style.space(40)
 
-                Rectangle {
+                RowHighlight {
                   id: searchRowBg
-                  anchors.fill: parent
-                  color: root.isRowSelected(modelData)
-                    ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.28)
-                    : (index === root.selectedIndex
-                      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                      : (searchRowClick.containsMouse
-                        ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
-                        : "transparent"))
-                  radius: Style.cornerRadius
-                  Behavior on color { ColorAnimation { duration: 120 } }
+                  foreground: root.fg
+                  multi: root.isRowSelected(modelData)
+                  hasCursor: index === root.selectedIndex
+                  hovered: searchRowClick.containsMouse
                 }
 
                 MouseArea {
@@ -3221,7 +3246,7 @@ Panel {
                     verticalAlignment: Text.AlignVCenter
                   }
 
-                  Button {
+                  PanelActionButton {
                     visible: modelData.kind === "song"
                     width: Style.space(52)
                     height: Style.space(28)
@@ -3233,7 +3258,7 @@ Panel {
                     onClicked: root.playNow(modelData.videoId)
                   }
 
-                  Button {
+                  PanelActionButton {
                     visible: modelData.kind === "song"
                     width: Style.space(44)
                     height: Style.space(28)
@@ -3440,16 +3465,11 @@ Panel {
                 width: contentColumn.width
                 height: Style.space(36)
 
-                Rectangle {
+                RowHighlight {
                   id: trackRowBg
-                  anchors.fill: parent
-                  color: index === root.selectedIndex
-                    ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                    : (trackRowClick.containsMouse
-                      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
-                      : "transparent")
-                  radius: Style.cornerRadius
-                  Behavior on color { ColorAnimation { duration: 120 } }
+                  foreground: root.fg
+                  hasCursor: index === root.selectedIndex
+                  hovered: trackRowClick.containsMouse
                 }
 
                 MouseArea {
@@ -3509,7 +3529,7 @@ Panel {
                     verticalAlignment: Text.AlignVCenter
                   }
 
-                  Button {
+                  PanelActionButton {
                     width: Style.space(52)
                     height: Style.space(28)
                     iconText: Model.ICON.play
@@ -3520,7 +3540,7 @@ Panel {
                     onClicked: root.playNow(modelData.videoId)
                   }
 
-                  Button {
+                  PanelActionButton {
                     width: Style.space(44)
                     height: Style.space(28)
                     iconText: Model.ICON.shuffle
@@ -3589,7 +3609,10 @@ Panel {
                   text: modelData.label
                   fontFamily: root.fam
                   fontSize: Style.font.bodySmall
-                  foreground: root.libraryKind === modelData.key ? Color.accent : root.fg
+                  selected: root.libraryKind === modelData.key
+                  active: root.libraryKind === modelData.key
+                  bordered: true
+                  foreground: root.fg
                   enabled: !libraryProc.running
                   onClicked: root.loadLibrary(modelData.key)
                 }
@@ -3760,16 +3783,11 @@ Panel {
                 width: contentColumn.width
                 height: Style.space(40)
 
-                Rectangle {
+                RowHighlight {
                   id: libraryRowBg
-                  anchors.fill: parent
-                  color: index === root.selectedIndex
-                    ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                    : (libraryRowClick.containsMouse
-                      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
-                      : "transparent")
-                  radius: Style.cornerRadius
-                  Behavior on color { ColorAnimation { duration: 120 } }
+                  foreground: root.fg
+                  hasCursor: index === root.selectedIndex
+                  hovered: libraryRowClick.containsMouse
                 }
 
                 MouseArea {
@@ -3837,7 +3855,7 @@ Panel {
                     verticalAlignment: Text.AlignVCenter
                   }
 
-                  Button {
+                  PanelActionButton {
                     width: Style.space(40)
                     height: Style.space(28)
                     visible: modelData.kind === "song"

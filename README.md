@@ -17,6 +17,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - Save the current queue as a new playlist
 - Select multiple search results with Ctrl-click (toggle) and Shift-click (range), then add them all to a playlist in one go from a searchable picker that also creates a new playlist inline from the name you type
 - Album artwork and progress display
+- Panel chrome follows the active Omarchy theme through the shared shell UI kit (tokens, hover/selection states, section headers)
 - Private per-user runtime state and MPV IPC socket
 
 ## Requirements

@@ -12,8 +12,8 @@ const ICON = {
   search: String.fromCharCode(0xf002),      // nf-fa-search
   playlist: String.fromCharCode(0xf00b),    // nf-fa-list
   stop: String.fromCharCode(0xf04d),        // nf-fa-stop
-  shuffle: String.fromCharCode(0xf049d),    // nf-md-shuffle
-  repeat: String.fromCharCode(0xf0456),     // nf-md-repeat
+  shuffle: String.fromCodePoint(0xf049d),   // nf-md-shuffle
+  repeat: String.fromCodePoint(0xf0456),    // nf-md-repeat
   login: String.fromCharCode(0xf2f6),       // nf-fa-right_to_bracket
   logout: String.fromCharCode(0xf2f5),      // nf-fa-right_from_bracket
   close: String.fromCharCode(0xf00d),       // nf-fa-times
