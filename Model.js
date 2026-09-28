@@ -137,17 +137,32 @@ function selectedRange(selected, rows, a, b) {
   return out
 }
 
-// Backend `playlist-add-items` tokens, one per row, in list order.
+// True when a row contributes something to a `playlist-add-items` request:
+// songs need a videoId, albums/artists/playlists a browseId.
+function rowAddable(row) {
+  if (!row) return false
+  if (row.kind === "song") return !!row.videoId
+  if (row.kind === "album" || row.kind === "artist" || row.kind === "playlist")
+    return !!row.browseId
+  return false
+}
+
+// Backend `playlist-add-items` tokens, one per addable row, in list order.
 function rowsToTokens(rows) {
   var out = []
   if (!rows || rows.length === 0) return out
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i]
-    if (!row) continue
-    if (row.kind === "song" && row.videoId) out.push("v:" + row.videoId)
-    else if (row.kind === "album" && row.browseId) out.push("a:" + row.browseId)
-    else if (row.kind === "artist" && row.browseId) out.push("r:" + row.browseId)
-    else if (row.kind === "playlist" && row.browseId) out.push("p:" + row.browseId)
+    if (!rowAddable(row)) continue
+    var token
+    if (row.kind === "song") token = "v:" + row.videoId
+    else if (row.kind === "album") token = "a:" + row.browseId
+    else if (row.kind === "artist") token = "r:" + row.browseId
+    else token = "p:" + row.browseId
+    // Selecting the same track twice must not inflate the count: the backend
+    // dedupes it server-side, so drop repeated tokens here to keep the staged
+    // count equal to the number of tracks that will really be added.
+    if (out.indexOf(token) === -1) out.push(token)
   }
   return out
 }
@@ -220,6 +235,7 @@ if (typeof module !== "undefined") {
     withRowSelected: withRowSelected,
     toggleSelected: toggleSelected,
     selectedRange: selectedRange,
+    rowAddable: rowAddable,
     rowsToTokens: rowsToTokens,
     allSongs: allSongs,
     videoIds: videoIds,

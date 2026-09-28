@@ -59,7 +59,7 @@ Panel {
   property int selectionAnchor: -1
   property var playlistAddTokens: []
   property var pendingQueueRemoves: []
-  readonly property int selectedCount: Model.selectedCount(root.selectedKeys)
+  readonly property int selectedCount: root.selectedRows.length
   readonly property var selectedRows: {
     var out = []
     for (var i = 0; i < root.activeList.length; i++) {
@@ -76,6 +76,11 @@ Panel {
   property bool queueSaveOpen: false
   property bool deleteConfirmOpen: false
   property var pendingPlaylistTokens: []
+  // What the staged playlist-add selection could not contribute, so the
+  // result message can explain it: rows with nothing to add (local files)
+  // and repeated selections of the same track.
+  property int playlistAddUnaddable: 0
+  property int playlistAddDuplicateSelections: 0
   property int contextTrackIndex: -1
   property int lastVolume: 100
   readonly property int currentVolume: root.musicStatus && root.musicStatus.volume !== undefined
@@ -611,11 +616,12 @@ Panel {
   }
 
   function sendCmd(command, args) {
-    if (root.busy) return
+    if (root.busy) return false
     root.busy = true
     statusText = "Sending " + command + "…"
     cmdProc.command = [root.ctlPath, command].concat((args || []).map(String))
     root.startProcess(cmdProc, "cmd")
+    return true
   }
 
   function queueJump(index) {
@@ -878,18 +884,36 @@ Panel {
     contextMenu.popupAt(panelFlick, x, y)
   }
 
+  // Stage the tokens the playlist picker will add and remember what the
+  // selection could not contribute.
+  function stagePlaylistTokens(rows) {
+    var tokens = Model.rowsToTokens(rows)
+    var addable = 0
+    for (var i = 0; i < rows.length; i++)
+      if (Model.rowAddable(rows[i])) addable++
+    root.playlistAddUnaddable = rows.length - addable
+    root.playlistAddDuplicateSelections = addable - tokens.length
+    root.playlistAddTokens = tokens
+    return tokens
+  }
+
   // Both entry points just stage `playlistAddTokens`; showPlaylistPicker()
   // is the single place that validates and pops the menu.
   function openPlaylistPicker() {
-    if (root.isVideoId(root.contextVideoId))
-      root.playlistAddTokens = ["v:" + root.contextVideoId]
+    var rows = root.isVideoId(root.contextVideoId)
+      ? [{ kind: "song", videoId: root.contextVideoId, browseId: "" }] : []
+    root.stagePlaylistTokens(rows)
     root.showPlaylistPicker(root.contextX, root.contextY)
   }
 
   function openPlaylistPickerForSelection(anchorItem) {
-    var tokens = Model.rowsToTokens(root.selectedRows)
-    if (tokens.length === 0) { root.statusText = "Nothing to add to a playlist"; return }
-    root.playlistAddTokens = tokens
+    var tokens = root.stagePlaylistTokens(root.selectedRows)
+    if (tokens.length === 0) {
+      root.statusText = root.playlistAddUnaddable > 0
+        ? "Nothing to add: local files cannot go in a YouTube playlist"
+        : "Nothing to add to a playlist"
+      return
+    }
     // Anchor under the button so the menu doesn't jump to the last right-click.
     var p = anchorItem ? anchorItem.mapToItem(panelFlick, 0, anchorItem.height) : { x: 0, y: 0 }
     root.showPlaylistPicker(p.x, p.y)
@@ -933,10 +957,8 @@ Panel {
       addContextItem("Add all to queue", function() { root.enqueueNav("queue", navRow.kind, navRow.browseId) })
       if (root.loggedIn)
         addContextItem("Add all to playlist…", function() {
-          var tokens = Model.rowsToTokens([navRow])
-          if (tokens.length === 0) return
-          root.playlistAddTokens = tokens
-          root.showPlaylistPicker(root.contextX, root.contextY)
+          if (root.stagePlaylistTokens([navRow]).length > 0)
+            root.showPlaylistPicker(root.contextX, root.contextY)
         })
       addContextItem("Open", function() { root.openRow(navRow, root.contextSource === "search") })
       return
@@ -989,7 +1011,10 @@ Panel {
     return function() {
       var tokens = root.playlistAddTokens.slice()
       if (tokens.length === 0) return
-      root.sendCmd("playlist-add-items", [playlistId].concat(tokens))
+      if (!root.sendCmd("playlist-add-items", [playlistId].concat(tokens))) {
+        root.statusText = "Still busy — try again"
+        return
+      }
       root.clearSelection()
     }
   }
@@ -1224,14 +1249,18 @@ Panel {
         root.queuePosition = (typeof data.position === "number") ? data.position : -1
         var tracks = Array.isArray(data.tracks) ? data.tracks : []
         var rows = []
+        var seen = {}
         for (var i = 0; i < Math.min(tracks.length, 100); i++) {
           var t = tracks[i] || {}
+          var vid = String(t.videoId || "")
+          var occ = 0
+          if (vid !== "") { occ = seen[vid] || 0; seen[vid] = occ + 1 }
           rows.push({
             index: i,
             kind: "song",
             browseId: "",
-            key: t.videoId ? ("v:" + String(t.videoId)) : ("q:" + i),
-            videoId: String(t.videoId || ""),
+            key: vid !== "" ? ("v:" + vid + "#" + occ) : ("q:" + i),
+            videoId: vid,
             title: root.boundedString(t.title, 256),
             artist: root.boundedString(t.artist, 256),
             album: root.boundedString(t.album, 256),
@@ -1433,8 +1462,11 @@ Panel {
           // hands busy/status back to cmdProc, so don't clear them below.
           root.pendingPlaylistTokens = []
           root.busy = false
-          root.sendCmd("playlist-add-items", [newPlaylistId].concat(pendingTokens))
-          root.statusText = "Playlist created · adding tracks…"
+          if (root.sendCmd("playlist-add-items", [newPlaylistId].concat(pendingTokens))) {
+            root.statusText = "Playlist created · adding tracks…"
+          } else {
+            root.statusText = "Playlist created · could not add tracks (busy)"
+          }
           chained = true
         } else {
           root.statusText = "Playlist created ✓"
@@ -1477,8 +1509,18 @@ Panel {
         if (d && d.ok) {
           var addN = Number(d.added) || 0
           var dupN = Number(d.duplicates) || 0
-          var addMsg = "Added " + addN + (addN === 1 ? " track" : " tracks")
+          var addMsg = addN > 0 ? "Added " + addN + (addN === 1 ? " track" : " tracks")
+                                : "Nothing added"
           if (dupN > 0) addMsg += " · " + dupN + " already in playlist"
+          var skipN = Number(d.skipped) || 0
+          if (skipN > 0) addMsg += " · " + skipN + " skipped by YouTube"
+          if (root.playlistAddDuplicateSelections > 0)
+            addMsg += " · " + root.playlistAddDuplicateSelections
+              + (root.playlistAddDuplicateSelections === 1 ? " duplicate selection" : " duplicate selections")
+          if (root.playlistAddUnaddable > 0)
+            addMsg += " · " + root.playlistAddUnaddable + " not addable"
+          root.playlistAddDuplicateSelections = 0
+          root.playlistAddUnaddable = 0
           statusText = addMsg + " ✓"
           var dest = String(cmdProc.command[2] || "")
           if (dest !== "" && dest === root.activePlaylistId) {
@@ -1731,6 +1773,7 @@ Panel {
     repeat: false
     onTriggered: root.search(searchField.text)
   }
+
 
 
 

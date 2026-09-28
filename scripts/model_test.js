@@ -98,6 +98,21 @@ eq(Model.rowsToTokens([junk, { kind: "song" }, { kind: "album" }, null]),
   [], "rowsToTokens skips invalid/unknown rows")
 eq(Model.rowsToTokens([]), [], "rowsToTokens([])")
 eq(Model.rowsToTokens(null), [], "rowsToTokens(null)")
+eq(Model.rowsToTokens([song, { kind: "song", videoId: "abcdefghijk", browseId: "" }]),
+  ["v:abcdefghijk"], "rowsToTokens dedupes rows with the same videoId")
+eq(Model.rowsToTokens([song, album, { kind: "song", videoId: "abcdefghijk", browseId: "" }]),
+  ["v:abcdefghijk", "a:ALBUMID001"], "dedupe keeps the first-seen order")
+eq(Model.rowsToTokens([{ kind: "song", videoId: "", browseId: "" }]),
+  [], "rowsToTokens skips a song row with an empty videoId")
+eq(Model.rowsToTokens([album, artist, playlist]),
+  ["a:ALBUMID001", "r:ARTISTID01", "p:PLLISTID01"],
+  "rowsToTokens still maps album/artist/playlist to a:/r:/p:")
+
+// --- rowAddable
+ok(Model.rowAddable(song), "rowAddable true for a song with a videoId")
+ok(Model.rowAddable(album), "rowAddable true for an album with a browseId")
+notOk(Model.rowAddable({ kind: "song", videoId: "" }), "rowAddable false for a song with no videoId")
+notOk(Model.rowAddable(junk), "rowAddable false for an unknown kind")
 
 // --- allSongs
 ok(Model.allSongs([song, song]), "allSongs true for songs only")
