@@ -21,6 +21,14 @@ const ICON = {
   plus: String.fromCharCode(0xf067),        // nf-fa-plus
   check: String.fromCharCode(0xf00c),       // nf-fa-check
   arrowLeft: String.fromCharCode(0xf060),   // nf-fa-arrow_left
+  more: String.fromCharCode(0xf142),        // nf-fa-ellipsis_v
+  pencil: String.fromCharCode(0xf040),      // nf-fa-pencil
+  trash: String.fromCharCode(0xf1f8),       // nf-fa-trash
+  arrowUp: String.fromCharCode(0xf062),     // nf-fa-arrow_up
+  arrowDown: String.fromCharCode(0xf063),   // nf-fa-arrow_down
+  globe: String.fromCharCode(0xf0ac),       // nf-fa-globe
+  lock: String.fromCharCode(0xf023),        // nf-fa-lock
+  save: String.fromCharCode(0xf0c7),        // nf-fa-save
 }
 
 function parseStatus(raw) {
@@ -163,6 +171,38 @@ function videoIds(rows) {
   return out
 }
 
+// ---- playlist helpers (pure; used by Panel.qml and scripts/model_test.js)
+
+// Case-insensitive substring match on each item's `title`. An empty or
+// whitespace-only query returns the input array untouched; items without a
+// title are skipped and the original order is preserved. Drives the
+// searchable playlist picker's filter row as well as plain list filtering.
+function filterByTitle(items, query) {
+  if (!Array.isArray(items)) return []
+  var q = String(query === undefined || query === null ? "" : query).trim().toLowerCase()
+  if (q === "") return items
+  var out = []
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i]
+    if (!item || !item.title) continue
+    if (String(item.title).toLowerCase().indexOf(q) !== -1) out.push(item)
+  }
+  return out
+}
+
+// Backend `playlist-add-items` video tokens for a queue of song rows, in
+// queue order; rows without a well-formed 11-char videoId are skipped.
+function queueTokens(tracks) {
+  var out = []
+  if (!Array.isArray(tracks)) return out
+  for (var i = 0; i < tracks.length; i++) {
+    var track = tracks[i]
+    if (!track || !/^[A-Za-z0-9_-]{11}$/.test(String(track.videoId || ""))) continue
+    out.push("v:" + String(track.videoId))
+  }
+  return out
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     ICON: ICON,
@@ -181,6 +221,8 @@ if (typeof module !== "undefined") {
     selectedRange: selectedRange,
     rowsToTokens: rowsToTokens,
     allSongs: allSongs,
-    videoIds: videoIds
+    videoIds: videoIds,
+    filterByTitle: filterByTitle,
+    queueTokens: queueTokens
   }
 }

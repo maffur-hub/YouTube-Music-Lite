@@ -67,6 +67,14 @@ Panel {
     return out
   }
   readonly property bool selectionAllSongs: Model.allSongs(root.selectedRows)
+  // Playlist management (H3): inline rename row, queue-save row, the delete
+  // confirmation dialog, the tokens staged between create + add-items, and the
+  // playlist index behind the current right-click menu.
+  property bool renameOpen: false
+  property bool queueSaveOpen: false
+  property bool deleteConfirmOpen: false
+  property var pendingPlaylistTokens: []
+  property int contextTrackIndex: -1
   property int lastVolume: 100
   readonly property int currentVolume: root.musicStatus && root.musicStatus.volume !== undefined
     ? Math.round(Number(root.musicStatus.volume))
@@ -420,6 +428,7 @@ Panel {
     root.playlistTracks = []
     root.activeTab = "playlists"
     root.selectedIndex = -1
+    root.renameOpen = false
     root.statusText = ""
     tracksProc.command = [root.ctlPath, "playlist", id]
     root.startProcess(tracksProc, "tracks")
@@ -446,6 +455,8 @@ Panel {
     root.activePlaylistTitle = ""
     root.playlistTracks = []
     root.selectedIndex = -1
+    root.renameOpen = false
+    root.queueSaveOpen = false
   }
 
   function logout() {
@@ -455,12 +466,63 @@ Panel {
   }
 
   function createPlaylist() {
-    var title = root.newPlaylistName.trim()
-    if (!title || root.busy) return
+    root.createPlaylistNamed(root.newPlaylistName.trim(), [])
+  }
+
+  // Creates a playlist; `tokens` are staged in root.pendingPlaylistTokens so
+  // createPlaylistProc.onExited can chain a playlist-add-items right after.
+  function createPlaylistNamed(title, tokens) {
+    var name = String(title || "").trim()
+    if (!name || root.busy) return
+    root.pendingPlaylistTokens = (tokens || []).slice()
     root.busy = true
     root.statusText = "Creating playlist…"
-    createPlaylistProc.command = [root.ctlPath, "create-playlist", title]
+    createPlaylistProc.command = [root.ctlPath, "create-playlist", name]
     root.startProcess(createPlaylistProc, "create")
+  }
+
+  function renameActivePlaylist() {
+    if (!root.activePlaylistId || root.busy) return
+    var title = renameField.text.trim()
+    if (!title) return
+    root.sendCmd("playlist-edit", [root.activePlaylistId, "--title", title])
+    root.renameOpen = false
+  }
+
+  function editActivePlaylistPrivacy(privacy) {
+    if (!root.activePlaylistId || root.busy) return
+    root.sendCmd("playlist-edit", [root.activePlaylistId, "--privacy", privacy])
+  }
+
+  function deleteActivePlaylist() {
+    if (!root.activePlaylistId || root.busy) return
+    root.deleteConfirmOpen = false
+    root.sendCmd("playlist-delete", [root.activePlaylistId])
+  }
+
+  function movePlaylistTrack(from, to) {
+    if (!root.activePlaylistId || root.busy) return
+    root.sendCmd("playlist-move", [root.activePlaylistId, from, to])
+  }
+
+  function saveQueueAsPlaylist() {
+    var tokens = Model.queueTokens(root.queueTracks)
+    if (tokens.length === 0) return
+    var title = queueSaveField.text.trim() || "Queue"
+    queueSaveField.text = ""
+    root.queueSaveOpen = false
+    root.createPlaylistNamed(title, tokens)
+  }
+
+  function openPlaylistOptions(anchorItem) {
+    clearMenu(playlistOptionsMenu)
+    playlistOptionsMenu.addItem("Rename playlist", function() { root.renameOpen = true })
+    playlistOptionsMenu.addItem("Make public", function() { root.editActivePlaylistPrivacy("PUBLIC") })
+    playlistOptionsMenu.addItem("Make private", function() { root.editActivePlaylistPrivacy("PRIVATE") })
+    playlistOptionsMenu.addItem("Make unlisted", function() { root.editActivePlaylistPrivacy("UNLISTED") })
+    playlistOptionsMenu.addItem("Delete playlist…", function() { root.deleteConfirmOpen = true })
+    var p = anchorItem.mapToItem(panelFlick, 0, anchorItem.height)
+    playlistOptionsMenu.popupAt(panelFlick, p.x, p.y)
   }
 
   function search(query) {
@@ -715,14 +777,15 @@ Panel {
     return false
   }
 
-  function openContextMenu(videoId, title, artist, source, x, y, queueIndex) {
+  function openContextMenu(videoId, title, artist, source, x, y, listIndex) {
     root.contextRow = null
     if (!root.isVideoId(videoId) && source !== "queue") return
     root.contextVideoId = String(videoId || "")
     root.contextTitle = title || ""
     root.contextArtist = artist || ""
     root.contextSource = source || ""
-    root.contextQueueIndex = (source === "queue") ? Number(queueIndex) : -1
+    root.contextTrackIndex = (source === "track") ? Number(listIndex) : -1
+    root.contextQueueIndex = (source === "queue") ? Number(listIndex) : -1
     root.contextX = x; root.contextY = y
     root.rebuildContextMenu()
     contextMenu.popupAt(panelFlick, x, y)
@@ -762,7 +825,7 @@ Panel {
   }
 
   function showPlaylistPicker(x, y) {
-    if (!root.loggedIn || root.playlists.length === 0 || root.playlistAddTokens.length === 0) return
+    if (!root.loggedIn || root.playlistAddTokens.length === 0) return
     rebuildPlaylistPicker()
     Qt.callLater(function() {
       playlistPickerMenu.popupAt(panelFlick, x, y)
@@ -809,10 +872,16 @@ Panel {
         addContextItem("Like", function() { root.sendCmd("like", [root.contextVideoId]) })
       if (root.loggedIn && root.contextSource === "nowplaying")
         addContextItem("Dislike", function() { root.sendCmd("dislike", [root.contextVideoId]) })
-      if (root.loggedIn && root.playlists.length > 0)
+      if (root.loggedIn)
         addContextItem("Add to playlist…", function() { root.openPlaylistPicker() })
       if (root.contextSource === "track" && root.activePlaylistId !== "")
         addContextItem("Remove from playlist", function() { root.sendCmd("remove", [root.activePlaylistId, root.contextVideoId]) })
+      if (root.contextSource === "track" && root.activePlaylistId !== "") {
+        if (root.contextTrackIndex > 0)
+          addContextItem("Move up", function() { root.movePlaylistTrack(root.contextTrackIndex, root.contextTrackIndex - 1) })
+        if (root.contextTrackIndex >= 0 && root.contextTrackIndex < root.playlistTracks.length - 1)
+          addContextItem("Move down", function() { root.movePlaylistTrack(root.contextTrackIndex, root.contextTrackIndex + 1) })
+      }
     }
     if (root.contextSource === "queue" && root.contextQueueIndex >= 0) {
       var qi = root.contextQueueIndex
@@ -831,6 +900,9 @@ Panel {
       if (!pl || !pl.id) continue
       playlistPickerMenu.addItem(pl.title, root.playlistAddHandler(pl.id))
     }
+    // Inline create: the typed name becomes a new playlist that receives the
+    // staged tokens right after creation.
+    playlistPickerMenu.createHandler = function(query) { root.createPlaylistWithTokens(query) }
   }
 
   function playlistAddHandler(playlistId) {
@@ -842,6 +914,16 @@ Panel {
       root.sendCmd("playlist-add-items", [playlistId].concat(tokens))
       root.clearSelection()
     }
+  }
+
+  // "Create" row in the playlist picker: stage the tokens, clear the
+  // selection, then let createPlaylistNamed() chain the add-items.
+  function createPlaylistWithTokens(title) {
+    var name = String(title || "").trim()
+    if (name === "" || root.playlistAddTokens.length === 0 || root.busy) return
+    var tokens = root.playlistAddTokens.slice()
+    root.clearSelection()
+    root.createPlaylistNamed(name, tokens)
   }
 
   function likeCurrent() {
@@ -1258,16 +1340,34 @@ Panel {
       createDeadline.stop()
       var data = root.parseProcessJson(root.processText("create"))
       var msg = root.processText("createErr").trim()
+      var chained = false
       if (data && data.ok) {
         newPlaylistField.text = ""
         root.newPlaylistName = ""
-        root.statusText = "Playlist created ✓"
         root.loadPlaylists()
+        var pendingTokens = root.pendingPlaylistTokens
+        var newPlaylistId = String(data.id || "")
+        if (pendingTokens.length > 0 && newPlaylistId !== "") {
+          // Add the staged queue tracks to the playlist we just created; this
+          // hands busy/status back to cmdProc, so don't clear them below.
+          root.pendingPlaylistTokens = []
+          root.busy = false
+          root.sendCmd("playlist-add-items", [newPlaylistId].concat(pendingTokens))
+          root.statusText = "Playlist created · adding tracks…"
+          chained = true
+        } else {
+          root.statusText = "Playlist created ✓"
+        }
       } else if (data && data.error) {
         root.statusText = root.boundedString(data.error, 256)
       }
       if (msg !== "") root.statusText = root.boundedString(msg.split("\n")[0], 256)
-      root.busy = false
+      if (!chained) {
+        // Drop any staged tokens: a failed create must not leak them into the
+        // next (unrelated) create from the Playlists tab.
+        root.busy = false
+        root.pendingPlaylistTokens = []
+      }
       if (exitCode !== 0) root.statusText = "Could not create playlist"
     }
   }
@@ -1305,6 +1405,48 @@ Panel {
           }
         } else {
           statusText = root.boundedString((d && d.error) || "Add failed", 256)
+        }
+        afterCommand.restart()
+        return
+      }
+      if (cmdName === "playlist-edit") {
+        var ed = root.parseProcessJson(root.processText("cmd"))
+        if (ed && ed.ok) {
+          var titleFlag = cmdProc.command.indexOf("--title")
+          if (titleFlag !== -1)
+            root.activePlaylistTitle = root.boundedString(cmdProc.command[titleFlag + 1] || "", 256)
+          statusText = "Playlist updated ✓"
+          root.loadPlaylists()
+        } else {
+          statusText = root.boundedString((ed && ed.error) || "Update failed", 256)
+        }
+        afterCommand.restart()
+        return
+      }
+      if (cmdName === "playlist-delete") {
+        // The backend reports failures (e.g. "Cannot delete Liked Music") as
+        // {ok:false} with exit 0, so parse instead of trusting the exit code.
+        var del = root.parseProcessJson(root.processText("cmd"))
+        if (del && del.ok) {
+          statusText = "Playlist deleted ✓"
+          root.closePlaylist()
+          root.loadPlaylists()
+        } else {
+          statusText = root.boundedString((del && del.error) || "Delete failed", 256)
+        }
+        afterCommand.restart()
+        return
+      }
+      if (cmdName === "playlist-move") {
+        var mv = root.parseProcessJson(root.processText("cmd"))
+        if (mv && mv.ok) {
+          statusText = "Track moved ✓"
+          if (root.activePlaylistId) {
+            tracksProc.command = [root.ctlPath, "playlist", root.activePlaylistId]
+            root.startProcess(tracksProc, "tracks")
+          }
+        } else {
+          statusText = root.boundedString((mv && mv.error) || "Move failed", 256)
         }
         afterCommand.restart()
         return
@@ -1532,6 +1674,16 @@ Panel {
     property var menuItems: []
     property Item menuParent: null
 
+    // Searchable pickers (playlist add) layer a filter field over the rows
+    // and can offer an inline "create" row driven by `createHandler`.
+    property bool searchable: false
+    property string searchPlaceholder: "Search…"
+    property string emptyText: ""
+    property var createHandler: null
+    property string searchQuery: ""
+
+    readonly property var shownItems: menu.searchable ? Model.filterByTitle(menu.menuItems, menu.searchQuery) : menu.menuItems
+
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
     padding: Style.spacing.hairline
@@ -1551,8 +1703,28 @@ Panel {
     contentItem: ColumnLayout {
       spacing: Style.spacing.labelGap
 
+      TextField {
+        id: menuSearchField
+        visible: menu.searchable
+        Layout.fillWidth: true
+        Layout.preferredWidth: Style.space(220)
+        Layout.preferredHeight: Style.spacing.popupRowHeight
+        placeholderText: menu.searchPlaceholder
+        foreground: Color.popups.text
+        hasCursor: false
+        onTextChanged: menu.searchQuery = text
+        onAccepted: menu.triggerFirstOrCreate()
+      }
+
+      Rectangle {
+        visible: menu.searchable
+        Layout.fillWidth: true
+        implicitHeight: 1
+        color: Util.alpha(Color.popups.text, 0.10)
+      }
+
       Repeater {
-        model: menu.menuItems
+        model: menu.shownItems
 
         delegate: Rectangle {
           id: row
@@ -1586,14 +1758,70 @@ Panel {
           }
         }
       }
+
+      Text {
+        visible: menu.searchable && menu.shownItems.length === 0 && menu.searchQuery.trim() === "" && menu.emptyText !== ""
+        Layout.fillWidth: true
+        Layout.leftMargin: Style.spacing.controlPaddingX
+        Layout.rightMargin: Style.spacing.controlPaddingX
+        text: menu.emptyText
+        color: Qt.darker(Color.popups.text, 1.5)
+        font.family: root.fam
+        font.pixelSize: Style.font.body
+      }
+
+      Rectangle {
+        id: createRow
+        visible: menu.searchable && menu.createHandler !== null && menu.searchQuery.trim() !== ""
+        Layout.fillWidth: true
+        implicitHeight: Style.spacing.popupRowHeight
+        color: createRowMouse.containsMouse ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent"
+
+        Text {
+          id: createRowLabel
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.leftMargin: Style.spacing.controlPaddingX
+          anchors.rightMargin: Style.spacing.controlPaddingX
+          textFormat: Text.PlainText
+          text: 'Create "' + menu.searchQuery.trim() + '"'
+          color: createRowMouse.containsMouse ? Style.hoverStateColor(Color.popups.text, Color.accent) : Color.popups.text
+          font.family: root.fam
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+
+        MouseArea {
+          id: createRowMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: menu.triggerCreate()
+        }
+      }
     }
 
     function addItem(text, runAction) {
-      menuItems = menuItems.concat([{ text: text, runAction: runAction }])
+      // `title` is what Model.filterByTitle() matches on; `text` stays the
+      // label the row delegate renders.
+      menuItems = menuItems.concat([{ title: text, text: text, runAction: runAction }])
     }
 
     function trigger(item) {
       if (item && typeof item.runAction === "function") item.runAction()
+      close()
+    }
+
+    // Enter with a query: run the first visible row, else the create row.
+    function triggerFirstOrCreate() {
+      if (menu.shownItems.length > 0) menu.trigger(menu.shownItems[0])
+      else menu.triggerCreate()
+    }
+
+    function triggerCreate() {
+      if (typeof menu.createHandler === "function" && menu.searchQuery.trim() !== "")
+        menu.createHandler(menu.searchQuery.trim())
       close()
     }
 
@@ -1615,13 +1843,28 @@ Panel {
       if (y > menuParent.height - height) y = Math.max(0, menuParent.height - height)
     }
 
+    // Reset the filter on every open and hand the field the keys, so typed
+    // characters land in the search box instead of the panel behind it.
+    onOpened: {
+      menuSearchField.text = ""
+      menu.searchQuery = ""
+      if (menu.searchable) Qt.callLater(function() { menuSearchField.forceActiveFocus() })
+    }
+
     onImplicitWidthChanged: fitToParent()
     onImplicitHeightChanged: fitToParent()
   }
 
   MenuPopup { id: contextMenu }
 
-  MenuPopup { id: playlistPickerMenu }
+  MenuPopup {
+    id: playlistPickerMenu
+    searchable: true
+    searchPlaceholder: "Search or create…"
+    emptyText: "No playlists yet"
+  }
+
+  MenuPopup { id: playlistOptionsMenu }
 
   Component.onCompleted: { root.loadThumbnail(); root.loadPlaylists(); root.restoreUiState() }
 
@@ -1641,8 +1884,17 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       blocked: searchField.activeFocus || newPlaylistField.activeFocus
-      onCloseRequested: root.close()
+        || contextMenu.opened || playlistPickerMenu.opened
+        || renameField.activeFocus || queueSaveField.activeFocus
+      onCloseRequested: {
+        if (root.deleteConfirmOpen) { root.deleteConfirmOpen = false; return }
+        root.close()
+      }
       onMoveRequested: function(dx, dy) {
+        if (root.deleteConfirmOpen) {
+          if (dx !== 0) deleteConfirm.selectedIndex = deleteConfirm.selectedIndex === 0 ? 1 : 0
+          return
+        }
         if (dy !== 0) {
           var list = root.activeList
           if (list.length > 0) root.selectIndex(Math.max(-1, Math.min(list.length - 1, root.selectedIndex + dy)))
@@ -1651,6 +1903,7 @@ Panel {
         }
       }
       onActivateRequested: function() {
+        if (root.deleteConfirmOpen) { root.deleteActivePlaylist(); return }
         if (root.selectMode && root.activeListKind === "search") {
           root.toggleRowAt(root.selectedIndex, true)
           return
@@ -1684,6 +1937,7 @@ Panel {
         }
       }
       onDeleteRequested: function() {
+        if (root.deleteConfirmOpen) return
         if (root.activeListKind === "") return
         if (root.activeListKind === "library") return
         if (root.activeListKind === "last") return
@@ -1698,6 +1952,7 @@ Panel {
         }
       }
       onTextKey: function(t) {
+        if (root.deleteConfirmOpen) return
         if (t === "c") root.close()
         else if (t === "s") root.sendCmd("stop", [])
         else if (t === "m") root.toggleMute()
@@ -2337,8 +2592,20 @@ Panel {
               }
 
               Item {
-                width: parent.width - Style.space(150)
+                width: parent.width - Style.space(150) - Style.space(52) - Style.spacing.sm
                 height: 1
+              }
+
+              Button {
+                text: "Save"
+                width: Style.space(52)
+                height: Style.spacing.controlHeight
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                visible: root.queueTracks.length > 0
+                enabled: !root.busy
+                onClicked: root.queueSaveOpen = true
               }
 
               Button {
@@ -2350,6 +2617,45 @@ Panel {
                 foreground: root.fg
                 enabled: root.queueUpcomingCount() > 0 && !root.busy
                 onClicked: root.clearQueue()
+              }
+            }
+
+            Row {
+              visible: root.queueSaveOpen
+              width: parent.width - Style.space(40)
+              height: Style.spacing.controlHeight
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.spacing.sm
+
+              TextField {
+                id: queueSaveField
+                width: parent.width - Style.space(52) - Style.space(80) - parent.spacing * 2
+                height: Style.spacing.controlHeight
+                placeholderText: "New playlist name"
+                foreground: root.fg
+                hasCursor: false
+                onAccepted: root.saveQueueAsPlaylist()
+              }
+
+              Button {
+                width: Style.space(52)
+                height: Style.spacing.controlHeight
+                text: "Save"
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                enabled: !root.busy
+                onClicked: root.saveQueueAsPlaylist()
+              }
+
+              Button {
+                width: Style.space(80)
+                height: Style.spacing.controlHeight
+                text: "Cancel"
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                onClicked: root.queueSaveOpen = false
               }
             }
 
@@ -2772,7 +3078,7 @@ Panel {
                   fontFamily: root.fam
                   fontSize: Style.font.bodySmall
                   foreground: root.fg
-                  enabled: root.selectedCount > 0 && root.loggedIn && root.playlists.length > 0 && !root.busy
+                  enabled: root.selectedCount > 0 && root.loggedIn && !root.busy
                   onClicked: root.openPlaylistPickerForSelection(addSelectedButton)
                 }
 
@@ -3042,6 +3348,20 @@ Panel {
               }
 
               Button {
+                id: playlistOptionsButton
+                anchors.right: playPlaylistButton.left
+                anchors.rightMargin: Style.space(4)
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(32)
+                height: Style.space(24)
+                iconText: Model.ICON.more
+                tooltipText: "Playlist options"
+                fontFamily: root.fam
+                foreground: root.fg
+                onClicked: root.openPlaylistOptions(playlistOptionsButton)
+              }
+
+              Button {
                 id: playPlaylistButton
                 anchors.right: closePlaylistButton.left
                 anchors.rightMargin: Style.space(4)
@@ -3066,6 +3386,49 @@ Panel {
                 fontFamily: root.fam
                 foreground: root.fg
                 onClicked: root.closePlaylist()
+              }
+            }
+
+            Row {
+              visible: root.renameOpen
+              width: parent.width - Style.space(40)
+              height: Style.spacing.controlHeight
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.spacing.sm
+
+              TextField {
+                id: renameField
+                width: parent.width - Style.space(52) - Style.space(80) - parent.spacing * 2
+                height: Style.spacing.controlHeight
+                placeholderText: "Playlist name"
+                foreground: root.fg
+                hasCursor: false
+                onAccepted: root.renameActivePlaylist()
+                onVisibleChanged: if (visible) {
+                  text = root.activePlaylistTitle
+                  forceActiveFocus()
+                }
+              }
+
+              Button {
+                width: Style.space(52)
+                height: Style.spacing.controlHeight
+                text: "Save"
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                enabled: !root.busy
+                onClicked: root.renameActivePlaylist()
+              }
+
+              Button {
+                width: Style.space(80)
+                height: Style.spacing.controlHeight
+                text: "Cancel"
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                onClicked: root.renameOpen = false
               }
             }
 
@@ -3174,7 +3537,7 @@ Panel {
                   acceptedButtons: Qt.RightButton
                   onClicked: function(mouse) {
                     var point = trackRow.mapToItem(panelFlick, mouse.x, mouse.y)
-                    root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "track", point.x, point.y)
+                    root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "track", point.x, point.y, index)
                     mouse.accepted = true
                   }
                 }
@@ -3513,6 +3876,20 @@ Panel {
           }
 
         }
+      }
+
+      ConfirmDialog {
+        id: deleteConfirm
+        anchors.fill: parent
+        z: 20
+        opened: root.deleteConfirmOpen
+        message: 'Delete "' + root.activePlaylistTitle + '"?'
+        confirmText: "Delete"
+        foreground: root.fg
+        selectedText: Color.accent
+        fontFamily: root.fam
+        onCanceled: root.deleteConfirmOpen = false
+        onConfirmed: root.deleteActivePlaylist()
       }
     }
   }

@@ -114,4 +114,32 @@ eq(Model.videoIds([album, artist, playlist, junk]), [], "videoIds drops non-song
 eq(Model.videoIds([]), [], "videoIds([])")
 eq(Model.videoIds(undefined), [], "videoIds(undefined)")
 
+// --- filterByTitle
+const plA = { id: "PL1", title: "Road Trip" }
+const plB = { id: "PL2", title: "roadhouse blues" }
+const plC = { id: "PL3", title: "Chill Nights" }
+const plUntitled = { id: "PL4" }
+const plAll = [plA, plB, plC, plUntitled]
+
+eq(Model.filterByTitle(plAll, ""), plAll, "filterByTitle empty query returns the input")
+eq(Model.filterByTitle(plAll, "   "), plAll, "filterByTitle blank query returns the input")
+eq(Model.filterByTitle(plAll, "ROAD"), [plA, plB], "filterByTitle is case-insensitive")
+eq(Model.filterByTitle(plAll, "chill"), [plC], "filterByTitle matches a substring")
+eq(Model.filterByTitle(plAll, "nights"), [plC], "filterByTitle skips rows without a title")
+eq(Model.filterByTitle(plAll, "nothing"), [], "filterByTitle with no match returns []")
+eq(Model.filterByTitle([plB, plA], "ro"), [plB, plA], "filterByTitle preserves order")
+eq(Model.filterByTitle(null, "ro"), [], "filterByTitle(null)")
+eq(Model.filterByTitle(undefined, "ro"), [], "filterByTitle(undefined)")
+eq(Model.filterByTitle("Road Trip", "ro"), [], "filterByTitle(non-array)")
+
+// --- queueTokens
+eq(Model.queueTokens([song, { kind: "song", videoId: "zzzzzzzzzzz" }]),
+  ["v:abcdefghijk", "v:zzzzzzzzzzz"], "queueTokens prefixes v: and keeps order")
+eq(Model.queueTokens([song, junk, album, { kind: "song", videoId: "short" }, null]),
+  ["v:abcdefghijk"], "queueTokens skips invalid videoIds")
+eq(Model.queueTokens([junk, album]), [], "queueTokens([]) with nothing valid")
+eq(Model.queueTokens([]), [], "queueTokens([])")
+eq(Model.queueTokens(null), [], "queueTokens(null)")
+eq(Model.queueTokens(undefined), [], "queueTokens(undefined)")
+
 console.log(passed + " assertions passed")
