@@ -1619,10 +1619,14 @@ def cmd_playlists(args):
         playlists = ytm.get_library_playlists(limit=50)
         result = []
         for pl in playlists:
+            # `count` is the real track count for owned playlists but absent
+            # for system/auto playlists (Liked Music, radio mixes, episodes),
+            # so it is reported as null rather than a bogus number.
+            raw_count = str(pl.get("count") or "").strip()
             result.append({
                 "id": pl.get("playlistId", ""),
                 "title": pl.get("title", ""),
-                "count": len(pl.get("thumbnails") or []),
+                "count": int(raw_count) if raw_count.isdigit() else None,
                 "description": pl.get("description", ""),
             })
         print(json.dumps({"ok": True, "playlists": result}))
