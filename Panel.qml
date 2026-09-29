@@ -58,7 +58,6 @@ Panel {
   property var selectedKeys: ({})
   property int selectionAnchor: -1
   property var playlistAddTokens: []
-  property var pendingQueueRemoves: []
   readonly property int selectedCount: root.selectedRows.length
   readonly property var selectedRows: {
     var out = []
@@ -623,7 +622,7 @@ Panel {
   // pointless toast.
   readonly property var quietCommands: ["toggle", "pause", "resume", "next", "prev",
     "seek", "seek-pct", "volume", "stop", "loop", "shuffle", "queue-jump",
-    "queue-remove", "queue-move", "queue-clear", "enqueue", "enqueue-files",
+    "queue-remove", "queue-remove-keys", "queue-move", "queue-clear", "enqueue", "enqueue-files",
     "precache", "thumbnail", "image", "status"]
   function isQuietCommand(name) { return root.quietCommands.indexOf(name) !== -1 }
 
@@ -847,28 +846,18 @@ Panel {
     if (!root.selectMode) root.selectMode = true
   }
 
-  // Batch queue removal: mpv removes by index and the indices shift as it goes,
-  // so queue the removals in DESCENDING order and pump them one at a time,
-  // because sendCmd() refuses to start while a command is already running.
-  // cmdProc.onExited() calls pumpQueueRemoves() again after each one.
+  // Batch queue removal: send every selected row key in one command. The
+  // backend re-reads the playlist and removes each matching entry itself, so a
+  // queue advance or an inserted precache entry cannot shift an index onto the
+  // wrong track (which the old one-remove-per-round-trip pump could).
   function removeSelectedFromQueue() {
-    var idx = []
+    var keys = []
     for (var i = 0; i < root.queueTracks.length; i++) {
       var row = root.queueTracks[i]
-      if (row && root.isRowSelected(row)) idx.push(i)
+      if (row && row.key && root.isRowSelected(row)) keys.push(String(row.key))
     }
-    if (idx.length === 0) return
-    idx.sort(function(a, b) { return b - a })
-    root.pendingQueueRemoves = idx
-    root.pumpQueueRemoves()
-  }
-
-  function pumpQueueRemoves() {
-    if (root.busy || root.pendingQueueRemoves.length === 0) return
-    var next = root.pendingQueueRemoves[0]
-    root.pendingQueueRemoves = root.pendingQueueRemoves.slice(1)
-    if (root.pendingQueueRemoves.length === 0) root.clearSelection()
-    root.queueRemove(next)
+    if (keys.length === 0) return
+    root.sendCmd("queue-remove-keys", keys)
   }
 
   // Returns true when the click was consumed as a selection gesture, i.e. the
@@ -1531,7 +1520,6 @@ Panel {
     onExited: function(exitCode) {
       cmdDeadline.stop()
       root.busy = false
-      Qt.callLater(function() { root.pumpQueueRemoves() })
       root.refreshQueue()
       if (exitCode !== 0) {
         statusText = "Command failed"
@@ -1627,6 +1615,14 @@ Panel {
       var generic = root.parseProcessJson(root.processText("cmd"))
       if (generic && generic.ok === false) {
         statusText = root.boundedString(generic.error || (action + " failed"), 256)
+        afterCommand.restart()
+        return
+      }
+      if (cmdName === "queue-remove-keys") {
+        var removedN = (generic && Array.isArray(generic.removed)) ? generic.removed.length : 0
+        root.clearSelection()
+        if (removedN > 0)
+          statusText = "Removed " + removedN + (removedN === 1 ? " track" : " tracks") + " ✓"
         afterCommand.restart()
         return
       }

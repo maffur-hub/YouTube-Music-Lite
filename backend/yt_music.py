@@ -3343,6 +3343,68 @@ def cmd_queue_remove(args):
     print(json.dumps({"ok": True, "removed": index}))
 
 
+def _queue_remove_indices(tokens):
+    """Map queue-row keys to playlist indices, or None when unreadable.
+
+    Keys are the panel's row keys: `v:<videoId>#<occurrence>` for YouTube
+    entries (the occurrence counts repeats of the same id in queue order) and
+    `q:<index>` for local/non-YouTube entries. The playlist is read once and
+    every key resolved against it, so a queue advance or an inserted entry
+    since the panel built its list cannot shift a key onto the wrong track the
+    way a stale index could. Removal is then done in one IPC session.
+    """
+    props = mpv_query(["playlist"])
+    if not isinstance(props, dict):
+        return None
+    playlist = props.get("playlist")
+    if not isinstance(playlist, list):
+        return None
+    by_key = {}
+    seen = {}
+    for index, entry in enumerate(playlist):
+        if not isinstance(entry, dict):
+            continue
+        video_id = video_id_from_url(entry.get("filename") or "")
+        if valid_video_id(video_id):
+            occurrence = seen.get(video_id, 0)
+            seen[video_id] = occurrence + 1
+            by_key[f"v:{video_id}#{occurrence}"] = index
+        else:
+            by_key[f"q:{index}"] = index
+    indices = []
+    for token in tokens:
+        index = by_key.get(str(token))
+        if index is not None and index not in indices:
+            indices.append(index)
+    return indices
+
+
+def cmd_queue_remove_keys(args):
+    if not args:
+        fail("Usage: yt-music-ctl queue-remove-keys <key...>")
+    if not mpv_is_running():
+        print(json.dumps({"ok": False, "error": "Nothing playing"}))
+        return
+    indices = _queue_remove_indices(args)
+    if indices is None:
+        print(json.dumps({"ok": False, "error": "Unable to read playlist"}))
+        return
+    if not indices:
+        print(json.dumps({"ok": True, "removed": []}))
+        return
+    removed = []
+    # Descending order keeps the lower indices valid as entries disappear.
+    for index in sorted(indices, reverse=True):
+        resp = mpv_send("playlist-remove", index)
+        if isinstance(resp, dict) and resp.get("error") == "success":
+            removed.append(index)
+    if mpv_is_running():
+        write_status_from_mpv(get_mpv_props())
+    else:
+        write_status({"ok": True, "playing": False})
+    print(json.dumps({"ok": True, "removed": sorted(removed)}))
+
+
 def cmd_queue_clear(args):
     """Drop every upcoming queue entry, keeping the current track playing.
 
@@ -4015,6 +4077,7 @@ COMMANDS = {
     "queue-clear": cmd_queue_clear,
     "queue-jump": cmd_queue_jump,
     "queue-remove": cmd_queue_remove,
+    "queue-remove-keys": cmd_queue_remove_keys,
     "queue-move": cmd_queue_move,
     "loop": cmd_loop,
     "shuffle": cmd_shuffle,
@@ -4045,9 +4108,9 @@ def main():
         print("  volume <0-150>           Set volume")
         print("  stop                     Stop playback")
         print("  logout                   Remove local YouTube Music authentication")
-        print("  like <videoId>           Like + add to Liked Music playlist")
-        print("  dislike <videoId>        Remove like")
-        print("  unlike <videoId>         Remove like (same as dislike)")
+        print("  like <videoId>           Like a song (adds it to Liked Music)")
+        print("  dislike <videoId>        Dislike a song and drop it from your playlists")
+        print("  unlike <videoId>         Remove your like")
         print("  playlists                List library playlists")
         print("  create-playlist <name>   Create a private playlist")
         print("  playlist <playlistId>    Get playlist tracks")
@@ -4079,6 +4142,7 @@ def main():
         print("  queue-clear              Remove every upcoming track")
         print("  queue-jump <index>       Jump to a queue index")
         print("  queue-remove <index>     Remove a queue entry")
+        print("  queue-remove-keys <key...>  Remove queue entries by row key")
         print("  queue-move <from> <to>   Move a queue entry")
         print("  loop <mode>              Set loop mode (off/inf)")
         print("  shuffle                  Shuffle current playlist")
