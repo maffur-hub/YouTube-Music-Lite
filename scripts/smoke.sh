@@ -2,7 +2,7 @@
 #
 # Smoke test for the yt-music Omarchy plugin backend (yt-music-ctl).
 #
-# Usage: scripts/smoke.sh [--full]
+# Usage: scripts/smoke.sh [--full] [--mutating]
 #
 #   scripts/smoke.sh          Non-destructive run. Exercises the read-only
 #                             commands, the network navigation lookups, the
@@ -17,8 +17,15 @@
 #                             artist's radio, precaches one known track's
 #                             audio (a real yt-dlp download) and checks the
 #                             precache answers without a player.
+#   scripts/smoke.sh --mutating
+#                             OPT-IN account mutations, all reversible: the
+#                             full throwaway-playlist lifecycle (create, add,
+#                             duplicate, edit, move, remove, delete, cleanup)
+#                             and a like+unlike round-trip on a track that was
+#                             not already liked. Never touches an existing
+#                             playlist.
 #
-# Commands ALWAYS SKIPPED (with or without --full) and why:
+# Commands SKIPPED unless --mutating (with or without --full) and why:
 #   login                    interactive browser authentication
 #   create-playlist          would leave a stray playlist on the account
 #   playlist-add             mutates an existing playlist (incl. Liked Music)
@@ -74,16 +81,18 @@ RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 MPV_SOCKET="$RUNTIME_DIR/yt-music/mpv.sock"
 
 FULL=0
+MUTATING=0
 for arg in "$@"; do
     case "$arg" in
         --full) FULL=1 ;;
+        --mutating) MUTATING=1 ;;
         -h|--help)
             sed -n '2,55p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
             printf 'smoke.sh: unknown option: %s\n' "$arg" >&2
-            printf 'usage: scripts/smoke.sh [--full]\n' >&2
+            printf 'usage: scripts/smoke.sh [--full] [--mutating]\n' >&2
             exit 2
             ;;
     esac
@@ -551,9 +560,183 @@ fi
 DAEMON_BEFORE=0
 daemon_running && DAEMON_BEFORE=1
 
+# check_playlist_counts - every playlist whose description advertises "N tracks"
+# must report count N; auto playlists without a count are allowed to be null and
+# count must never be a non-integer.
+check_playlist_counts() {
+    local out rc got
+    out=$("$CTL" playlists 2>"$ERR_FILE")
+    rc=$?
+    got=$(printf '%s' "$out" | python3 -c 'import sys, json, re
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("parse"); raise SystemExit
+if data.get("ok") is not True:
+    print("not-ok"); raise SystemExit
+for pl in data.get("playlists", []):
+    m = re.search(r"(\d+) tracks?", pl.get("description") or "")
+    c = pl.get("count")
+    if c is not None and not isinstance(c, int):
+        print("count-not-int: %r" % (c,)); raise SystemExit
+    if m and c is not None and int(m.group(1)) != c:
+        print("mismatch %s: desc=%s count=%s" % (pl.get("title"), m.group(1), c))
+        raise SystemExit
+print("ok")' 2>/dev/null)
+    if [[ $rc -eq 0 && $got == ok ]]; then
+        pass "playlists count matches description"
+    else
+        fail "playlists count matches description" "${got:-no output}"
+    fi
+}
+
+# check_queue_remove_key - remove the last queue entry by its row key and assert
+# the count drops by exactly one (covers the key-based batch removal path).
+check_queue_remove_key() {
+    local label=$1 before after key out rc
+    before=$("$CTL" queue-list 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("count",0))' 2>/dev/null)
+    key=$("$CTL" queue-list 2>/dev/null | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+seen = {}
+rows = []
+for t in d.get("tracks", []):
+    v = t.get("videoId", "")
+    if v:
+        o = seen.get(v, 0); seen[v] = o + 1
+        rows.append("v:%s#%d" % (v, o))
+    else:
+        rows.append("q:%d" % t.get("index", -1))
+print(rows[-1] if rows else "")' 2>/dev/null)
+    if [[ -z $key ]]; then
+        fail "$label" "empty queue"
+        return
+    fi
+    out=$("$CTL" queue-remove-keys "$key" 2>"$ERR_FILE"); rc=$?
+    after=$("$CTL" queue-list 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("count",0))' 2>/dev/null)
+    if [[ $rc -eq 0 && $after -eq $((before - 1)) ]]; then
+        pass "$label"
+    else
+        fail "$label" "key=$key before=$before after=$after: $(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+}
+
+# check_thumbnail_cached - a second thumbnail call must not rewrite the file.
+check_thumbnail_cached() {
+    local label=$1 vid=$2 path m1 m2
+    path="$HOME/.cache/yt-music/thumbs/$vid.jpg"
+    "$CTL" thumbnail "$vid" >/dev/null 2>&1
+    if [[ ! -f $path ]]; then
+        fail "$label" "no cached thumbnail at $path"
+        return
+    fi
+    m1=$(stat -c %Y "$path")
+    sleep 1
+    "$CTL" thumbnail "$vid" >/dev/null 2>&1
+    m2=$(stat -c %Y "$path")
+    if [[ $m1 == "$m2" ]]; then
+        pass "$label"
+    else
+        fail "$label" "re-downloaded (mtime changed)"
+    fi
+}
+
+# --- opt-in, fully reversible account mutations (--mutating) -----------------
+mutating_playlist() {
+    local name="ZZ-SMOKE-DELETE-ME-$$" id out rc
+    out=$("$CTL" create-playlist "$name" 2>"$ERR_FILE"); rc=$?
+    id=$(printf '%s' "$out" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
+    if [[ $rc -eq 0 && -n $id ]]; then
+        pass "mutating create-playlist"
+    else
+        fail "mutating create-playlist" "$(detail "$out" "$(cat "$ERR_FILE")")"
+        return
+    fi
+
+    out=$("$CTL" playlist-add-items "$id" "v:$LYRICS_VID" "v:$NO_LYRICS_VID" 2>"$ERR_FILE"); rc=$?
+    if [[ $rc -eq 0 ]] && printf '%s' "$out" | grep -q '"added": 2'; then
+        pass "mutating playlist-add-items"
+    else
+        fail "mutating playlist-add-items" "$(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+
+    out=$("$CTL" playlist-add-items "$id" "v:$LYRICS_VID" 2>"$ERR_FILE")
+    if printf '%s' "$out" | grep -q '"duplicates": 1'; then
+        pass "mutating playlist-add-items duplicate"
+    else
+        fail "mutating playlist-add-items duplicate" "$(detail "$out" "")"
+    fi
+
+    out=$("$CTL" playlist-edit "$id" --title "$name-renamed" --privacy UNLISTED 2>"$ERR_FILE"); rc=$?
+    if [[ $rc -eq 0 ]] && printf '%s' "$out" | grep -q '"ok": true'; then
+        pass "mutating playlist-edit"
+    else
+        fail "mutating playlist-edit" "$(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+
+    out=$("$CTL" playlist-move "$id" 0 1 2>"$ERR_FILE"); rc=$?
+    if [[ $rc -eq 0 ]] && printf '%s' "$out" | grep -q '"ok": true'; then
+        pass "mutating playlist-move"
+    else
+        fail "mutating playlist-move" "$(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+
+    out=$("$CTL" remove "$id" "$LYRICS_VID" 2>"$ERR_FILE"); rc=$?
+    if [[ $rc -eq 0 ]] && printf '%s' "$out" | grep -q '"removed": 1'; then
+        pass "mutating remove"
+    else
+        fail "mutating remove" "$(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+
+    out=$("$CTL" playlist-delete "$id" 2>"$ERR_FILE"); rc=$?
+    if [[ $rc -eq 0 ]] && printf '%s' "$out" | grep -q '"deleted": true'; then
+        pass "mutating playlist-delete"
+    else
+        fail "mutating playlist-delete" "$(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+
+    if "$CTL" playlists 2>/dev/null | grep -q "$id"; then
+        fail "mutating cleanup" "throwaway playlist $id still present"
+    else
+        pass "mutating cleanup (throwaway gone)"
+    fi
+}
+
+mutating_like() {
+    local before after id out rc
+    id=$("$CTL" search -f songs "smoke test" 2>/dev/null | python3 -c 'import sys,json
+d = json.load(sys.stdin)
+items = d.get("items") or []
+print(items[0].get("videoId","") if items else "")' 2>/dev/null)
+    if [[ -z $id ]]; then
+        skip "mutating like/unlike" "no search result videoId"
+        return
+    fi
+    if "$CTL" liked -r 2>/dev/null | grep -q "$id"; then
+        skip "mutating like/unlike" "$id is already liked; refusing to touch it"
+        return
+    fi
+    before=$("$CTL" liked -r 2>/dev/null | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("items",[])))' 2>/dev/null)
+    out=$("$CTL" like "$id" 2>"$ERR_FILE"); rc=$?
+    after=$("$CTL" liked -r 2>/dev/null | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("items",[])))' 2>/dev/null)
+    if [[ $rc -eq 0 ]] && printf '%s' "$out" | grep -q '"liked": true' && [[ $after -eq $((before + 1)) ]]; then
+        pass "mutating like"
+    else
+        fail "mutating like" "$(detail "$out" "$(cat "$ERR_FILE")") before=$before after=$after"
+    fi
+    out=$("$CTL" unlike "$id" 2>"$ERR_FILE"); rc=$?
+    after=$("$CTL" liked -r 2>/dev/null | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("items",[])))' 2>/dev/null)
+    if [[ $rc -eq 0 ]] && [[ $after -eq $before ]]; then
+        pass "mutating unlike (restored)"
+    else
+        fail "mutating unlike (restored)" "$(detail "$out" "$(cat "$ERR_FILE")") before=$before after=$after"
+    fi
+}
+
 # ---------------------------------------------------------------- read-only
 section "read-only"
 check_ok "playlists" "$CTL" playlists
+check_playlist_counts
 check_exit0 "status" "$CTL" status
 check_ok "search songs" "$CTL" search -f songs fleetwood mac
 check_ok "search albums" "$CTL" search -f albums fleetwood mac
@@ -625,10 +808,13 @@ check_usage "lyrics bad id" "$CTL" lyrics 'bad##id'
 check_usage "radio usage" "$CTL" radio
 if [[ -n $IDLE_MPV_PID ]] || mpv_alive; then
     check_usage "volume abc" "$CTL" volume abc
+    check_not_ok "loop banana (invalid mode)" "" "$CTL" loop banana
 else
     skip "volume abc" "no player; cmd_volume returns 0 before validating args"
 fi
 check_usage "seek abc" "$CTL" seek abc
+check_usage "seek-pct abc" "$CTL" seek-pct abc
+check_usage "play malformed id" "$CTL" play short
 check_usage "playlist-add-items (no args)" "$CTL" playlist-add-items
 check_usage "playlist-add-items bad token" "$CTL" playlist-add-items "$PLAYLIST_ID" bogus-token
 check_usage "playlist-edit (no args)" "$CTL" playlist-edit
@@ -658,6 +844,13 @@ skip "remove" "deletes playlist entries"
 skip "like / dislike / unlike" "mutates the account's liked songs"
 skip "daemon / watch" "foreground loop that never returns (use ensure-daemon)"
 
+if [[ $MUTATING -eq 1 ]]; then
+    section "mutating (--mutating)"
+    printf 'NOTE account mutations are fully reversible (throwaway playlist; like+unlike)\n'
+    mutating_playlist
+    mutating_like
+fi
+
 if [[ $FULL -eq 0 ]]; then
     printf 'NOTE playback-affecting commands skipped - pass --full: play pause '
     printf 'resume toggle next prev seek seek-pct volume loop shuffle mix radio queue '
@@ -685,6 +878,10 @@ if [[ $FULL -eq 1 ]]; then
     check_ok "queue-list" "$CTL" queue-list
     check_json "queue-jump 0" "$CTL" queue-jump 0
     check_json "queue-move 1 0" "$CTL" queue-move 1 0
+    check_not_ok "queue-jump out of range" "Index out of range" "$CTL" queue-jump 999
+    check_not_ok "queue-remove out of range" "Index out of range" "$CTL" queue-remove 999
+    check_not_ok "queue-move out of range" "Index out of range" "$CTL" queue-move 999 0
+    check_ok "queue-list after out-of-range (mpv survived)" "$CTL" queue-list
     check_json "queue-remove 1" "$CTL" queue-remove 1
     check_ok "play-next $NO_LYRICS_VID" "$CTL" play-next "$NO_LYRICS_VID"
     check_ok "enqueue queue album $ALBUM_ID" "$CTL" enqueue queue album "$ALBUM_ID"
@@ -692,8 +889,11 @@ if [[ $FULL -eq 1 ]]; then
     check_ok "next" "$CTL" next
     check_ok "prev" "$CTL" prev
     check_exit0 "thumbnail $LYRICS_VID" "$CTL" thumbnail "$LYRICS_VID"
+    check_thumbnail_cached "thumbnail cache hit (no re-download)" "$LYRICS_VID"
     check_ok "mix $LYRICS_VID" "$CTL" mix "$LYRICS_VID"
     check_ok "queue $PLAYLIST_ID" "$CTL" queue "$PLAYLIST_ID"
+    check_queue_remove_key "queue-remove-keys (key-based)"
+    check_ok "queue-remove-keys bogus key (no-op)" "$CTL" queue-remove-keys "v:aaaaaaaaaaa#9"
 
     section "cleanup (--full)"
     check_ok "stop" "$CTL" stop
