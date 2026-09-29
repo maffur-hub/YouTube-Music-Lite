@@ -55,6 +55,23 @@ yt-music-ctl login
 
 Click the music widget in the bar to open the player.
 
+## Testing
+
+`scripts/smoke.sh` is a PASS/FAIL smoke test for every backend command.
+
+```bash
+scripts/smoke.sh              # read-only, network navigation, cache, usage errors
+scripts/smoke.sh --full       # plus transport, queue, radio and precache (plays audio)
+scripts/smoke.sh --mutating   # opt-in, reversible account mutations
+                              # (throwaway playlist + like/unlike)
+```
+
+`scripts/model_test.js` (Node) covers the pure list/selection helpers:
+
+```bash
+node scripts/model_test.js
+```
+
 ## Uninstall
 
 ```bash
