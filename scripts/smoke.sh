@@ -16,7 +16,10 @@
 #                             with `stop` + `daemon-stop`. Also plays the
 #                             artist's radio, precaches one known track's
 #                             audio (a real yt-dlp download) and checks the
-#                             precache answers without a player.
+#                             precache answers without a player. While a track
+#                             is playing it checks the MPRIS player behind the
+#                             media keys / Omarchy media widget (SKIPped when
+#                             playerctl or mpv-mpris is not installed).
 #   scripts/smoke.sh --mutating
 #                             OPT-IN account mutations, all reversible: the
 #                             full throwaway-playlist lifecycle (create, add,
@@ -87,7 +90,7 @@ for arg in "$@"; do
         --full) FULL=1 ;;
         --mutating) MUTATING=1 ;;
         -h|--help)
-            sed -n '2,55p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -641,6 +644,109 @@ check_thumbnail_cached() {
     fi
 }
 
+# ctl_status_paused - run `yt-music-ctl status` and echo the paused flag from
+# status.json as True/False; empty when the file cannot be read.
+ctl_status_paused() {
+    "$CTL" status >/dev/null 2>&1
+    python3 - "$HOME/.local/state/yt-music/status.json" <<'PY'
+import json, sys
+try:
+    paused = json.load(open(sys.argv[1])).get("paused")
+except Exception:
+    sys.exit(0)
+print("True" if paused else "False")
+PY
+}
+
+# check_mpris - playback must be reachable over D-Bus as `mpv`, which is how
+# the desktop media keys and Omarchy's media widget drive this plugin. Call it
+# while a track is playing. SKIPs cleanly when playerctl or the mpv-mpris
+# script is missing; otherwise asserts the player, its title and art metadata,
+# and that an MPRIS play-pause round-trip shows up in `yt-music-ctl status`.
+check_mpris() {
+    local script="" title="" art="" before="" after="" i
+    if ! command -v playerctl >/dev/null 2>&1; then
+        skip "mpris" "playerctl is not installed"
+        return
+    fi
+    for script in /etc/mpv/scripts/mpris.so /usr/lib/mpv-mpris/mpris.so \
+                  "$HOME/.config/mpv/scripts/mpris.so"; do
+        if [[ -e $script ]]; then
+            break
+        fi
+        script=""
+    done
+    if [[ -z $script ]]; then
+        skip "mpris" "mpv-mpris is not installed"
+        return
+    fi
+
+    # The D-Bus name appears once mpv has loaded the script.
+    for i in $(seq 1 25); do
+        if playerctl -l 2>/dev/null | grep -qE '^mpv(\.|$)'; then
+            break
+        fi
+        sleep 0.2
+    done
+    if playerctl -l 2>/dev/null | grep -qE '^mpv(\.|$)'; then
+        pass "mpris player listed by playerctl"
+    else
+        fail "mpris player listed by playerctl" "$(snippet "$(playerctl -l 2>&1)")"
+        return
+    fi
+
+    # Title and cover art land a moment after the stream starts.
+    for i in $(seq 1 25); do
+        title=$(playerctl -p mpv metadata xesam:title 2>/dev/null) || title=""
+        art=$(playerctl -p mpv metadata mpris:artUrl 2>/dev/null) || art=""
+        [[ -n $title && -n $art ]] && break
+        sleep 0.2
+    done
+    if [[ -n $title ]]; then
+        pass "mpris xesam:title non-empty"
+    else
+        fail "mpris xesam:title non-empty" "empty"
+    fi
+    if [[ -n $art ]]; then
+        pass "mpris mpris:artUrl non-empty"
+    else
+        fail "mpris mpris:artUrl non-empty" "empty"
+    fi
+
+    before=$(ctl_status_paused)
+    if [[ -z $before ]]; then
+        fail "mpris play-pause flips status" "status.json unreadable"
+        return
+    fi
+    playerctl -p mpv play-pause >/dev/null 2>&1
+    after=""
+    for i in $(seq 1 25); do
+        after=$(ctl_status_paused)
+        [[ -n $after && $after != "$before" ]] && break
+        sleep 0.2
+    done
+    if [[ -n $after && $after != "$before" ]]; then
+        pass "mpris play-pause flips status ($before -> $after)"
+    else
+        fail "mpris play-pause flips status" \
+             "expected a flip from $before, got ${after:-unreadable}"
+        return
+    fi
+    playerctl -p mpv play-pause >/dev/null 2>&1
+    after=""
+    for i in $(seq 1 25); do
+        after=$(ctl_status_paused)
+        [[ -n $after && $after == "$before" ]] && break
+        sleep 0.2
+    done
+    if [[ -n $after && $after == "$before" ]]; then
+        pass "mpris play-pause restores status ($after)"
+    else
+        fail "mpris play-pause restores status" \
+             "expected $before, got ${after:-unreadable}"
+    fi
+}
+
 # --- opt-in, fully reversible account mutations (--mutating) -----------------
 mutating_playlist() {
     local name="ZZ-SMOKE-DELETE-ME-$$" id out rc
@@ -864,6 +970,7 @@ if [[ $FULL -eq 1 ]]; then
     check_ok "ensure-daemon" "$CTL" ensure-daemon
     check_ok "play $LYRICS_VID" "$CTL" play "$LYRICS_VID"
     check_exit0 "status" "$CTL" status
+    check_mpris
     check_ok "pause" "$CTL" pause
     check_ok "resume" "$CTL" resume
     check_exit0 "toggle" "$CTL" toggle

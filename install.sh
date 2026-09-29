@@ -24,6 +24,25 @@ for command in python3 mpv yt-dlp; do
   fi
 done
 
+# Non-fatal: mpv-mpris is what puts playback on D-Bus, which the media keys
+# and Omarchy's media widget talk to. Same three script locations the
+# backend's `yt-music-ctl doctor` checks.
+MPRIS_FOUND=0
+for mpris_path in /etc/mpv/scripts/mpris.so /usr/lib/mpv-mpris/mpris.so \
+                  "${HOME}/.config/mpv/scripts/mpris.so"; do
+  if [[ -e "${mpris_path}" ]]; then
+    MPRIS_FOUND=1
+    break
+  fi
+done
+if [[ "${MPRIS_FOUND}" -eq 0 ]]; then
+  if command -v pacman >/dev/null 2>&1; then
+    printf 'Note: install mpv-mpris to enable media keys and the Omarchy media widget: sudo pacman -S mpv-mpris\n'
+  else
+    printf 'Note: install mpv-mpris (the mpv MPRIS D-Bus bridge) to enable media keys and the Omarchy media widget\n'
+  fi
+fi
+
 mkdir -p "${BIN_DIR}" "${DATA_DIR}"
 python3 -m venv "${VENV}"
 "${VENV}/bin/python" -m pip install --require-hashes --only-binary=:all: \

@@ -24,6 +24,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - Every action's result appears in a status line at the bottom of the panel and fades after four seconds
 - Album artwork and progress display
 - Panel chrome follows the active Omarchy theme through the shared shell UI kit (tokens, hover/selection states, section headers)
+- MPRIS: playback is controllable from the desktop through `mpv-mpris` (media keys, Omarchy's media widget), with title, artist, and album art reported to any MPRIS client
 - Private per-user runtime state and MPV IPC socket
 
 ## Requirements
@@ -32,6 +33,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - Python 3
 - MPV
 - `yt-dlp`
+- `mpv-mpris` (optional, but recommended: enables the desktop media keys and the Omarchy media widget)
 - A Chromium-based browser or Firefox logged into YouTube Music
 
 ## Install
@@ -54,6 +56,23 @@ yt-music-ctl login
 ```
 
 Click the music widget in the bar to open the player.
+
+## Desktop integration
+
+Playback is published on D-Bus as `org.mpris.MediaPlayer2.mpv` by
+[`mpv-mpris`](https://github.com/hoyon/mpv-mpris), which mpv loads
+automatically from `/etc/mpv/scripts/mpris.so`. That is what lets the
+desktop media keys (bound to `omarchy-shell media ...`) and Omarchy's media
+widget control this player, and it is how MPRIS clients get the track title,
+artist, and album art.
+
+```bash
+sudo pacman -S mpv-mpris
+```
+
+MPRIS identifies the player as `mpv` (`playerctl -p mpv ...`). The notice
+printed by `./install.sh` and `yt-music-ctl doctor` both report whether it
+is installed.
 
 ## Testing
 

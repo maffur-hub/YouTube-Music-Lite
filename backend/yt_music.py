@@ -123,6 +123,17 @@ def valid_video_id(value):
             all(c.isalnum() or c in "_-" for c in value))
 
 
+def watch_url(video_id):
+    """Playback URL for a videoId.
+
+    Always www.youtube.com rather than the music subdomain: mpv-mpris derives
+    `mpris:artUrl` from a thumbnail regex that only matches youtu.be/ and
+    www.youtube.com/watch URLs, so the music host would leave the Omarchy
+    media widget (and any other MPRIS client) without cover art.
+    """
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
 def _looks_like_url_title(title):
     text = str(title or "").strip().lower()
     if not text:
@@ -942,7 +953,7 @@ def mpv_play(video_id):
     mpv_kill()
     clear_session()
     ensure_private_runtime_dir()
-    url = f"https://music.youtube.com/watch?v={video_id}"
+    url = watch_url(video_id)
     proc = subprocess.Popen([
         "mpv",
         "--no-video",
@@ -1256,7 +1267,7 @@ def cmd_play_next(args):
         write_status_from_mpv(wait_for_metadata())
         print(json.dumps({"ok": True, "played": True, "videoId": video_id}))
         return
-    url = f"https://music.youtube.com/watch?v={video_id}"
+    url = watch_url(video_id)
     remember_tracks([entry])
     mpv_send("loadfile", [url, "insert-next"])
     print(json.dumps({"ok": True, "queuedNext": True, "videoId": video_id}))
@@ -1275,7 +1286,7 @@ def cmd_queue_add(args):
         write_status_from_mpv(wait_for_metadata())
         print(json.dumps({"ok": True, "played": True, "videoId": video_id}))
         return
-    url = f"https://music.youtube.com/watch?v={video_id}"
+    url = watch_url(video_id)
     remember_tracks([entry])
     mpv_send("loadfile", [url, "append"])
     print(json.dumps({"ok": True, "queued": True, "videoId": video_id}))
@@ -2317,7 +2328,7 @@ def cmd_restore(args):
         position = 0.0
     ensure_daemon()
     ensure_private_runtime_dir()
-    urls = [f"https://music.youtube.com/watch?v={v}" for v in ids]
+    urls = [watch_url(v) for v in ids]
     proc = subprocess.Popen(
         ["mpv", "--no-video", "--really-quiet",
          f"--input-ipc-server={MPV_SOCKET}", "--keep-open=no", "--pause=yes"] + urls,
@@ -2477,32 +2488,44 @@ def _prune_media_cache(directory, max_entries, max_bytes):
             pass
 
 
-def cmd_thumbnail(args):
-    if not args or not valid_video_id(args[0]):
-        fail("Invalid video ID")
-    video_id = args[0]
-    _ensure_private_dir(CACHE_ROOT)
-    _ensure_private_dir(THUMBNAIL_CACHE_DIR)
+class _ThumbnailError(Exception):
+    """A fetched thumbnail that failed validation and must not be cached."""
+
+
+def ensure_thumbnail(video_id, errors=None):
+    """Return THUMBNAIL_CACHE_DIR/<video_id>.jpg, downloading it first.
+
+    Never raises: an invalid id, a failed fetch, or a rejected image all come
+    back as None. When `errors` (a list) is supplied, its first item is the
+    reason for that None — the `thumbnail` CLI command passes one so it can
+    keep reporting exactly why a fetch failed.
+    """
+    if not valid_video_id(video_id):
+        if errors is not None:
+            errors.append("Invalid video ID")
+        return None
     path = os.path.join(THUMBNAIL_CACHE_DIR, f"{video_id}.jpg")
     try:
-        st = os.lstat(path)
-        if stat.S_ISREG(st.st_mode) and st.st_size > 0:
-            return  # already cached
-    except OSError:
-        pass
-    try:
+        _ensure_private_dir(CACHE_ROOT)
+        _ensure_private_dir(THUMBNAIL_CACHE_DIR)
+        try:
+            st = os.lstat(path)
+            if stat.S_ISREG(st.st_mode) and st.st_size > 0:
+                return path  # already cached
+        except OSError:
+            pass
         request = urllib.request.Request(
             f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
             headers={"User-Agent": "yt-music-ctl/1"})
         with _urlopen_no_redirect(request, timeout=8) as response:
             data = response.read(MAX_THUMBNAIL_BYTES + 1)
         if len(data) > MAX_THUMBNAIL_BYTES:
-            fail("Thumbnail is too large")
+            raise _ThumbnailError("Thumbnail is too large")
         dimensions = jpeg_dimensions(data)
         if (not dimensions or dimensions[0] > MAX_THUMBNAIL_DIMENSION or
                 dimensions[1] > MAX_THUMBNAIL_DIMENSION or
                 dimensions[0] * dimensions[1] > MAX_THUMBNAIL_PIXELS):
-            fail("Thumbnail dimensions are not allowed")
+            raise _ThumbnailError("Thumbnail dimensions are not allowed")
         fd, temporary = tempfile.mkstemp(dir=THUMBNAIL_CACHE_DIR, prefix=".thumb-", suffix=".jpg")
         try:
             with os.fdopen(fd, "wb") as output:
@@ -2515,8 +2538,23 @@ def cmd_thumbnail(args):
         _prune_media_cache(THUMBNAIL_CACHE_DIR,
                            THUMBNAIL_CACHE_MAX_ENTRIES,
                            THUMBNAIL_CACHE_MAX_BYTES)
+        return path
+    except _ThumbnailError as exc:
+        if errors is not None:
+            errors.append(str(exc))
+        return None
     except Exception as exc:
-        fail(f"Thumbnail fetch failed: {exc}")
+        if errors is not None:
+            errors.append(f"Thumbnail fetch failed: {exc}")
+        return None
+
+
+def cmd_thumbnail(args):
+    if not args or not valid_video_id(args[0]):
+        fail("Invalid video ID")
+    errors = []
+    if ensure_thumbnail(args[0], errors) is None:
+        fail(errors[0] if errors else "Thumbnail fetch failed")
 
 
 def cmd_image(args):
@@ -2718,15 +2756,18 @@ def precache_track(video_id, force=False):
 
     yt-dlp runs as the system binary with the minimal flag set:
 
-        -f bestaudio/best --no-playlist --no-progress -o <tmpl> <url>
+        -f bestaudio/best --no-playlist --no-progress --embed-metadata -o <tmpl> <url>
 
     There is deliberately no `-x`/`--audio-format`: bestaudio for YouTube is a
     single already-compressed stream (opus-in-webm or m4a), which mpv plays
     natively through the same container it would have streamed. Skipping the
-    extract/convert step removes an ffmpeg dependency, a transcode, and a whole
-    class of partial-output failures, at the cost of a `.webm`/`.m4a` extension
+    extract/convert step removes the transcode and a whole class of
+    partial-output failures, at the cost of a `.webm`/`.m4a` extension
     instead of a fixed one (the file is renamed to `<videoId>.<ext>` either
-    way). Output goes to a private temp directory inside the cache so a failed
+    way). `--embed-metadata` muxes title/artist/album tags into that container
+    in place (same extension, yt-dlp uses the system ffmpeg for the copy), so
+    an MPRIS client shows a real track instead of a bare file name. Output
+    goes to a private temp directory inside the cache so a failed
     or interrupted run can never leave a partial file behind.
     """
     if not valid_video_id(video_id):
@@ -2751,7 +2792,7 @@ def precache_track(video_id, force=False):
         url = f"https://music.youtube.com/watch?v={video_id}"
         proc = subprocess.run(
             [YTDLP_BIN, "-f", "bestaudio/best", "--no-playlist",
-             "--no-progress", "-o", template, url],
+             "--no-progress", "--embed-metadata", "-o", template, url],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             timeout=AUDIO_PRECACHE_TIMEOUT)
         if proc.returncode != 0:
@@ -2785,6 +2826,10 @@ def precache_track(video_id, force=False):
         os.chmod(produced, 0o600)
         os.replace(produced, target)
         audio_cache_prune()
+        # Best-effort cover art for the local file: MPRIS reads
+        # `mpris:artUrl` from this thumbnail once the entry plays. It never
+        # raises and never fails the precache.
+        ensure_thumbnail(video_id)
         return {"ok": True, "error": "", "cached": False, "path": target}
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "Download timed out", "cached": False, "path": ""}
@@ -2886,7 +2931,22 @@ def install_cached_next(video_id, path):
         if not (isinstance(sidecar, dict) and str(sidecar.get("title") or "").strip()):
             return {"ok": False, "error": "No stored metadata for this track",
                     "installed": False}
-        resp = mpv_send("loadfile", [path, "insert-next"])
+        # Hand mpv the cover art as a file-local option when the thumbnail is
+        # already cached: a bare local file has no YouTube URL for mpv-mpris to
+        # derive `mpris:artUrl` from, and the sidecar image is what the media
+        # widget shows. Without a thumbnail the plain two-argument insert is
+        # used and everything else behaves exactly as before.
+        thumb = os.path.join(THUMBNAIL_CACHE_DIR, f"{video_id}.jpg")
+        try:
+            thumb_stat = os.lstat(thumb)
+            has_thumb = stat.S_ISREG(thumb_stat.st_mode) and thumb_stat.st_size > 0
+        except OSError:
+            has_thumb = False
+        if has_thumb:
+            resp = mpv_send("loadfile",
+                            [path, "insert-next", -1, {"cover-art-files": thumb}])
+        else:
+            resp = mpv_send("loadfile", [path, "insert-next"])
         if not isinstance(resp, dict) or resp.get("error") != "success":
             return {"ok": False, "error": "mpv refused the cached file",
                     "installed": False}
@@ -3047,7 +3107,7 @@ def _mix_launch(track_list):
     remember_tracks(track_list)
     mpv_kill()
     clear_session()
-    urls = [f"https://music.youtube.com/watch?v={t['videoId']}" for t in track_list]
+    urls = [watch_url(t['videoId']) for t in track_list]
     ensure_private_runtime_dir()
     proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
                              f"--input-ipc-server={MPV_SOCKET}",
@@ -3139,7 +3199,7 @@ def cmd_queue_playlist(args):
         for t in tracks:
             vid = t.get("videoId", "")
             if vid:
-                urls.append(f"https://music.youtube.com/watch?v={vid}")
+                urls.append(watch_url(vid))
                 album = t.get("album") or {}
                 if not isinstance(album, dict):
                     album = {"name": album}
@@ -3219,7 +3279,7 @@ def cmd_enqueue(args):
             print(json.dumps({"ok": False, "error": "No playable tracks"}))
             return
         remember_tracks(meta)
-        urls = [f"https://music.youtube.com/watch?v={t['videoId']}" for t in meta]
+        urls = [watch_url(t['videoId']) for t in meta]
         if mode == "play" or not mpv_is_running():
             mpv_kill()
             clear_session()
@@ -3293,7 +3353,7 @@ def cmd_enqueue_files(args):
             print(json.dumps({"ok": False, "error": "No playable tracks"}))
             return
         remember_tracks(meta)
-        urls = [f"https://music.youtube.com/watch?v={t['videoId']}" for t in meta]
+        urls = [watch_url(t['videoId']) for t in meta]
         if mode == "play" or not mpv_is_running():
             mpv_kill()
             clear_session()
@@ -4083,6 +4143,45 @@ def _refresh_radio_metadata(args):
         pass
 
 
+# mpv-mpris loads from an mpv script directory; install.sh's non-fatal notice
+# and scripts/smoke.sh probe the very same three locations.
+MPRIS_SCRIPT_CANDIDATES = (
+    "/etc/mpv/scripts/mpris.so",
+    "/usr/lib/mpv-mpris/mpris.so",
+    os.path.expanduser("~/.config/mpv/scripts/mpris.so"),
+)
+
+
+def mpris_script_path():
+    """First mpv-mpris script that exists (symlinks followed), else None."""
+    for candidate in MPRIS_SCRIPT_CANDIDATES:
+        try:
+            if os.path.exists(candidate):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def cmd_doctor(args):
+    """Print a JSON report of the desktop-integration prerequisites.
+
+    mpris is what exposes playback on D-Bus (org.mpris.MediaPlayer2.mpv) so
+    the media keys and Omarchy's media widget can control this player. Pure
+    filesystem/PATH checks: no subprocesses, nothing that can fail loudly.
+    """
+    script = mpris_script_path()
+    mpris = script is not None
+    print(json.dumps({
+        "ok": True,
+        "mpris": mpris,
+        "mpris_script": script,
+        "mpv": shutil.which("mpv") is not None,
+        "yt_dlp": shutil.which("yt-dlp") is not None,
+        "hint": "" if mpris else "sudo pacman -S mpv-mpris",
+    }))
+
+
 def cmd_internal_refresh(args):
     """Re-run one cached-read command with -r to repopulate a stale entry.
 
@@ -4170,6 +4269,7 @@ COMMANDS = {
     "watch": cmd_daemon,
     "ensure-daemon": cmd_ensure_daemon,
     "daemon-stop": cmd_daemon_stop,
+    "doctor": cmd_doctor,
     "__refresh": cmd_internal_refresh,
 }
 
@@ -4234,6 +4334,7 @@ def main():
         print("  daemon                   Run the status daemon in the foreground")
         print("  ensure-daemon            Start the status daemon in the background")
         print("  daemon-stop              Stop the status daemon")
+        print("  doctor                   Check media-key/MPRIS integration (JSON)")
         print("  watch                    Legacy alias for daemon")
         print()
         print("Metadata read commands (search, library, home, history, last-played, album,")
