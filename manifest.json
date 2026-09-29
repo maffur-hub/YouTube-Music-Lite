@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "id": "yt-music",
   "name": "YouTube Music Lite",
-  "version": "1.0.0",
-  "author": "stevenwtlafrance-ship-it",
+  "version": "2.0.0",
+  "author": "maffur-hub",
   "description": "A lightweight YouTube Music player for Omarchy",
   "kinds": [
     "bar-widget"

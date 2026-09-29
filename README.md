@@ -37,7 +37,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 ## Install
 
 ```bash
-git clone https://github.com/stevenwtlafrance-ship-it/YouTube-Music-Lite.git
+git clone https://github.com/maffur-hub/YouTube-Music-Lite.git
 cd YouTube-Music-Lite
 ./install.sh
 ```
@@ -71,6 +71,14 @@ Authentication headers are stored locally in `~/.config/yt-music/auth.json`
 with owner-only permissions. No credentials, playlists, or playback state
 are included in this repository.
 
+## Credits
+
+This is a fork of [YouTube Music Lite](https://github.com/stevenwtlafrance-ship-it/YouTube-Music-Lite)
+by stevenwtlafrance-ship-it, substantially expanded with playlist management,
+multi-select, library browsing, lyrics, offline caching, and a persistent
+status daemon.
+
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). Original work Copyright (c) 2026
+stevenwtlafrance-ship-it; modifications Copyright (c) 2026 maffur-hub.
