@@ -187,6 +187,20 @@ function videoIds(rows) {
   return out
 }
 
+function likedSet(items) {
+  // Build a {videoId: true} lookup from a `liked` payload's items, so the panel
+  // can colour the hero heart without re-scanning the list on every status tick.
+  var out = {}
+  if (!items) return out
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i]
+    if (!item) continue
+    var vid = item.videoId
+    if (typeof vid === "string" && vid !== "") out[vid] = true
+  }
+  return out
+}
+
 // ---- playlist helpers (pure; used by Panel.qml and scripts/model_test.js)
 
 // Case-insensitive substring match on each item's `title`. An empty or
@@ -263,6 +277,7 @@ if (typeof module !== "undefined") {
     rowsToTokens: rowsToTokens,
     allSongs: allSongs,
     videoIds: videoIds,
+    likedSet: likedSet,
     filterByTitle: filterByTitle,
     queueTokens: queueTokens,
     queueKeyAt: queueKeyAt,

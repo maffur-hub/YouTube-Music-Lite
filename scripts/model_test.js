@@ -131,6 +131,23 @@ eq(Model.videoIds([album, artist, playlist, junk]), [], "videoIds drops non-song
 eq(Model.videoIds([]), [], "videoIds([])")
 eq(Model.videoIds(undefined), [], "videoIds(undefined)")
 
+// --- likedSet
+eq(Object.keys(Model.likedSet([{ videoId: "abcdefghijk" }, { videoId: "zzzzzzzzzzz" }])).sort(),
+  ["abcdefghijk", "zzzzzzzzzzz"], "likedSet collects both videoIds")
+eq(Object.keys(Model.likedSet([{ videoId: "abcdefghijk" }, { videoId: "abcdefghijk" }])).sort(),
+  ["abcdefghijk"], "likedSet collapses duplicates to one key")
+eq(Model.likedSet(null), {}, "likedSet(null)")
+eq(Model.likedSet(undefined), {}, "likedSet(undefined)")
+eq(Object.keys(Model.likedSet([{ title: "no id" }, { videoId: "" }, { videoId: 7 }])).length, 0,
+  "likedSet skips items without a usable videoId")
+eq(Object.keys(Model.likedSet([{ videoId: "" }])).length, 0, "likedSet skips an empty videoId")
+eq(Object.keys(Model.likedSet([{ videoId: 42 }])).length, 0, "likedSet skips a non-string videoId")
+eq(Object.keys(Model.likedSet("abcdefghijk")).length, 0, "likedSet non-array-ish yields 0 keys")
+eq(Object.keys(Model.likedSet({})).length, 0, "likedSet empty object yields 0 keys")
+eq(Object.keys(Model.likedSet([])).length, 0, "likedSet([]) yields 0 keys")
+eq(Model.likedSet([{ videoId: "abcdefghijk" }, null, { videoId: "zzzzzzzzzzz" }])["abcdefghijk"],
+  true, "likedSet marks each id true and skips null items")
+
 // --- filterByTitle
 const plA = { id: "PL1", title: "Road Trip" }
 const plB = { id: "PL2", title: "roadhouse blues" }

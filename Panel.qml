@@ -1129,9 +1129,25 @@ Panel {
     root.createPlaylistNamed(name, tokens)
   }
 
+  // Fetch the liked ids once so the hero heart can show the real rating. The
+  // `liked` command is metadata-cached (15 min) and serves stale instantly, so
+  // this costs one cheap lookup rather than a request per track.
+  function refreshLikedSet() {
+    if (likedSetProc.running) return
+    likedSetProc.command = [root.ctlPath, "liked", "200"]
+    root.startProcess(likedSetProc, "likedSet")
+  }
+
+  function isCurrentLiked() {
+    var vid = (root.musicStatus && root.musicStatus.videoId) ? String(root.musicStatus.videoId) : ""
+    return vid !== "" && root.likedVideoIds[vid] === true
+  }
+
   function likeCurrent() {
     if (!root.musicStatus || !root.isVideoId(root.musicStatus.videoId)) return
-    sendCmd("like", [root.musicStatus.videoId])
+    var vid = String(root.musicStatus.videoId)
+    if (root.likedVideoIds[vid] === true) sendCmd("unlike", [vid])
+    else sendCmd("like", [vid])
   }
 
   function dislikeCurrent() {
@@ -1406,6 +1422,24 @@ Panel {
   }
 
   Process {
+    id: likedSetProc
+    command: [root.ctlPath, "liked", "200"]
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("likedSet", data) }
+    }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("likedSetErr", data) }
+    }
+    onStarted: likedSetDeadline.start()
+    onExited: function(exitCode) {
+      likedSetDeadline.stop()
+      var data = root.parseProcessJson(root.processText("likedSet"))
+      if (data && data.ok)
+        root.likedVideoIds = Model.likedSet(data.items)
+    }
+  }
+
+  Process {
     id: queueClearProc
     command: [root.ctlPath, "queue-clear"]
     stdout: SplitParser {
@@ -1439,6 +1473,8 @@ Panel {
     interval: root.commandTimeout
     onTriggered: { if (lastPlayedProc.running) lastPlayedProc.running = false }
   }
+
+  Timer { id: likedSetDeadline; interval: root.commandTimeout; onTriggered: { if (likedSetProc.running) likedSetProc.running = false } }
 
   Timer {
     id: lastPlayedClearDeadline
@@ -1703,6 +1739,22 @@ Panel {
         root.clearSelection()
         if (removedN > 0)
           statusText = "Removed " + removedN + (removedN === 1 ? " track" : " tracks") + " ✓"
+        afterCommand.restart()
+        return
+      }
+      if (cmdName === "like" || cmdName === "unlike" || cmdName === "dislike") {
+        // Reflect the rating immediately. The backend invalidates its `liked`
+        // cache, so the next panel open re-reads the authoritative list.
+        var ratedVid = String((cmdProc.command && cmdProc.command[2]) || "")
+        if (ratedVid !== "") {
+          var nextLiked = {}
+          for (var likedKey in root.likedVideoIds) nextLiked[likedKey] = root.likedVideoIds[likedKey]
+          nextLiked[ratedVid] = (cmdName === "like")
+          root.likedVideoIds = nextLiked
+        }
+        if (cmdName === "like") statusText = "Liked ✓"
+        else if (cmdName === "unlike") statusText = "Unliked ✓"
+        else statusText = "Disliked ✓"
         afterCommand.restart()
         return
       }
@@ -2172,7 +2224,7 @@ Panel {
 
   MenuPopup { id: playlistOptionsMenu }
 
-  Component.onCompleted: { root.loadThumbnail(); root.loadPlaylists(); root.restoreUiState() }
+  Component.onCompleted: { root.loadThumbnail(); root.loadPlaylists(); root.restoreUiState(); root.refreshLikedSet() }
 
   // ---------------------------------------------------------------- surface
 
@@ -2496,7 +2548,7 @@ Panel {
                   Text {
                     anchors.centerIn: parent
                     text: Model.ICON.like
-                    color: Color.accent
+                    color: root.isCurrentLiked() ? Color.accent : root.fg
                     font.family: root.fam
                     font.pixelSize: Style.font.body
                   }
