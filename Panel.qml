@@ -1161,7 +1161,6 @@ Panel {
         root.loggedIn = false
         root.playlists = []
       }
-      root.busy = false
       root.refreshing = false
     }
   }
@@ -1187,7 +1186,6 @@ Panel {
         root.statusText = root.boundedString(data.error, 256)
       }
       if (msg !== "") root.statusText = root.boundedString(msg.split("\n")[0], 256)
-      root.busy = false
       if (exitCode !== 0 && root.statusText === "")
         root.statusText = "Could not load playlist"
     }
@@ -1207,7 +1205,6 @@ Panel {
       var data = root.parseProcessJson(root.processText("search"))
       if (data && data.ok && data.query === root.searchQuery)
         root.searchResults = root.normalizeMixedRows(data.items, 100)
-      root.busy = false
       root.searching = false
     }
   }
