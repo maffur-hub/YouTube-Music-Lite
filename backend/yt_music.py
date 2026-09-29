@@ -2078,6 +2078,89 @@ def cmd_album(args):
             print(json.dumps({"ok": False, "error": str(e)}))
 
 
+_MISSING = object()
+
+
+def _first_by_key(node, key):
+    """Depth-first lookup of the first dict carrying `key` anywhere below
+    `node`. Returns _MISSING when the payload has no such key, so a present
+    but falsy value (isToggled: false) is never mistaken for "absent"."""
+    if isinstance(node, dict):
+        if key in node:
+            return node[key]
+        for value in node.values():
+            found = _first_by_key(value, key)
+            if found is not _MISSING:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _first_by_key(item, key)
+            if found is not _MISSING:
+                return found
+    return _MISSING
+
+
+def _album_in_library(response):
+    """Saved-to-library flag from a raw album browse response.
+
+    The album header exposes it as `isToggled` on its toggle button; prefer
+    the button inside `musicResponsiveHeaderRenderer` (the album page's own
+    header) and fall back to the first toggle button anywhere in the payload.
+    Returns None when the response carries no such button at all."""
+    for container_key in ("musicResponsiveHeaderRenderer", None):
+        scope = response if container_key is None else _first_by_key(response, container_key)
+        if scope is _MISSING or scope is None:
+            continue
+        toggle = _first_by_key(scope, "toggleButtonRenderer")
+        if isinstance(toggle, dict) and "isToggled" in toggle:
+            return bool(toggle["isToggled"])
+    return None
+
+
+def cmd_album_status(args):
+    if not args:
+        fail("Usage: yt-music-ctl album-status <browseId>")
+    browse_id = args[0]
+    ytm = get_ytmusic()
+    try:
+        resp = ytm._send_request("browse", {"browseId": browse_id})
+        print(json.dumps({"ok": True, "inLibrary": _album_in_library(resp) is True}))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+
+
+def _set_album_library(browse_id, saved):
+    """Like/unlike an album: rate_playlist is YouTube Music's own
+    "Add to library / Remove from library" interaction for albums."""
+    ytm = get_ytmusic()
+    try:
+        from ytmusicapi import LikeStatus
+        album = ytm.get_album(browse_id)
+        apid = album.get("audioPlaylistId")
+        if not apid:
+            print(json.dumps({"ok": False, "error": "No audio playlist for this album"}))
+            return
+        ytm.rate_playlist(apid, LikeStatus.LIKE if saved else LikeStatus.INDIFFERENT)
+        # The cached `library albums` list would otherwise stay stale for the
+        # whole TTL and hide/show the album until it expired.
+        invalidate_namespace("library")
+        print(json.dumps({"ok": True, "saved": bool(saved)}))
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+
+
+def cmd_album_save(args):
+    if not args:
+        fail("Usage: yt-music-ctl album-save <browseId>")
+    _set_album_library(args[0], True)
+
+
+def cmd_album_remove(args):
+    if not args:
+        fail("Usage: yt-music-ctl album-remove <browseId>")
+    _set_album_library(args[0], False)
+
+
 def cmd_artist(args):
     args, refresh = _strip_refresh(args)
     if not args:
@@ -4379,6 +4462,9 @@ COMMANDS = {
     "liked": cmd_liked,
     "library": cmd_library,
     "album": cmd_album,
+    "album-status": cmd_album_status,
+    "album-save": cmd_album_save,
+    "album-remove": cmd_album_remove,
     "artist": cmd_artist,
     "radio": cmd_artist_radio,
     "home": cmd_home,
@@ -4448,6 +4534,9 @@ def main():
         print("  last-played [limit|clear] Local play history")
         print("  restore                  Rebuild the last queue, paused")
         print("  album <browseId>         Get album tracks")
+        print("  album-status <browseId>  Report whether an album is saved to your library")
+        print("  album-save <browseId>    Save an album to your library")
+        print("  album-remove <browseId>  Remove an album from your library")
         print("  artist <browseId>        Get an artist's top songs + albums")
         print("  enqueue <play|queue|next> <album|artist|playlist> <id>   Play/queue a whole album, artist or playlist")
         print("  enqueue-files <play|queue|next> <videoId...>   Play/queue an explicit list of videoIds")

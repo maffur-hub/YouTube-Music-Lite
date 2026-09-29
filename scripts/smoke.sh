@@ -27,7 +27,9 @@
 #                             duplicate, edit, move, remove, delete, cleanup)
 #                             and a like+unlike round-trip on a track that was
 #                             not already liked. Never touches an existing
-#                             playlist.
+#                             playlist. Also a save/remove round-trip on a
+#                             known album, restoring its original library
+#                             state.
 #
 # Commands SKIPPED unless --mutating (with or without --full) and why:
 #   login                    interactive browser authentication
@@ -39,6 +41,7 @@
 #   playlist-move            reorders an existing playlist's tracks
 #   remove                   deletes entries from a playlist
 #   like / dislike / unlike  mutates the account's liked songs
+#   album-save / album-remove  mutates the account's saved-albums list
 #   daemon / watch           foreground loops that never return; the same code
 #                            path is covered by ensure-daemon + daemon-stop
 #
@@ -91,7 +94,7 @@ for arg in "$@"; do
         --full) FULL=1 ;;
         --mutating) MUTATING=1 ;;
         -h|--help)
-            sed -n '2,58p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,61p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -901,6 +904,68 @@ print(items[0].get("videoId","") if items else "")' 2>/dev/null)
     fi
 }
 
+# Save/remove round-trip for one album, restoring whatever state it started in.
+# Silent: rating an album never touches playback.
+mutating_album() {
+    local initial out rc
+    out=$("$CTL" album-status "$ALBUM_ID" 2>"$ERR_FILE"); rc=$?
+    initial=$(printf '%s' "$out" | python3 -c 'import sys, json
+try:
+    d = json.load(sys.stdin)
+    print("True" if d.get("ok") is True and d.get("inLibrary") is True
+          else ("False" if d.get("ok") is True else "?"))
+except Exception:
+    print("?")' 2>/dev/null)
+    if [[ $rc -eq 0 && $initial != "?" ]]; then
+        pass "mutating album-status (initially saved: $initial)"
+    else
+        fail "mutating album-status" "$(detail "$out" "$(cat "$ERR_FILE")")"
+        return
+    fi
+
+    # Start from "not saved" so album-save itself is exercised.
+    if [[ $initial == True ]]; then
+        out=$("$CTL" album-remove "$ALBUM_ID" 2>"$ERR_FILE"); rc=$?
+        if [[ $rc -eq 0 ]] && printf '%s' "$out" | grep -q '"saved": false'; then
+            pass "mutating album-remove (pre-clean)"
+        else
+            fail "mutating album-remove (pre-clean)" "$(detail "$out" "$(cat "$ERR_FILE")")"
+        fi
+    fi
+
+    out=$("$CTL" album-save "$ALBUM_ID" 2>"$ERR_FILE"); rc=$?
+    if [[ $rc -eq 0 ]] && printf '%s' "$out" | grep -q '"saved": true'; then
+        pass "mutating album-save"
+    else
+        fail "mutating album-save" "$(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+    check_field "mutating album-status after save" true "inLibrary" \
+        "$CTL" album-status "$ALBUM_ID"
+    # album-save drops the cached `library albums` list, so this is live.
+    check_json_pred "mutating library albums contains $ALBUM_ID" \
+        "any(i.get('browseId') == '$ALBUM_ID' for i in (d.get('items') or []))" \
+        "$CTL" library albums 200
+
+    out=$("$CTL" album-remove "$ALBUM_ID" 2>"$ERR_FILE"); rc=$?
+    if [[ $rc -eq 0 ]] && printf '%s' "$out" | grep -q '"saved": false'; then
+        pass "mutating album-remove"
+    else
+        fail "mutating album-remove" "$(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+    check_field "mutating album-status after remove" false "inLibrary" \
+        "$CTL" album-status "$ALBUM_ID"
+
+    # Restore the state the album had before this run.
+    if [[ $initial == True ]]; then
+        out=$("$CTL" album-save "$ALBUM_ID" 2>"$ERR_FILE"); rc=$?
+        if [[ $rc -eq 0 ]] && printf '%s' "$out" | grep -q '"saved": true'; then
+            pass "mutating album save (restored)"
+        else
+            fail "mutating album save (restored)" "$(detail "$out" "$(cat "$ERR_FILE")")"
+        fi
+    fi
+}
+
 # ---------------------------------------------------------------- read-only
 section "read-only"
 check_ok "playlists" "$CTL" playlists
@@ -1010,13 +1075,15 @@ skip "playlist-delete" "deletes a playlist"
 skip "playlist-move" "reorders a playlist's tracks"
 skip "remove" "deletes playlist entries"
 skip "like / dislike / unlike" "mutates the account's liked songs"
+skip "album-save / album-remove" "mutates the account's saved-albums list"
 skip "daemon / watch" "foreground loop that never returns (use ensure-daemon)"
 
 if [[ $MUTATING -eq 1 ]]; then
     section "mutating (--mutating)"
-    printf 'NOTE account mutations are fully reversible (throwaway playlist; like+unlike)\n'
+    printf 'NOTE account mutations are fully reversible (throwaway playlist; like+unlike; album save/remove)\n'
     mutating_playlist
     mutating_like
+    mutating_album
 fi
 
 if [[ $FULL -eq 0 ]]; then

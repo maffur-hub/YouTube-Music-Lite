@@ -21,6 +21,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - Select multiple Up Next entries to add them to a playlist or remove them together
 - The Up Next tab is always visible (with an empty state when nothing is queued) and, while playback is stopped, it shows the last queue with a Resume action
 - Albums, artists, and playlists open in place under the tab you are on, so the tab bar keeps matching what you see and Back returns to the list you came from
+- Albums can be saved to or removed from your YouTube Music library from the album view (or the album row's right-click menu)
 - The Playlists tab lists your playlists as rows (title and description) instead of a drop-down
 - Every action's result appears in a status line at the bottom of the panel and fades after four seconds
 - Album artwork and progress display

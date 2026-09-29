@@ -122,6 +122,8 @@ Panel {
   property string libraryMeta: ""
   property string libraryDescription: ""
   property bool libraryInfoOpen: false
+  property bool albumInLibrary: false
+  property bool libraryDirty: false
   readonly property bool libraryRichHeader: root.libraryDetail
     && (root.libraryKind === "album" || root.libraryKind === "artist")
     && (root.libraryImageSource !== "" || root.libraryThumbUrl !== ""
@@ -683,6 +685,7 @@ Panel {
     root.activeTab = "library"
     root.selectedIndex = -1
     root.statusText = ""
+    root.libraryDirty = false
     libraryProc.command = command
     root.startProcess(libraryProc, "library")
   }
@@ -730,6 +733,11 @@ Panel {
     root.selectedIndex = -1
     libraryProc.command = [root.ctlPath, "album", browseId]
     root.startProcess(libraryProc, "library")
+    if (root.loggedIn) {
+      root.albumInLibrary = false
+      albumStatusProc.command = [root.ctlPath, "album-status", browseId]
+      root.startProcess(albumStatusProc, "albumStatus")
+    }
   }
 
   function openArtist(browseId, name) {
@@ -806,6 +814,10 @@ Panel {
       var parent = stack.pop()
       root.libraryParents = stack
       root.applyLibrarySnapshot(parent)
+      if (root.libraryDirty && !root.libraryDetail) {
+        root.libraryDirty = false
+        root.refetchLibrary()
+      }
       return
     }
     root.closeLibrary()
@@ -1036,12 +1048,14 @@ Panel {
     clearMenu(contextMenu)
     if (root.contextRow) {
       var navRow = root.contextRow
-      if (navRow.kind === "album")
+      if (navRow.kind === "album") {
         addContextItem("Album info", function() {
           root.openRow(navRow, root.contextSource === "search")
           root.libraryInfoOpen = true
         })
-      else if (navRow.kind === "artist") {
+        if (root.loggedIn)
+          addContextItem("Save to library", function() { root.sendCmd("album-save", [navRow.browseId]) })
+      } else if (navRow.kind === "artist") {
         addContextItem("Artist info", function() {
           root.openRow(navRow, root.contextSource === "search")
           root.libraryInfoOpen = true
@@ -1559,6 +1573,22 @@ Panel {
   }
 
   Process {
+    id: albumStatusProc
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("albumStatus", data) }
+    }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("albumStatusErr", data) }
+    }
+    onStarted: albumStatusDeadline.start()
+    onExited: function(exitCode) {
+      albumStatusDeadline.stop()
+      var data = root.parseProcessJson(root.processText("albumStatus"))
+      if (data && data.ok) root.albumInLibrary = (data.inLibrary === true)
+    }
+  }
+
+  Process {
     id: logoutProc
     command: [root.ctlPath, "logout"]
     stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("logout", data) } }
@@ -1724,6 +1754,22 @@ Panel {
         afterCommand.restart()
         return
       }
+      if (cmdName === "album-save" || cmdName === "album-remove") {
+        var alb = root.parseProcessJson(root.processText("cmd"))
+        if (alb && alb.ok) {
+          root.albumInLibrary = (cmdName === "album-save")
+          root.libraryDirty = true
+          statusText = (cmdName === "album-save" ? "Saved to library ✓" : "Removed from library ✓")
+          if (root.activeTab === "library" && root.libraryKind === "albums") {
+            root.libraryDirty = false
+            root.refetchLibrary()
+          }
+        } else {
+          statusText = root.boundedString((alb && alb.error) || "Library update failed", 256)
+        }
+        afterCommand.restart()
+        return
+      }
       // Every remaining command reports {ok:false, error} with exit 0 on a
       // handled failure, so trust the payload rather than the exit code.
       var generic = root.parseProcessJson(root.processText("cmd"))
@@ -1775,6 +1821,7 @@ Panel {
   Timer { id: queueDeadline; interval: root.commandTimeout; onTriggered: { if (queueProc.running) queueProc.running = false } }
   Timer { id: queueListDeadline; interval: root.commandTimeout; onTriggered: { if (queueListProc.running) queueListProc.running = false } }
   Timer { id: libraryDeadline; interval: root.commandTimeout; onTriggered: { if (libraryProc.running) libraryProc.running = false } }
+  Timer { id: albumStatusDeadline; interval: root.commandTimeout; onTriggered: { if (albumStatusProc.running) albumStatusProc.running = false } }
   Timer { id: logoutDeadline; interval: root.commandTimeout; onTriggered: { if (logoutProc.running) logoutProc.running = false } }
   Timer { id: createDeadline; interval: root.commandTimeout; onTriggered: { if (createPlaylistProc.running) createPlaylistProc.running = false } }
   Timer { id: cmdDeadline; interval: root.commandTimeout; onTriggered: { if (cmdProc.running) cmdProc.running = false } }
@@ -4212,11 +4259,24 @@ Panel {
                 onClicked: root.enqueueNav("queue", root.libraryKind, root.libraryRefId)
               }
 
+              Button {
+                visible: root.libraryKind === "album" && root.loggedIn
+                enabled: !root.busy && root.libraryRefId !== ""
+                width: Style.space(72)
+                height: Style.space(28)
+                text: root.albumInLibrary ? "Remove" : "Save"
+                fontFamily: root.fam
+                fontSize: Style.font.bodySmall
+                foreground: root.fg
+                onClicked: root.sendCmd(root.albumInLibrary ? "album-remove" : "album-save", [root.libraryRefId])
+              }
+
               Text {
                 visible: !root.libraryRichHeader
                 width: parent.width - Style.space(72)
                   - ((root.libraryKind === "album" || root.libraryKind === "artist")
                     ? Style.space(144) + Style.spacing.sm * 2 : 0)
+                  - (root.libraryKind === "album" ? Style.space(72) + Style.spacing.sm : 0)
                   - Style.spacing.sm
                 height: Style.space(28)
                 elide: Text.ElideRight
