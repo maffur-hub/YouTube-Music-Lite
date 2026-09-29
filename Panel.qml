@@ -124,6 +124,11 @@ Panel {
   property bool libraryInfoOpen: false
   property bool albumInLibrary: false
   property bool libraryDirty: false
+  property string albumStatusRefId: ""
+  property var albumCmdQueue: []
+  property bool albumCmdRunning: false
+  property string albumCmdCurrentId: ""
+  property string albumCmdCurrentAction: ""
   readonly property bool libraryRichHeader: root.libraryDetail
     && (root.libraryKind === "album" || root.libraryKind === "artist")
     && (root.libraryImageSource !== "" || root.libraryThumbUrl !== ""
@@ -633,7 +638,10 @@ Panel {
   function isQuietCommand(name) { return root.quietCommands.indexOf(name) !== -1 }
 
   function sendCmd(command, args) {
-    if (root.busy) return false
+    if (root.busy) {
+      root.statusText = "Still finishing the last action — try again"
+      return false
+    }
     root.busy = true
     cmdProc.command = [root.ctlPath, command].concat((args || []).map(String))
     root.startProcess(cmdProc, "cmd")
@@ -735,6 +743,7 @@ Panel {
     root.startProcess(libraryProc, "library")
     if (root.loggedIn) {
       root.albumInLibrary = false
+      root.albumStatusRefId = browseId
       albumStatusProc.command = [root.ctlPath, "album-status", browseId]
       root.startProcess(albumStatusProc, "albumStatus")
     }
@@ -833,6 +842,30 @@ Panel {
     root.resetLibraryInfo()
     root.selectedIndex = -1
     if (!root.playlistDetail) root.detailTab = ""
+  }
+
+  // Album save/remove is serialised here rather than through sendCmd(): a
+  // burst of "Save to library" clicks must all apply, and the backend calls
+  // are idempotent so replaying one is harmless.
+  function queueAlbumLibrary(action, browseId) {
+    if (!browseId) return
+    var q = root.albumCmdQueue.slice()
+    q.push({ action: action, browseId: browseId })
+    if (q.length > 20) q = q.slice(q.length - 20)
+    root.albumCmdQueue = q
+    root.statusText = (action === "album-save" ? "Saving to library…" : "Removing from library…")
+    root.pumpAlbumCmdQueue()
+  }
+  function pumpAlbumCmdQueue() {
+    if (root.albumCmdRunning || root.albumCmdQueue.length === 0) return
+    var q = root.albumCmdQueue.slice()
+    var spec = q.shift()
+    root.albumCmdQueue = q
+    root.albumCmdRunning = true
+    root.albumCmdCurrentId = spec.browseId
+    root.albumCmdCurrentAction = spec.action
+    albumCmdProc.command = [root.ctlPath, spec.action, spec.browseId]
+    root.startProcess(albumCmdProc, "albumCmd")
   }
 
   function closeDetail() {
@@ -1054,7 +1087,7 @@ Panel {
           root.libraryInfoOpen = true
         })
         if (root.loggedIn)
-          addContextItem("Save to library", function() { root.sendCmd("album-save", [navRow.browseId]) })
+          addContextItem("Save to library", function() { root.queueAlbumLibrary("album-save", navRow.browseId) })
       } else if (navRow.kind === "artist") {
         addContextItem("Artist info", function() {
           root.openRow(navRow, root.contextSource === "search")
@@ -1584,7 +1617,38 @@ Panel {
     onExited: function(exitCode) {
       albumStatusDeadline.stop()
       var data = root.parseProcessJson(root.processText("albumStatus"))
-      if (data && data.ok) root.albumInLibrary = (data.inLibrary === true)
+      if (data && data.ok && root.albumStatusRefId === root.libraryRefId)
+        root.albumInLibrary = (data.inLibrary === true)
+    }
+  }
+
+  Process {
+    id: albumCmdProc
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("albumCmd", data) }
+    }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("albumCmdErr", data) }
+    }
+    onStarted: albumCmdDeadline.start()
+    onExited: function(exitCode) {
+      albumCmdDeadline.stop()
+      root.albumCmdRunning = false
+      var data = root.parseProcessJson(root.processText("albumCmd"))
+      var action = root.albumCmdCurrentAction
+      if (data && data.ok) {
+        if (root.albumCmdCurrentId === root.libraryRefId)
+          root.albumInLibrary = (action === "album-save")
+        root.libraryDirty = true
+        statusText = (action === "album-save" ? "Saved to library ✓" : "Removed from library ✓")
+        if (root.activeTab === "library" && root.libraryKind === "albums") {
+          root.libraryDirty = false
+          root.refetchLibrary()
+        }
+      } else {
+        statusText = root.boundedString((data && data.error) || "Library update failed", 256)
+      }
+      root.pumpAlbumCmdQueue()
     }
   }
 
@@ -1754,22 +1818,6 @@ Panel {
         afterCommand.restart()
         return
       }
-      if (cmdName === "album-save" || cmdName === "album-remove") {
-        var alb = root.parseProcessJson(root.processText("cmd"))
-        if (alb && alb.ok) {
-          root.albumInLibrary = (cmdName === "album-save")
-          root.libraryDirty = true
-          statusText = (cmdName === "album-save" ? "Saved to library ✓" : "Removed from library ✓")
-          if (root.activeTab === "library" && root.libraryKind === "albums") {
-            root.libraryDirty = false
-            root.refetchLibrary()
-          }
-        } else {
-          statusText = root.boundedString((alb && alb.error) || "Library update failed", 256)
-        }
-        afterCommand.restart()
-        return
-      }
       // Every remaining command reports {ok:false, error} with exit 0 on a
       // handled failure, so trust the payload rather than the exit code.
       var generic = root.parseProcessJson(root.processText("cmd"))
@@ -1822,6 +1870,7 @@ Panel {
   Timer { id: queueListDeadline; interval: root.commandTimeout; onTriggered: { if (queueListProc.running) queueListProc.running = false } }
   Timer { id: libraryDeadline; interval: root.commandTimeout; onTriggered: { if (libraryProc.running) libraryProc.running = false } }
   Timer { id: albumStatusDeadline; interval: root.commandTimeout; onTriggered: { if (albumStatusProc.running) albumStatusProc.running = false } }
+  Timer { id: albumCmdDeadline; interval: root.commandTimeout; onTriggered: { if (albumCmdProc.running) albumCmdProc.running = false; root.albumCmdRunning = false; root.pumpAlbumCmdQueue() } }
   Timer { id: logoutDeadline; interval: root.commandTimeout; onTriggered: { if (logoutProc.running) logoutProc.running = false } }
   Timer { id: createDeadline; interval: root.commandTimeout; onTriggered: { if (createPlaylistProc.running) createPlaylistProc.running = false } }
   Timer { id: cmdDeadline; interval: root.commandTimeout; onTriggered: { if (cmdProc.running) cmdProc.running = false } }
@@ -4261,14 +4310,14 @@ Panel {
 
               Button {
                 visible: root.libraryKind === "album" && root.loggedIn
-                enabled: !root.busy && root.libraryRefId !== ""
+                enabled: root.libraryRefId !== ""
                 width: Style.space(72)
                 height: Style.space(28)
                 text: root.albumInLibrary ? "Remove" : "Save"
                 fontFamily: root.fam
                 fontSize: Style.font.bodySmall
                 foreground: root.fg
-                onClicked: root.sendCmd(root.albumInLibrary ? "album-remove" : "album-save", [root.libraryRefId])
+                onClicked: root.queueAlbumLibrary(root.albumInLibrary ? "album-remove" : "album-save", root.libraryRefId)
               }
 
               Text {
