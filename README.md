@@ -19,6 +19,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - Select whole albums, artists, or playlists the same way, and add all of their tracks to a playlist from the row's right-click menu
 - Adding selected tracks reports what happened, including which tracks were already in the playlist and anything YouTube refused to add
 - Select multiple Up Next entries to add them to a playlist or remove them together
+- The Up Next tab is always visible (with an empty state when nothing is queued) and, while playback is stopped, it shows the last queue with a Resume action
 - Albums, artists, and playlists open in place under the tab you are on, so the tab bar keeps matching what you see and Back returns to the list you came from
 - The Playlists tab lists your playlists as rows (title and description) instead of a drop-down
 - Every action's result appears in a status line at the bottom of the panel and fades after four seconds

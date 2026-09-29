@@ -127,8 +127,7 @@ Panel {
     && (root.libraryImageSource !== "" || root.libraryThumbUrl !== ""
       || root.libraryMeta !== "" || root.libraryDescription !== "")
   readonly property var libraryList: root.libraryRows
-  readonly property bool queueVisible: Model.isActive(root.musicStatus)
-    && root.queueTracks.length > 0
+  property bool queueSaved: false
   // Track shown in the hero card: the playing track, or the most recent
   // last-played one when nothing is playing.
   readonly property var heroTrack: Model.isActive(root.musicStatus)
@@ -138,8 +137,8 @@ Panel {
     : (root.lastPlayed.length > 0 ? root.lastPlayed[0] : null)
   readonly property var tabItems: {
     var items = []
-    if (root.queueVisible)
-      items.push({ key: "queue", label: "Up Next (" + root.queueTracks.length + ")" })
+    var qn = root.queueTracks.length
+    items.push({ key: "queue", label: qn > 0 ? "Up Next (" + qn + ")" : "Up Next" })
     items.push({ key: "search", label: "Search" })
     items.push({ key: "last", label: "Last Played" })
     if (root.loggedIn) {
@@ -153,7 +152,7 @@ Panel {
     : root.playlistDetail
       ? (root.playlistTracks.length > 0 ? "playlist" : "")
     : root.activeTab === "" ? ""
-    : root.activeTab === "queue" ? (root.queueVisible ? "queue" : "")
+    : root.activeTab === "queue" ? "queue"
     : root.activeTab === "search" ? (root.searchResults.length > 0 ? "search" : "")
     : root.activeTab === "last" ? (root.lastPlayed.length > 0 ? "last" : "")
     : root.activeTab === "playlists" ? (root.playlistTracks.length > 0 ? "playlist" : "")
@@ -289,7 +288,7 @@ Panel {
     if (uiSaveProc.running) return
     uiSaveProc.command = ["python3", "-c", root.uiStateScript("save"),
       root.libraryKind, root.libraryRefId,
-      (root.activeTab === "queue" || root.activeTab === "") ? "search" : root.activeTab,
+      (root.activeTab === "") ? "search" : root.activeTab,
       root.searchFilter]
     root.startProcess(uiSaveProc, "uiSave")
   }
@@ -325,7 +324,8 @@ Panel {
     }
     var tab = String(data.activeTab || "")
     // Back-compat: pre-tab state files only stored a libraryExpanded boolean.
-    if (tab !== "search" && tab !== "last" && tab !== "playlists" && tab !== "library")
+    if (tab !== "search" && tab !== "last" && tab !== "playlists"
+        && tab !== "library" && tab !== "queue")
       tab = (data.libraryExpanded === true && restored) ? "library" : "search"
     // A restored detail must be hosted by the restored tab, otherwise
     // onActiveTabChanged would close it right away.
@@ -346,11 +346,6 @@ Panel {
   function refreshQueue() {
     if (!root.opened) return
     if (queueListProc.running) return
-    if (!root.musicStatus || !Model.isActive(root.musicStatus)) {
-      root.queueTracks = []
-      root.queuePosition = -1
-      return
-    }
     root.startProcess(queueListProc, "queueList")
   }
 
@@ -1363,6 +1358,7 @@ Panel {
       queueListDeadline.stop()
       var data = root.parseProcessJson(root.processText("queueList"))
       if (data && data.ok) {
+        root.queueSaved = !!data.saved
         root.queuePosition = (typeof data.position === "number") ? data.position : -1
         var tracks = Array.isArray(data.tracks) ? data.tracks : []
         var rows = []
@@ -1386,6 +1382,8 @@ Panel {
           })
         }
         root.queueTracks = rows
+      } else {
+        root.queueSaved = false
       }
     }
   }
@@ -2934,7 +2932,7 @@ Panel {
 
           // ---- up next (queue)
           Column {
-            visible: root.activeTab === "queue" && root.queueVisible
+            visible: root.activeTab === "queue"
             width: parent.width
             spacing: Style.space(6)
 
@@ -2965,6 +2963,18 @@ Panel {
               Row {
                 id: queueHeaderActions
                 spacing: Style.spacing.sm
+
+                Button {
+                  width: Style.space(60)
+                  height: Style.spacing.controlHeight
+                  text: "Resume"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  visible: root.queueSaved && root.queueTracks.length > 0 && !root.selectMode
+                  enabled: !root.busy
+                  onClicked: root.restoreSession()
+                }
 
                 Button {
                   width: Style.space(52)
@@ -3001,7 +3011,8 @@ Panel {
                   fontSize: Style.font.bodySmall
                   foreground: root.fg
                   visible: !root.selectMode
-                  enabled: root.queueUpcomingCount() > 0 && !root.busy
+                  enabled: (root.queueSaved ? root.queueTracks.length > 0
+                                            : root.queueUpcomingCount() > 0) && !root.busy
                   onClicked: root.clearQueue()
                 }
               }
@@ -3225,6 +3236,17 @@ Panel {
                   }
                 }
               }
+            }
+
+            Text {
+              visible: root.queueTracks.length === 0 && !queueListProc.running
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              text: "Queue is empty. Right-click any track and choose “Add to queue”."
+              color: Qt.darker(root.fg, 1.4)
+              font.family: root.fam
+              font.pixelSize: Style.font.bodySmall
             }
           }
 

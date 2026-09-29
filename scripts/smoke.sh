@@ -20,6 +20,7 @@
 #                             is playing it checks the MPRIS player behind the
 #                             media keys / Omarchy media widget (SKIPped when
 #                             playerctl or mpv-mpris is not installed).
+#                             Also checks the saved resume queue with no player up.
 #   scripts/smoke.sh --mutating
 #                             OPT-IN account mutations, all reversible: the
 #                             full throwaway-playlist lifecycle (create, add,
@@ -90,7 +91,7 @@ for arg in "$@"; do
         --full) FULL=1 ;;
         --mutating) MUTATING=1 ;;
         -h|--help)
-            sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,58p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -383,6 +384,27 @@ else:
     fi
 }
 
+# check_json_pred <label> <predicate> <cmd...> - stdout must be JSON and the
+# python <predicate>, evaluated with `d` bound to the parsed payload, must
+# print True. Use when a reply needs a shape check that no single field has.
+check_json_pred() {
+    local label=$1 pred=$2 out rc got
+    shift 2
+    out=$("$@" 2>"$ERR_FILE")
+    rc=$?
+    got=$(printf '%s' "$out" | python3 -c "import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('?'); raise SystemExit
+print('True' if ($pred) else 'False')" 2>/dev/null)
+    if [[ $rc -eq 0 && $got == True ]]; then
+        pass "$label"
+    else
+        fail "$label" "exit $rc: $(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+}
+
 # check_precache <label> <cmd...> - a successful precache: exit 0, JSON ok with
 # a non-empty path whose file exists and is mode 600.
 check_precache() {
@@ -621,6 +643,46 @@ print(rows[-1] if rows else "")' 2>/dev/null)
         pass "$label"
     else
         fail "$label" "key=$key before=$before after=$after: $(detail "$out" "$(cat "$ERR_FILE")")"
+    fi
+}
+
+# check_queue_saved - the resumable queue answers while no player is up:
+# queue-list falls back to ~/.local/state/yt-music/session.json and
+# queue-remove-keys / queue-clear edit that snapshot instead of mpv's playlist.
+# Silent: never starts a player. Any existing session is copied aside first and
+# put back at the end; a run with no session removes the one this writes.
+check_queue_saved() {
+    local session="$HOME/.local/state/yt-music/session.json"
+    local bak="" had=0
+
+    if [[ -f $session ]]; then
+        bak=$(mktemp /tmp/yt-music-session.XXXXXX)
+        if cp -f "$session" "$bak"; then
+            had=1
+        else
+            rm -f "$bak"
+            bak=""
+        fi
+    fi
+    printf '{"videoIds":["%s","%s"],"index":0,"position":0}\n' \
+        "$LYRICS_VID" "$NO_LYRICS_VID" >"$session"
+    chmod 600 "$session"
+
+    check_field "saved queue-list count" 2 "count" "$CTL" queue-list
+    check_field "saved queue-list saved" true "saved" "$CTL" queue-list
+    check_field "saved queue-list not playing" false "playing" "$CTL" queue-list
+    check_json_pred "saved queue-remove-keys removes one" \
+        'd.get("ok") is True and len(d.get("removed") or []) == 1' \
+        "$CTL" queue-remove-keys "v:$NO_LYRICS_VID#0"
+    check_field "saved queue-list count after remove" 1 "count" "$CTL" queue-list
+    check_ok "saved queue-clear" "$CTL" queue-clear
+    check_field "saved queue-list count after clear" 0 "count" "$CTL" queue-list
+    check_field "saved queue-list saved after clear" false "saved" "$CTL" queue-list
+
+    if [[ $had -eq 1 ]]; then
+        mv -f "$bak" "$session"
+    else
+        rm -f "$session"
     fi
 }
 
@@ -1039,6 +1101,24 @@ if [[ $FULL -eq 1 ]]; then
     check_cached "precache $LYRICS_VID (cache hit)" True "$CTL" precache "$LYRICS_VID"
     # The audio cache is a cache: the downloaded file is deliberately left in
     # place for the next run (and for the daemon's next-track precache).
+fi
+
+# ----------------------------------------------------- saved queue (--full)
+# queue-list and the queue edits fall back to the saved resume session only
+# when no player is up, so this runs after every --full section stopped mpv
+# and the daemon.
+if [[ $FULL -eq 1 ]]; then
+    section "saved queue (no player, --full only)"
+    if mpv_alive || daemon_running; then
+        printf 'NOTE stopping the player/daemon for the saved-queue checks\n'
+        "$CTL" stop >/dev/null 2>&1
+        "$CTL" daemon-stop >/dev/null 2>&1
+        for _i in $(seq 1 20); do
+            mpv_alive || daemon_running || break
+            sleep 0.2
+        done
+    fi
+    check_queue_saved
 fi
 
 printf '\nPASS %d / FAIL %d\n' "$PASS" "$FAIL"

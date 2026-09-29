@@ -657,6 +657,66 @@ def clear_session():
         pass
 
 
+def _session_ids():
+    """(ids, index, position) from the saved resume session."""
+    session = load_session()
+    ids = session.get("videoIds") if isinstance(session, dict) else None
+    ids = [v for v in ids if valid_video_id(v)] if isinstance(ids, list) else []
+    try:
+        index = max(0, min(len(ids) - 1, int(session.get("index") or 0))) if ids else -1
+    except (TypeError, ValueError):
+        index = 0 if ids else -1
+    try:
+        position = max(0.0, float(session.get("position") or 0))
+    except (TypeError, ValueError):
+        position = 0.0
+    return ids, index, position
+
+
+def _session_tracks(ids, index):
+    meta = load_track_meta()
+    tracks = []
+    for i, vid in enumerate(ids):
+        info = meta.get(vid) or {}
+        if not isinstance(info, dict):
+            info = {}
+        tracks.append({
+            "index": i,
+            "videoId": vid,
+            "title": str(info.get("title") or ""),
+            "artist": str(info.get("artist") or ""),
+            "album": str(info.get("album") or ""),
+            "duration": info.get("duration") or 0,
+            "current": i == index,
+        })
+    return tracks
+
+
+def _session_remove(indices):
+    """Remove queue indices from the saved resume session. Returns sorted removed."""
+    ids, index, position = _session_ids()
+    if not ids:
+        return []
+    drop = sorted({i for i in indices if isinstance(i, int) and 0 <= i < len(ids)})
+    if not drop:
+        return []
+    drop_set = set(drop)
+    new_ids = [v for i, v in enumerate(ids) if i not in drop_set]
+    shift = sum(1 for i in drop if i < index)
+    if index in drop_set:
+        new_index = min(index - shift, len(new_ids) - 1) if new_ids else 0
+        new_position = 0.0
+    else:
+        new_index = index - shift
+        new_position = position
+    new_index = max(0, new_index)
+    if new_ids:
+        save_session(new_ids, new_index, new_position)
+    else:
+        clear_session()
+    return drop
+
+
 _session_save_state = {"videoId": "", "savedAt": 0.0}
 
 
@@ -2307,25 +2367,7 @@ def cmd_last_played(args):
     print(json.dumps({"ok": True, "items": items}))
 
 
-def cmd_restore(args):
-    """Rebuild the last queue paused at its saved index + position."""
-    if mpv_is_running():
-        print(json.dumps({"ok": True, "restored": False, "reason": "already-playing"}))
-        return
-    session = load_session()
-    ids = session.get("videoIds") if isinstance(session, dict) else None
-    ids = [v for v in ids if valid_video_id(v)] if isinstance(ids, list) else []
-    if not ids:
-        print(json.dumps({"ok": True, "restored": False, "reason": "no-session"}))
-        return
-    try:
-        index = max(0, min(len(ids) - 1, int(session.get("index") or 0)))
-    except (TypeError, ValueError):
-        index = 0
-    try:
-        position = max(0.0, float(session.get("position") or 0))
-    except (TypeError, ValueError):
-        position = 0.0
+def _spawn_session_mpv(ids, index, position, pause=True):
     ensure_daemon()
     ensure_private_runtime_dir()
     urls = [watch_url(v) for v in ids]
@@ -2348,12 +2390,34 @@ def cmd_restore(args):
     if position > 1:
         mpv_send("seek", [position, "absolute"])
         time.sleep(0.2)
-    mpv_send("set_property", ["pause", True])
+    mpv_send("set_property", ["pause", bool(pause)])
     props = wait_for_metadata()
     if isinstance(props, dict):
         props = dict(props)
-        props["pause"] = True
+        props["pause"] = bool(pause)
     write_status_from_mpv(props)
+
+
+def cmd_restore(args):
+    """Rebuild the last queue paused at its saved index + position."""
+    if mpv_is_running():
+        print(json.dumps({"ok": True, "restored": False, "reason": "already-playing"}))
+        return
+    session = load_session()
+    ids = session.get("videoIds") if isinstance(session, dict) else None
+    ids = [v for v in ids if valid_video_id(v)] if isinstance(ids, list) else []
+    if not ids:
+        print(json.dumps({"ok": True, "restored": False, "reason": "no-session"}))
+        return
+    try:
+        index = max(0, min(len(ids) - 1, int(session.get("index") or 0)))
+    except (TypeError, ValueError):
+        index = 0
+    try:
+        position = max(0.0, float(session.get("position") or 0))
+    except (TypeError, ValueError):
+        position = 0.0
+    _spawn_session_mpv(ids, index, position, pause=True)
     print(json.dumps({"ok": True, "restored": True, "count": len(ids), "index": index}))
 
 
@@ -3415,10 +3479,17 @@ def _queue_index(args, usage):
 
 
 def cmd_queue_list(args):
-    empty = {"ok": True, "playing": False, "position": -1, "count": 0,
-             "tracks": []}
+    empty = {"ok": True, "playing": False, "saved": False, "position": -1,
+             "count": 0, "tracks": []}
     if not mpv_is_running():
-        print(json.dumps(empty))
+        ids, index, _position = _session_ids()
+        if not ids:
+            print(json.dumps(empty))
+            return
+        tracks = _session_tracks(ids, index)
+        print(json.dumps({"ok": True, "playing": False, "saved": True,
+                          "position": index, "count": len(tracks),
+                          "tracks": tracks}))
         return
     props = mpv_query(["playlist", "playlist-pos", "playlist-count"])
     if props is None:
@@ -3450,13 +3521,29 @@ def cmd_queue_list(args):
             "duration": info.get("duration") or 0,
             "current": bool(entry.get("current")),
         })
-    print(json.dumps({"ok": True, "playing": True, "position": position,
+    print(json.dumps({"ok": True, "playing": True, "saved": False,
+                      "position": position,
                       "count": len(tracks), "tracks": tracks}))
 
 
 def cmd_queue_jump(args):
     if not mpv_is_running():
-        fail("Nothing playing")
+        if not args:
+            fail("Usage: yt-music-ctl queue-jump <index>")
+        try:
+            index = int(args[0])
+        except (TypeError, ValueError):
+            fail("Usage: yt-music-ctl queue-jump <index>")
+        ids, _cur, _pos = _session_ids()
+        if not ids:
+            print(json.dumps({"ok": False, "error": "No queue"}))
+            return
+        if not 0 <= index < len(ids):
+            print(json.dumps({"ok": False, "error": "Index out of range"}))
+            return
+        _spawn_session_mpv(ids, index, 0.0, pause=False)
+        print(json.dumps({"ok": True, "position": index}))
+        return
     index = _queue_index(args, "Usage: yt-music-ctl queue-jump <index>")
     count = _queue_count()
     if count is None:
@@ -3472,7 +3559,17 @@ def cmd_queue_jump(args):
 
 def cmd_queue_remove(args):
     if not mpv_is_running():
-        fail("Nothing playing")
+        index = _queue_index(args, "Usage: yt-music-ctl queue-remove <index>")
+        ids, _cur, _pos = _session_ids()
+        if not ids:
+            print(json.dumps({"ok": True, "removed": []}))
+            return
+        if not 0 <= index < len(ids):
+            print(json.dumps({"ok": False, "error": "Index out of range"}))
+            return
+        _session_remove([index])
+        print(json.dumps({"ok": True, "removed": index}))
+        return
     index = _queue_index(args, "Usage: yt-music-ctl queue-remove <index>")
     count = _queue_count()
     if count is None:
@@ -3528,7 +3625,22 @@ def cmd_queue_remove_keys(args):
     if not args:
         fail("Usage: yt-music-ctl queue-remove-keys <key...>")
     if not mpv_is_running():
-        print(json.dumps({"ok": False, "error": "Nothing playing"}))
+        ids, _index, _pos = _session_ids()
+        if not ids:
+            print(json.dumps({"ok": True, "removed": []}))
+            return
+        by_key = {}
+        seen = {}
+        for i, vid in enumerate(ids):
+            occ = seen.get(vid, 0)
+            seen[vid] = occ + 1
+            by_key["v:%s#%d" % (vid, occ)] = i
+        indices = []
+        for token in args:
+            i = by_key.get(str(token))
+            if i is not None and i not in indices:
+                indices.append(i)
+        print(json.dumps({"ok": True, "removed": _session_remove(indices)}))
         return
     indices = _queue_remove_indices(args)
     if indices is None:
@@ -3585,7 +3697,31 @@ def cmd_queue_clear(args):
 
 def cmd_queue_move(args):
     if not mpv_is_running():
-        fail("Nothing playing")
+        if len(args) < 2:
+            fail("Usage: yt-music-ctl queue-move <from> <to>")
+        try:
+            frm = int(args[0])
+            to = int(args[1])
+        except ValueError:
+            fail("Indexes must be integers")
+        ids, index, position = _session_ids()
+        count = len(ids)
+        if not (0 <= frm < count) or not (0 <= to < count):
+            print(json.dumps({"ok": False, "error": "Index out of range"}))
+            return
+        entry = ids.pop(frm)
+        ids.insert(to, entry)
+        if index == frm:
+            new_index = to
+        else:
+            new_index = index
+            if frm < index:
+                new_index -= 1
+            if to <= new_index:
+                new_index += 1
+        save_session(ids, new_index, position)
+        print(json.dumps({"ok": True, "from": frm, "to": to}))
+        return
     if len(args) < 2:
         fail("Usage: yt-music-ctl queue-move <from> <to>")
     try:
