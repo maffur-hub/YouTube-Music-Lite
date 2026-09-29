@@ -99,6 +99,10 @@ Panel {
   property string librarySubtitle: ""
   property var libraryRows: []
   property string libraryRefId: ""
+  // Browse-level stack: opening an album/artist from a library list (or an
+  // artist's similar-artists list) remembers the level you came from, so Back
+  // returns there instead of dropping straight to the Home/Recent/… pills.
+  property var libraryParents: []
   // A detail (album/artist/playlist) opens in place under the tab it was
   // opened from, so the tab bar always reflects what the user is browsing.
   // detailTab is that tab; empty means no detail is open.
@@ -297,6 +301,7 @@ Panel {
   function applyUiState(data) {
     if (root.stateRestored) return
     root.stateRestored = true
+    root.libraryParents = []
     if (!data || typeof data !== "object") return
     var filter = String(data.searchFilter || "")
     if (filter === "songs" || filter === "albums" || filter === "artists"
@@ -666,6 +671,7 @@ Panel {
     root.libraryKind = kind
     // Browse mode: no detail is open under this tab.
     root.detailTab = ""
+    root.libraryParents = []
     if (!sameScreen) {
       root.libraryTitle = ""
       root.librarySubtitle = ""
@@ -710,6 +716,7 @@ Panel {
     root.closePlaylist()
     var sameScreen = (root.libraryKind === "album")
       && root.libraryRefId === browseId && root.libraryRows.length > 0
+    if (!sameScreen) root.pushLibraryParent()
     root.libraryKind = "album"
     if (!sameScreen) {
       root.libraryTitle = title || "Album"
@@ -729,6 +736,7 @@ Panel {
     root.closePlaylist()
     var sameScreen = (root.libraryKind === "artist")
       && root.libraryRefId === browseId && root.libraryRows.length > 0
+    if (!sameScreen) root.pushLibraryParent()
     root.libraryKind = "artist"
     if (!sameScreen) {
       root.libraryTitle = name || "Artist"
@@ -743,7 +751,67 @@ Panel {
     root.startProcess(libraryProc, "library")
   }
 
+  function snapshotLibrary() {
+    return {
+      kind: root.libraryKind,
+      refId: root.libraryRefId,
+      title: root.libraryTitle,
+      subtitle: root.librarySubtitle,
+      rows: root.libraryRows,
+      meta: root.libraryMeta,
+      description: root.libraryDescription,
+      thumbUrl: root.libraryThumbUrl,
+      imageSource: root.libraryImageSource,
+      stale: root.libraryStale,
+      infoOpen: root.libraryInfoOpen
+    }
+  }
+
+  // Remember the current library level before drilling into an album/artist.
+  function pushLibraryParent() {
+    if (root.libraryKind === "" || root.libraryRows.length === 0) return
+    var stack = root.libraryParents.slice()
+    stack.push(root.snapshotLibrary())
+    if (stack.length > 8) stack = stack.slice(stack.length - 8)
+    root.libraryParents = stack
+  }
+
+  function applyLibrarySnapshot(level) {
+    if (!level) {
+      root.closeLibrary()
+      return
+    }
+    root.libraryKind = String(level.kind || "")
+    root.libraryRefId = String(level.refId || "")
+    root.libraryTitle = String(level.title || "")
+    root.librarySubtitle = String(level.subtitle || "")
+    root.libraryRows = level.rows || []
+    root.libraryMeta = String(level.meta || "")
+    root.libraryDescription = String(level.description || "")
+    root.libraryThumbUrl = String(level.thumbUrl || "")
+    root.libraryImageSource = String(level.imageSource || "")
+    root.libraryStale = level.stale === true
+    root.libraryInfoOpen = level.infoOpen === true
+    root.selectedIndex = -1
+    // A restored detail keeps its host tab; a restored list is plain browse.
+    root.detailTab = root.libraryDetail ? (root.detailTab || root.activeTab) : ""
+  }
+
+  // Back / tab pop for the library: return to the browse level you came from,
+  // and only close the whole section from the top level.
+  function libraryBack() {
+    if (root.libraryParents.length > 0) {
+      var stack = root.libraryParents.slice()
+      var parent = stack.pop()
+      root.libraryParents = stack
+      root.applyLibrarySnapshot(parent)
+      return
+    }
+    root.closeLibrary()
+  }
+
   function closeLibrary() {
+    root.libraryParents = []
     root.libraryKind = ""
     root.libraryTitle = ""
     root.librarySubtitle = ""
@@ -773,7 +841,7 @@ Panel {
       return
     }
     if (key === "library" && root.libraryKind !== "") {
-      root.closeLibrary()
+      root.libraryBack()
       return
     }
     root.activeTab = ""
@@ -4010,7 +4078,7 @@ Panel {
                 fontFamily: root.fam
                 fontSize: Style.font.bodySmall
                 foreground: root.fg
-                onClicked: root.closeLibrary()
+                onClicked: root.libraryBack()
               }
 
               Button {
