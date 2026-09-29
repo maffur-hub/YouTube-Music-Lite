@@ -159,6 +159,24 @@ eq(Model.queueTokens([]), [], "queueTokens([])")
 eq(Model.queueTokens(null), [], "queueTokens(null)")
 eq(Model.queueTokens(undefined), [], "queueTokens(undefined)")
 
+// --- queueKeyAt
+eq(Model.queueKeyAt([{ key: "v:abcdefghijk#0" }], 0), "v:abcdefghijk#0",
+  "queueKeyAt returns a video row's key")
+eq(Model.queueKeyAt([{ key: "q:3" }], 0), "q:3", "queueKeyAt returns a local row's key")
+eq(Model.queueKeyAt([{ key: "v:abcdefghijk#1" }], 0), "v:abcdefghijk#1",
+  "queueKeyAt keeps the occurrence suffix (no rowKey fallback)")
+eq(Model.queueKeyAt([{ key: "v:abcdefghijk#0" }, { key: "q:3" }], 1), "q:3",
+  "queueKeyAt resolves by index into the snapshot")
+eq(Model.queueKeyAt([{ key: "v:abcdefghijk#0" }], 5), "", "queueKeyAt index past the end")
+eq(Model.queueKeyAt([{ key: "v:abcdefghijk#0" }], -1), "", "queueKeyAt index -1")
+eq(Model.queueKeyAt(null, 0), "", "queueKeyAt(null rows)")
+eq(Model.queueKeyAt(undefined, 0), "", "queueKeyAt(undefined rows)")
+eq(Model.queueKeyAt([{}], 0), "", "queueKeyAt missing key")
+eq(Model.queueKeyAt([{ key: 7 }], 0), "", "queueKeyAt non-string key")
+eq(Model.queueKeyAt([{ key: null }], 0), "", "queueKeyAt null key")
+eq(Model.queueKeyAt([null], 0), "", "queueKeyAt null row")
+eq(Model.queueKeyAt([], 0), "", "queueKeyAt empty rows")
+
 // --- idsToNames
 const nameLabels = { aaa: "A", bbb: "B", ccc: "C" }
 eq(Model.idsToNames(["aaa", "bbb"], nameLabels, 2), "A, B", "idsToNames names every known id")

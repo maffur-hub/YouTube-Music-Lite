@@ -219,6 +219,16 @@ function queueTokens(tracks) {
   return out
 }
 
+function queueKeyAt(rows, index) {
+  // The backend's queue-list gives every row a stable key: `v:<videoId>#<occurrence>`
+  // for YouTube entries and `q:<index>` for local ones. Resolve through it so a
+  // queue shift between render and command cannot remove the wrong track.
+  if (!rows || index < 0 || index >= rows.length) return ""
+  var row = rows[index]
+  if (!row || typeof row.key !== "string") return ""
+  return row.key
+}
+
 // Name up to `max` ids when EVERY id is known; otherwise return "" so the
 // caller can fall back to a plain count. Adds a trailing " …" when the ids
 // were truncated.
@@ -255,6 +265,7 @@ if (typeof module !== "undefined") {
     videoIds: videoIds,
     filterByTitle: filterByTitle,
     queueTokens: queueTokens,
+    queueKeyAt: queueKeyAt,
     idsToNames: idsToNames
   }
 }

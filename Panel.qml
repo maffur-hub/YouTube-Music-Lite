@@ -650,7 +650,9 @@ Panel {
 
   function queueRemove(index) {
     if (root.busy) return
-    root.sendCmd("queue-remove", [String(index)])
+    var key = Model.queueKeyAt(root.queueTracks, index)
+    if (key === "") return
+    root.sendCmd("queue-remove-keys", [key])
   }
 
   function queueMove(from, to) {
