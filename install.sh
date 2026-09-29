@@ -29,10 +29,16 @@ python3 -m venv "${VENV}"
 "${VENV}/bin/python" -m pip install --require-hashes --only-binary=:all: \
   -r "${ROOT}/requirements.txt"
 
-rm -rf "${PLUGIN_DIR}"
-mkdir -p "${PLUGIN_DIR}"
-cp "${ROOT}/BarWidget.qml" "${ROOT}/Model.js" \
-  "${ROOT}/Panel.qml" "${ROOT}/manifest.json" "${PLUGIN_DIR}/"
+if [[ "${ROOT}" == "${PLUGIN_DIR}" ]]; then
+  # Running from inside the plugin checkout (the dev/`plugin clone --edit`
+  # layout): copying would mean `rm -rf`-ing our own source tree, so skip it.
+  printf 'Running inside the plugin directory; skipping the copy step.\n'
+else
+  rm -rf "${PLUGIN_DIR}"
+  mkdir -p "${PLUGIN_DIR}"
+  cp "${ROOT}/BarWidget.qml" "${ROOT}/Model.js" \
+    "${ROOT}/Panel.qml" "${ROOT}/manifest.json" "${PLUGIN_DIR}/"
+fi
 cp "${ROOT}/backend/yt_music.py" "${DATA_DIR}/yt_music.py"
 chmod 700 "${DATA_DIR}" "${VENV}"
 

@@ -46,8 +46,9 @@ MPV_RUNTIME_DIR = os.path.join(RUNTIME_DIR, "yt-music")
 MPV_SOCKET = os.path.join(MPV_RUNTIME_DIR, "mpv.sock")
 MPV_PID_PATH = os.path.join(MPV_RUNTIME_DIR, "mpv.pid")
 LIKES_TITLE = "Liked Music"
-THUMBNAIL_CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "yt-music", "thumbs")
-IMAGE_CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "yt-music", "images")
+CACHE_ROOT = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "yt-music")
+THUMBNAIL_CACHE_DIR = os.path.join(CACHE_ROOT, "thumbs")
+IMAGE_CACHE_DIR = os.path.join(CACHE_ROOT, "images")
 IMAGE_HOST_SUFFIXES = ("googleusercontent.com", "ytimg.com", "ggpht.com", "google.com")
 MAX_THUMBNAIL_BYTES = 1024 * 1024
 MAX_THUMBNAIL_DIMENSION = 4096
@@ -61,7 +62,7 @@ IMAGE_CACHE_MAX_BYTES = 24 * 1024 * 1024
 # Precached audio for queue tracks: one file per videoId under
 # $XDG_CACHE_HOME/yt-music/audio (files 0600, directory 0700). The cap covers
 # every file in the directory; the oldest (by mtime) are evicted first.
-AUDIO_CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "yt-music", "audio")
+AUDIO_CACHE_DIR = os.path.join(CACHE_ROOT, "audio")
 AUDIO_CACHE_MAX_BYTES = 512 * 1024 * 1024      # 512 MiB across the whole cache
 AUDIO_CACHE_MAX_FILE_BYTES = 64 * 1024 * 1024  # 64 MiB per file (a song is far smaller)
 AUDIO_PRECACHE_TIMEOUT = 60                    # seconds allowed per yt-dlp run
@@ -99,6 +100,22 @@ METADATA_CACHE_TTL = {
 def fail(msg, code=1):
     print(f"yt-music-ctl: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def _ensure_private_dir(path):
+    """Create `path` with mode 0700 and tighten it if it already exists.
+
+    os.makedirs(mode=...) does not affect directories that are already there,
+    which is how the state/cache roots ended up 0755. Never raises.
+    """
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    except OSError:
+        return
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
 
 
 def valid_video_id(value):
@@ -161,7 +178,13 @@ def format_duration(seconds):
 
 
 def json_dump(path, data, mode=0o600):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent = os.path.dirname(path)
+    # State lives in private dirs: keep them 0700 even if an older install
+    # created them with the default umask.
+    if parent == STATE_DIR or parent.startswith(STATE_DIR + os.sep):
+        _ensure_private_dir(parent)
+    else:
+        os.makedirs(parent, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-")
     try:
         with os.fdopen(fd, "w") as fh:
@@ -227,11 +250,7 @@ def cache_write(namespace, args, payload):
     """Store one record atomically, then evict oldest entries to stay in
     bounds (entry count and total bytes). Never raises."""
     try:
-        os.makedirs(METADATA_CACHE_DIR, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(METADATA_CACHE_DIR, 0o700)
-        except OSError:
-            pass
+        _ensure_private_dir(METADATA_CACHE_DIR)
         record = {"ns": namespace, "ts": time.time(), "payload": payload}
         json_dump(_cache_path(namespace, args), record)
         _cache_prune()
@@ -400,7 +419,7 @@ def spawn_background_refresh(namespace, args):
         except OSError:
             pass
         try:
-            os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+            _ensure_private_dir(STATE_DIR)
             fd = os.open(lock, os.O_CREAT | os.O_WRONLY | os.O_TRUNC
                          | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
             os.close(fd)
@@ -2462,7 +2481,8 @@ def cmd_thumbnail(args):
     if not args or not valid_video_id(args[0]):
         fail("Invalid video ID")
     video_id = args[0]
-    os.makedirs(THUMBNAIL_CACHE_DIR, mode=0o700, exist_ok=True)
+    _ensure_private_dir(CACHE_ROOT)
+    _ensure_private_dir(THUMBNAIL_CACHE_DIR)
     path = os.path.join(THUMBNAIL_CACHE_DIR, f"{video_id}.jpg")
     try:
         st = os.lstat(path)
@@ -2506,7 +2526,8 @@ def cmd_image(args):
     host = (urllib.parse.urlsplit(url).hostname or "")
     if not _image_host_allowed(host):
         fail("Image host not allowed")
-    os.makedirs(IMAGE_CACHE_DIR, mode=0o700, exist_ok=True)
+    _ensure_private_dir(CACHE_ROOT)
+    _ensure_private_dir(IMAGE_CACHE_DIR)
     key = hashlib.sha256(url.encode()).hexdigest()[:32]
     path = os.path.join(IMAGE_CACHE_DIR, f"{key}.jpg")
     try:
@@ -2712,11 +2733,8 @@ def precache_track(video_id, force=False):
         return {"ok": False, "error": "Invalid video ID", "cached": False, "path": ""}
     tmp_dir = None
     try:
-        os.makedirs(AUDIO_CACHE_DIR, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(AUDIO_CACHE_DIR, 0o700)
-        except OSError:
-            pass
+        _ensure_private_dir(CACHE_ROOT)
+        _ensure_private_dir(AUDIO_CACHE_DIR)
         # Reap temp dirs from downloads that died without running their
         # finally block (e.g. the daemon was SIGTERM'd mid-download). Done
         # before the cache-hit early return so a repeat call still cleans up.
@@ -3663,7 +3681,7 @@ def ensure_daemon():
             if record.get("script_mtime") == script_mtime:
                 return False
             daemon_stop()
-        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        _ensure_private_dir(STATE_DIR)
         fd = os.open(DAEMON_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC, 0o600)
         with os.fdopen(fd, "ab") as log:
             subprocess.Popen(
@@ -3955,7 +3973,7 @@ def run_daemon_loop():
 
 
 def cmd_daemon(args):
-    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    _ensure_private_dir(STATE_DIR)
     try:
         run_daemon_loop()
     except KeyboardInterrupt:
