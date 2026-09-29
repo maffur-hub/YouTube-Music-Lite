@@ -39,6 +39,7 @@ Panel {
   readonly property string fam: root.bar ? root.bar.fontFamily : Style.font.family
 
   property bool loggedIn: false
+  property int loginPollCount: 0
   property var playlists: []
   readonly property var playlistOptions: root.playlists.map(function(playlist) {
     return { value: playlist.id, label: playlist.title }
@@ -252,6 +253,7 @@ Panel {
   }
 
   function close() {
+    loginRefresh.stop()
     root.controller.hide()
     root.saveUiState()
   }
@@ -510,6 +512,8 @@ Panel {
 
   function logout() {
     if (root.busy) return
+    loginRefresh.stop()
+    root.loginPollCount = 0
     root.busy = true
     root.startProcess(logoutProc, "logout")
   }
@@ -1464,7 +1468,13 @@ Panel {
     onExited: function(exitCode) {
       libraryDeadline.stop()
       var data = root.parseProcessJson(root.processText("library"))
-      if (!data || !data.ok) return
+      if (!data || !data.ok) {
+        var libMsg = root.processText("libraryErr").trim()
+        root.statusText = root.boundedString(
+          (data && data.error) || (libMsg !== "" ? libMsg.split("\n")[0] : "Could not load library"),
+          256)
+        return
+      }
       root.libraryStale = (data.stale === true)
       if (root.libraryStale) libraryRefreshTimer.restart()
       root.libraryRows = root.normalizeMixedRows(data.items, 500)
@@ -1918,7 +1928,14 @@ Panel {
       if (root.loggedIn) {
         stop()
       } else {
-        root.loadPlaylists()
+        root.loginPollCount += 1
+        // Bounded: do not poll the network forever if login is abandoned.
+        if (root.loginPollCount > 40) {
+          stop()
+          root.statusText = "Login not detected — run yt-music-ctl login or reopen the panel"
+        } else {
+          root.loadPlaylists()
+        }
       }
     }
   }
@@ -2322,6 +2339,7 @@ Panel {
                 foreground: root.fg
                 onClicked: {
                   root.close()
+                  root.loginPollCount = 0
                   loginRefresh.start()
                   if (root.bar) root.bar.run("omarchy-launch-terminal " + root.ctlPath + " login")
                 }
@@ -3403,9 +3421,22 @@ Panel {
           // ---- search results
           Column {
             visible: root.activeTab === "search" && !root.detailActive
-              && (root.searchResults.length > 0 || root.searching)
+              && (root.searchResults.length > 0 || root.searching || root.searchQuery !== "")
             width: parent.width
             spacing: Style.spacing.panelGap
+
+            Text {
+              width: parent.width
+              visible: !root.searching && root.searchResults.length === 0
+                && root.searchQuery !== ""
+              textFormat: Text.PlainText
+              text: "No results for \"" + root.searchQuery + "\""
+              color: Qt.darker(root.fg, 1.4)
+              font.family: root.fam
+              font.pixelSize: Style.font.bodySmall
+              horizontalAlignment: Text.AlignHCenter
+              elide: Text.ElideRight
+            }
 
             Item {
               width: parent.width
