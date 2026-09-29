@@ -1217,12 +1217,13 @@ Panel {
     onExited: function(exitCode) {
       playDeadline.stop()
       root.busy = false
-      if (exitCode === 0) {
+      var data = root.parseProcessJson(root.processText("play"))
+      if (exitCode === 0 && (!data || data.ok !== false)) {
         statusText = "Playing ✓"
         afterCommand.restart()
         root.refreshQueue()
       } else {
-        statusText = "Play failed"
+        statusText = root.boundedString((data && data.error) || "Play failed", 256)
       }
     }
   }
@@ -1235,10 +1236,13 @@ Panel {
     onExited: function(exitCode) {
       mixDeadline.stop()
       root.busy = false
-      if (exitCode === 0) {
+      var data = root.parseProcessJson(root.processText("mix"))
+      if (exitCode === 0 && (!data || data.ok !== false)) {
         statusText = "Mix started ✓"
         root.refreshQueue()
-      } else statusText = "Mix failed"
+      } else {
+        statusText = root.boundedString((data && data.error) || "Mix failed", 256)
+      }
     }
   }
 

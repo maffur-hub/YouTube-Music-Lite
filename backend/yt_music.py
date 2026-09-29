@@ -1193,8 +1193,17 @@ def cmd_play(args):
     if not args:
         fail("Usage: yt-music-ctl play <videoId>")
     video_id = args[0]
+    if not valid_video_id(video_id):
+        fail("Invalid video ID")
     mpv_play(video_id)
     props = wait_for_metadata()
+    if not mpv_is_running():
+        # A well-formed id can still be unplayable (removed/region-locked), and
+        # mpv then exits before producing metadata. Report that instead of a
+        # false success and a status file that briefly claims it is playing.
+        write_status({"ok": False, "playing": False})
+        print(json.dumps({"ok": False, "error": "Playback failed"}))
+        return
     write_status_from_mpv(props, spawn_precache=True)
     title = (props or {}).get("media-title") or ""
     if _looks_like_url_title(title):
@@ -1534,11 +1543,14 @@ def cmd_prev(args):
 
 
 def cmd_seek(args):
-    if not mpv_is_running():
-        fail("Nothing playing")
     if not args:
         fail("Usage: yt-music-ctl seek <seconds>")
-    seconds = int(args[0])
+    try:
+        seconds = int(args[0])
+    except (TypeError, ValueError):
+        fail("Usage: yt-music-ctl seek <seconds>")
+    if not mpv_is_running():
+        fail("Nothing playing")
     mpv_send("seek", [seconds, "relative"])
     props = get_mpv_props()
     write_status_from_mpv(props)
@@ -3306,7 +3318,8 @@ def cmd_queue_jump(args):
         fail("Unable to read playlist")
     # An out-of-range playlist-pos makes mpv exit, so validate first.
     if not 0 <= index < count:
-        fail("Index out of range")
+        print(json.dumps({"ok": False, "error": "Index out of range"}))
+        return
     mpv_send("set_property", ["playlist-pos", index])
     write_status_from_mpv(get_mpv_props())
     print(json.dumps({"ok": True, "position": index}))
@@ -3320,7 +3333,8 @@ def cmd_queue_remove(args):
     if count is None:
         fail("Unable to read playlist")
     if not 0 <= index < count:
-        fail("Index out of range")
+        print(json.dumps({"ok": False, "error": "Index out of range"}))
+        return
     mpv_send("playlist-remove", index)
     if mpv_is_running():
         write_status_from_mpv(get_mpv_props())
@@ -3376,7 +3390,8 @@ def cmd_queue_move(args):
     if count is None:
         fail("Unable to read playlist")
     if not (0 <= frm < count) or not (0 <= to < count):
-        fail("Index out of range")
+        print(json.dumps({"ok": False, "error": "Index out of range"}))
+        return
     # mpv moves an entry to *take the place of* the entry at the target
     # index, so the entry lands one slot earlier when it moves forward.
     # Shifting the target forward (count == append) makes the entry finish
@@ -3393,11 +3408,15 @@ def cmd_stop(args):
 
 
 def cmd_seek_pct(args):
-    if not mpv_is_running():
-        fail("Nothing playing")
     if not args:
         fail("Usage: yt-music-ctl seek-pct <0-100>")
-    pct = max(0, min(100, float(args[0])))
+    try:
+        pct = float(args[0])
+    except (TypeError, ValueError):
+        fail("Usage: yt-music-ctl seek-pct <0-100>")
+    if not mpv_is_running():
+        fail("Nothing playing")
+    pct = max(0.0, min(100.0, pct))
     mpv_send("seek", [pct, "absolute-percent"])
     props = get_mpv_props()
     write_status_from_mpv(props)
@@ -3421,12 +3440,20 @@ def cmd_loop(args):
     if not mpv_is_running():
         print(json.dumps({"ok": False, "error": "Nothing playing"}))
         return
-    mode = args[0] if args else "inf"
+    requested = (args[0] if args else "inf").strip().lower()
+    aliases = {"no": "no", "off": "no", "false": "no",
+               "inf": "inf", "on": "inf", "true": "inf", "one": "one"}
+    mode = aliases.get(requested)
+    if mode is None:
+        print(json.dumps({"ok": False,
+                          "error": f"Unsupported loop mode: {requested}"}))
+        return
     mpv_send("set_property", ["loop-playlist", mode])
     props = get_mpv_props()
     if props:
         write_status_from_mpv(props)
-    print(json.dumps({"ok": True, "loop": mode}))
+    actual = (props or {}).get("loop-playlist") or mode
+    print(json.dumps({"ok": True, "loop": actual}))
 
 
 def cmd_shuffle(args):
