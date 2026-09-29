@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -51,6 +52,11 @@ IMAGE_HOST_SUFFIXES = ("googleusercontent.com", "ytimg.com", "ggpht.com", "googl
 MAX_THUMBNAIL_BYTES = 1024 * 1024
 MAX_THUMBNAIL_DIMENSION = 4096
 MAX_THUMBNAIL_PIXELS = 16 * 1024 * 1024
+# Media caches (album art, thumbnails) are bounded; oldest files are evicted.
+THUMBNAIL_CACHE_MAX_ENTRIES = 300
+THUMBNAIL_CACHE_MAX_BYTES = 32 * 1024 * 1024
+IMAGE_CACHE_MAX_ENTRIES = 150
+IMAGE_CACHE_MAX_BYTES = 24 * 1024 * 1024
 
 # Precached audio for queue tracks: one file per videoId under
 # $XDG_CACHE_HOME/yt-music/audio (files 0600, directory 0700). The cap covers
@@ -2403,6 +2409,55 @@ def cmd_lyrics(args):
             print(json.dumps({"ok": False, "error": str(e)}))
 
 
+def _image_host_allowed(host):
+    host = (host or "").lower()
+    return any(host == suffix or host.endswith("." + suffix)
+               for suffix in IMAGE_HOST_SUFFIXES)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse HTTP redirects so a 3xx cannot escape the image host allowlist."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _urlopen_no_redirect(request, timeout):
+    return urllib.request.build_opener(_NoRedirectHandler).open(request, timeout=timeout)
+
+
+def _prune_media_cache(directory, max_entries, max_bytes):
+    """Evict oldest files until both caps hold. Never raises.
+
+    Dotfiles (in-progress mkstemp writes) are ignored so a concurrent fetch is
+    not truncated. Non-regular files count toward the entry cap and are removed
+    rather than trusted.
+    """
+    try:
+        entries = []
+        for name in os.listdir(directory):
+            if name.startswith("."):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            size = st.st_size if stat.S_ISREG(st.st_mode) else 0
+            entries.append((st.st_mtime, size, path))
+    except OSError:
+        return
+    entries.sort(key=lambda item: item[0])
+    total = sum(size for _mtime, size, _path in entries)
+    while entries and (len(entries) > max_entries or total > max_bytes):
+        _mtime, size, path = entries.pop(0)
+        total -= size
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def cmd_thumbnail(args):
     if not args or not valid_video_id(args[0]):
         fail("Invalid video ID")
@@ -2410,10 +2465,16 @@ def cmd_thumbnail(args):
     os.makedirs(THUMBNAIL_CACHE_DIR, mode=0o700, exist_ok=True)
     path = os.path.join(THUMBNAIL_CACHE_DIR, f"{video_id}.jpg")
     try:
+        st = os.lstat(path)
+        if stat.S_ISREG(st.st_mode) and st.st_size > 0:
+            return  # already cached
+    except OSError:
+        pass
+    try:
         request = urllib.request.Request(
             f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
             headers={"User-Agent": "yt-music-ctl/1"})
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with _urlopen_no_redirect(request, timeout=8) as response:
             data = response.read(MAX_THUMBNAIL_BYTES + 1)
         if len(data) > MAX_THUMBNAIL_BYTES:
             fail("Thumbnail is too large")
@@ -2431,6 +2492,9 @@ def cmd_thumbnail(args):
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+        _prune_media_cache(THUMBNAIL_CACHE_DIR,
+                           THUMBNAIL_CACHE_MAX_ENTRIES,
+                           THUMBNAIL_CACHE_MAX_BYTES)
     except Exception as exc:
         fail(f"Thumbnail fetch failed: {exc}")
 
@@ -2439,9 +2503,8 @@ def cmd_image(args):
     if not args or not args[0].startswith(("http://", "https://")):
         fail("Usage: yt-music-ctl image <url>")
     url = args[0]
-    import urllib.parse
-    host = (urllib.parse.urlsplit(url).hostname or "").lower()
-    if not any(host == suffix or host.endswith("." + suffix) for suffix in IMAGE_HOST_SUFFIXES):
+    host = (urllib.parse.urlsplit(url).hostname or "")
+    if not _image_host_allowed(host):
         fail("Image host not allowed")
     os.makedirs(IMAGE_CACHE_DIR, mode=0o700, exist_ok=True)
     key = hashlib.sha256(url.encode()).hexdigest()[:32]
@@ -2450,7 +2513,10 @@ def cmd_image(args):
         if os.path.isfile(path) and os.path.getsize(path) > 0:
             return
         request = urllib.request.Request(url, headers={"User-Agent": "yt-music-ctl/1"})
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with _urlopen_no_redirect(request, timeout=8) as response:
+            if not _image_host_allowed(
+                    urllib.parse.urlsplit(response.geturl()).hostname or ""):
+                fail("Image host not allowed")
             data = response.read(MAX_THUMBNAIL_BYTES + 1)
         if len(data) > MAX_THUMBNAIL_BYTES:
             fail("Image is too large")
@@ -2471,6 +2537,7 @@ def cmd_image(args):
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+        _prune_media_cache(IMAGE_CACHE_DIR, IMAGE_CACHE_MAX_ENTRIES, IMAGE_CACHE_MAX_BYTES)
     except Exception as exc:
         fail(f"Image fetch failed: {exc}")
 
