@@ -1618,6 +1618,14 @@ Panel {
         afterCommand.restart()
         return
       }
+      // Every remaining command reports {ok:false, error} with exit 0 on a
+      // handled failure, so trust the payload rather than the exit code.
+      var generic = root.parseProcessJson(root.processText("cmd"))
+      if (generic && generic.ok === false) {
+        statusText = root.boundedString(generic.error || (action + " failed"), 256)
+        afterCommand.restart()
+        return
+      }
       if (!root.isQuietCommand(cmdName))
         statusText = action + " ✓"
       if (action === "Remove" && root.activePlaylistId) {

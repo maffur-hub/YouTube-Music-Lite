@@ -186,7 +186,8 @@ def _cache_key(namespace, args):
 
 
 def _cache_path(namespace, args):
-    return os.path.join(METADATA_CACHE_DIR, _cache_key(namespace, args) + ".json")
+    return os.path.join(METADATA_CACHE_DIR,
+                        f"{namespace}-{_cache_key(namespace, args)}.json")
 
 
 def cache_read(namespace, args, ttl):
@@ -225,7 +226,7 @@ def cache_write(namespace, args, payload):
             os.chmod(METADATA_CACHE_DIR, 0o700)
         except OSError:
             pass
-        record = {"ts": time.time(), "payload": payload}
+        record = {"ns": namespace, "ts": time.time(), "payload": payload}
         json_dump(_cache_path(namespace, args), record)
         _cache_prune()
     except Exception:
@@ -241,6 +242,31 @@ def invalidate_cache(namespace, args):
             os.unlink(path)
     except Exception:
         pass
+
+
+def invalidate_namespace(namespace):
+    """Unlink every cache record written for `namespace`, whatever its args.
+
+    Used after account mutations (like/unlike/dislike) whose cached screens
+    would otherwise stay stale for the whole TTL. Cache files are prefixed
+    with their namespace, so this also catches records written by older code.
+    Never raises.
+    """
+    prefix = f"{namespace}-"
+    try:
+        names = os.listdir(METADATA_CACHE_DIR)
+    except OSError:
+        return
+    for name in names:
+        if not (name.startswith(prefix) and name.endswith(".json")):
+            continue
+        path = os.path.join(METADATA_CACHE_DIR, name)
+        try:
+            st = os.lstat(path)
+            if stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid():
+                os.unlink(path)
+        except Exception:
+            continue
 
 
 def _cache_entries():
@@ -1523,32 +1549,19 @@ def cmd_like(args):
     if not args:
         fail("Usage: yt-music-ctl like <videoId>")
     video_id = args[0]
+    if not valid_video_id(video_id):
+        fail("Invalid video ID")
     ytm = get_ytmusic()
     try:
+        # Rating the song is enough: YouTube adds it to Liked Music itself.
+        # The previous explicit add_playlist_items call was redundant and made
+        # YouTube answer HTTP 400 ("invalid argument"), which surfaced as a
+        # bogus error payload even though the like had worked.
         ytm.rate_song(video_id, "LIKE")
+        invalidate_namespace("liked")
+        print(json.dumps({"ok": True, "liked": True}))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
-        return
-    try:
-        playlists = ytm.get_library_playlists(limit=50)
-        likes_pl = None
-        for pl in playlists:
-            title = (pl.get("title") or "").strip().lower()
-            if title == LIKES_TITLE.lower():
-                likes_pl = pl
-                break
-        added = False
-        if likes_pl:
-            ytm.add_playlist_items(likes_pl["playlistId"], [video_id])
-            added = True
-        else:
-            new_pl = ytm.create_playlist(LIKES_TITLE, "Liked from YouTube Music")
-            ytm.add_playlist_items(new_pl["playlistId"], [video_id])
-            added = True
-        print(json.dumps({"ok": True, "liked": True, "addedToPlaylist": added}))
-    except Exception as e:
-        print(json.dumps({"ok": True, "liked": True, "addedToPlaylist": False,
-                          "error": str(e)}))
 
 
 def cmd_dislike(args):
@@ -1595,6 +1608,13 @@ def cmd_dislike(args):
     if mpv_is_running():
         mpv_send("playlist-next", "force")
 
+    if rated:
+        # A dislike changes the rating and can remove the track from every
+        # owned playlist, so drop the cached screens that would still show it.
+        invalidate_namespace("liked")
+        invalidate_namespace("playlist")
+        invalidate_namespace("library")
+
     result = {"ok": rated, "disliked": rated, "removedFrom": removed, "skipped": True}
     if errors:
         result["errors"] = errors
@@ -1608,6 +1628,7 @@ def cmd_unlike(args):
     ytm = get_ytmusic()
     try:
         ytm.rate_song(video_id, "INDIFFERENT")
+        invalidate_namespace("liked")
         print(json.dumps({"ok": True}))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
