@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PLUGIN_ID="yt-music"
+PLUGIN_ID="io.github.maffur-hub.youtube-music-bar"
 PLUGIN_DIR="${HOME}/.config/omarchy/plugins/${PLUGIN_ID}"
 DATA_DIR="${HOME}/.local/share/yt-music"
 BIN_DIR="${HOME}/.local/bin"

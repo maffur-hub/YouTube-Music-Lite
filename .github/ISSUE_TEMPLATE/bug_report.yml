@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a problem with YouTube Music Bar
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Player and environment problems are much easier to diagnose with the details below.
+  - type: input
+    id: omarchy-version
+    attributes:
+      label: Omarchy version
+      description: The version from `omarchy debug` or the Omarchy menu.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Paste the full output of `yt-music-ctl doctor`.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `python3 --version`, `mpv --version | head -1`, and `yt-dlp --version`.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: plugins
+    attributes:
+      label: Plugin list
+      description: Paste the output of `omarchy plugin list --json`.
+      render: json
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant journal lines, e.g. `journalctl --user --since "10 min ago" | grep -iE 'yt-music|Panel.qml'`.
+      render: shell
+    validations:
+      required: false

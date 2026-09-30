@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "id": "yt-music",
-  "name": "YouTube Music Lite",
-  "version": "2.1.0",
+  "id": "io.github.maffur-hub.youtube-music-bar",
+  "name": "YouTube Music Bar",
+  "version": "2.2.0",
   "author": "maffur-hub",
   "description": "A lightweight YouTube Music player for Omarchy",
   "kinds": [
@@ -12,7 +12,7 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "YouTube Music Lite",
+    "displayName": "YouTube Music Bar",
     "description": "Lightweight music playback with playlists, search, and controls",
     "category": "Media",
     "allowMultiple": false,

@@ -1,4 +1,4 @@
-# YouTube Music Lite for Omarchy
+# YouTube Music Bar for Omarchy
 
 A free YouTube Music player for the Omarchy bar. It uses `ytmusicapi` for
 library/search actions and MPV with `yt-dlp` for audio playback.
@@ -40,16 +40,27 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 
 ## Install
 
+From the Omarchy plugin marketplace:
+
+```bash
+omarchy plugin add https://github.com/maffur-hub/YouTube-Music-Lite.git --enable
+~/.config/omarchy/plugins/io.github.maffur-hub.youtube-music-bar/install.sh
+```
+
+`omarchy plugin add` clones and enables the QML bar widget only. The player
+itself is a Python backend, so run the bundled `install.sh` once (the second
+command above). It creates a private virtual environment under
+`~/.local/share/yt-music`, installs the exact hash-verified Python dependency
+lock, installs the `yt-music-ctl` launcher and backend, and enables the widget
+in the Omarchy bar. It does not upgrade pip or download unpinned dependencies.
+
+Or install from a clone:
+
 ```bash
 git clone https://github.com/maffur-hub/YouTube-Music-Lite.git
 cd YouTube-Music-Lite
 ./install.sh
 ```
-
-The installer creates a private virtual environment under
-`~/.local/share/yt-music`, installs the exact hash-verified Python dependency
-lock, installs the bar plugin, and enables it in the Omarchy bar. The installer
-does not upgrade pip or download unpinned dependencies.
 
 Log in after installation:
 
@@ -99,9 +110,21 @@ node scripts/model_test.js
 ./install.sh --uninstall
 ```
 
-This removes the plugin, launcher, and virtual environment. Authentication
-data under `~/.config/yt-music` is left untouched so it can be removed or
-reused separately.
+This removes the plugin, launcher, and virtual environment.
+
+Marketplace installs can also be removed with
+`omarchy plugin remove io.github.maffur-hub.youtube-music-bar` before running
+`./install.sh --uninstall` from the plugin directory.
+
+Authentication data under `~/.config/yt-music` is left untouched so it can be
+removed or reused separately.
+
+## Maintenance
+
+This is a best-effort personal project with no support SLA. Issues that are
+specific to one machine or environment may be closed without a fix. When
+reporting a bug, include the output of `yt-music-ctl doctor`, your Omarchy
+version, and `omarchy plugin list --json`; the issue template asks for these.
 
 ## Privacy
 
@@ -114,7 +137,7 @@ are included in this repository.
 This is a fork of [YouTube Music Lite](https://github.com/stevenwtlafrance-ship-it/YouTube-Music-Lite)
 by stevenwtlafrance-ship-it, substantially expanded with playlist management,
 multi-select, library browsing, lyrics, offline caching, and a persistent
-status daemon.
+status daemon. This fork is distributed as **YouTube Music Bar**.
 
 ## License
 
