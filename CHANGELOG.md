@@ -8,8 +8,13 @@
   the upstream plugin this project is forked from.
 - Added marketplace install instructions, an uninstall note, a maintenance
   policy, and a bug-report issue template.
-- No functional/behavioral changes; internal paths and the `yt-music-ctl`
-  command are unchanged.
+- Documented every feature, button, menu, keyboard shortcut, and CLI command in
+  the README.
+- Fixed the Log out button: the backend now implements and registers
+  `yt-music-ctl logout`, which removes the locally stored authentication (it
+  has no effect on the browser or the YouTube account). Previously the command
+  was advertised in the help text but never implemented.
+- Internal paths and the `yt-music-ctl` command are unchanged.
 
 ## 2.1.0 and earlier
 

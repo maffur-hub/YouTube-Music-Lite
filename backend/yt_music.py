@@ -1257,6 +1257,26 @@ def cmd_login(args):
     print("You can now use yt-music-ctl commands: playlists, search, play, mix")
 
 
+def cmd_logout(args):
+    """Remove the locally stored YouTube Music authentication.
+
+    The auth file is browser-derived; deleting it only logs this plugin out.
+    It never touches anything in the browser or the YouTube account.
+    """
+    auth_path = os.path.join(CONFIG_DIR, "auth.json")
+    removed = False
+    try:
+        st = os.lstat(auth_path)
+        if stat.S_ISREG(st.st_mode):
+            os.unlink(auth_path)
+            removed = True
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        fail(f"Could not remove {auth_path}: {e}")
+    print(json.dumps({"ok": True, "removed": removed, "authPath": auth_path}))
+
+
 def cmd_status(args):
     if not mpv_is_running():
         write_status({"ok": True, "playing": False})
@@ -4433,6 +4453,7 @@ def cmd_internal_refresh(args):
 
 COMMANDS = {
     "login": cmd_login,
+    "logout": cmd_logout,
     "status": cmd_status,
     "play": cmd_play,
     "play-next": cmd_play_next,
