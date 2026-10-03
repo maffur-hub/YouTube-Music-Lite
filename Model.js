@@ -49,10 +49,6 @@ function fmtDuration(secs) {
   return m + ":" + (r < 10 ? "0" : "") + r
 }
 
-function fmtPosition(pos, dur) {
-  return fmtDuration(pos) + " / " + fmtDuration(dur)
-}
-
 function barLabel(status) {
   if (!status || !status.playing) return ""
   var title = status.title || ""
@@ -262,7 +258,6 @@ if (typeof module !== "undefined") {
     ICON: ICON,
     parseStatus: parseStatus,
     fmtDuration: fmtDuration,
-    fmtPosition: fmtPosition,
     barLabel: barLabel,
     tooltipText: tooltipText,
     isActive: isActive,

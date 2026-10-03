@@ -2830,22 +2830,6 @@ Panel {
                 }
               }
 
-              Text {
-                anchors.left: albumArt.right
-                anchors.leftMargin: Style.space(18)
-                anchors.right: heroActions.left
-                anchors.rightMargin: Style.space(12)
-                anchors.verticalCenter: heroActions.verticalCenter
-                textFormat: Text.PlainText
-                elide: Text.ElideRight
-                text: Model.isActive(root.musicStatus) && root.musicStatus
-                  ? Model.fmtPosition(root.musicStatus.position || 0, root.musicStatus.duration || 0)
-                  : ""
-                color: Qt.darker(root.fg, 1.4)
-                font.family: root.fam
-                font.pixelSize: Style.font.caption
-              }
-
               Column {
                 anchors.left: albumArt.right
                 anchors.leftMargin: Style.space(18)
