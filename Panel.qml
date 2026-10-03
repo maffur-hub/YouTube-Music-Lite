@@ -230,6 +230,8 @@ Panel {
   property var processOutput: ({})
   property string thumbnailSource: ""
   property string thumbnailVideoId: ""
+  property int thumbnailRetries: 0
+  property string loadingText: ""
 
   property bool stateRestored: false
 
@@ -532,6 +534,7 @@ Panel {
     root.selectedIndex = -1
     root.renameOpen = false
     root.statusText = ""
+    root.loadingText = "Loading…"
     if (tracksProc.running) {
       // Drop the in-flight response for the playlist we are leaving, then
       // load this one once it exits.
@@ -546,6 +549,7 @@ Panel {
     root.tracksRequestSeq++
     tracksProc.requestToken = root.tracksRequestSeq
     tracksProc.command = [root.ctlPath, "playlist", id]
+    root.loadingText = "Loading…"
     root.startProcess(tracksProc, "tracks")
   }
 
@@ -777,6 +781,7 @@ Panel {
     root.selectedIndex = -1
     root.statusText = ""
     root.libraryDirty = false
+    root.loadingText = "Loading…"
     root.startLibraryRequest(command)
   }
 
@@ -793,6 +798,7 @@ Panel {
       if (!base) return
       command = base.concat(["-r"])
     }
+    root.loadingText = "Loading…"
     root.startLibraryRequest(command)
   }
 
@@ -820,6 +826,7 @@ Panel {
     root.libraryRefId = browseId
     root.detailTab = root.activeTab
     root.selectedIndex = -1
+    root.loadingText = "Loading…"
     root.startLibraryRequest([root.ctlPath, "album", browseId])
     if (root.loggedIn) {
       root.albumInLibrary = false
@@ -845,6 +852,7 @@ Panel {
     root.libraryRefId = browseId
     root.detailTab = root.activeTab
     root.selectedIndex = -1
+    root.loadingText = "Loading…"
     root.startLibraryRequest([root.ctlPath, "artist", browseId])
   }
 
@@ -1384,6 +1392,7 @@ Panel {
     onStarted: tracksDeadline.start()
     onExited: function(exitCode) {
       tracksDeadline.stop()
+      root.loadingText = ""
       if (tracksProc.requestToken === root.tracksRequestSeq) {
         var data = root.parseProcessJson(root.processText("tracks"))
         var msg = root.processText("tracksErr").trim()
@@ -1650,6 +1659,7 @@ Panel {
     onStarted: libraryDeadline.start()
     onExited: function(exitCode) {
       libraryDeadline.stop()
+      root.loadingText = ""
       if (libraryProc.requestToken !== root.libraryRequestSeq) return
       var data = root.parseProcessJson(root.processText("library"))
       if (!data || !data.ok) {
@@ -2040,9 +2050,12 @@ Panel {
     onStarted: thumbnailDeadline.start()
     onExited: function(exitCode) {
       thumbnailDeadline.stop()
-      root.thumbnailSource = exitCode === 0 && root.isVideoId(root.thumbnailVideoId)
-        ? "file://" + root.thumbnailPath(root.thumbnailVideoId)
-        : ""
+      var ok = exitCode === 0 && root.isVideoId(root.thumbnailVideoId)
+      root.thumbnailSource = ok ? "file://" + root.thumbnailPath(root.thumbnailVideoId) : ""
+      if (!ok && root.thumbnailRetries < 2 && root.isVideoId(root.thumbnailVideoId)) {
+        root.thumbnailRetries++
+        thumbnailRetryTimer.restart()
+      }
     }
   }
 
@@ -2050,6 +2063,15 @@ Panel {
     id: thumbnailDeadline
     interval: root.commandTimeout
     onTriggered: { if (thumbnailProc.running) thumbnailProc.running = false }
+  }
+
+  Timer {
+    id: thumbnailRetryTimer
+    interval: 1500
+    onTriggered: {
+      if (root.thumbnailSource === "" && root.isVideoId(root.thumbnailVideoId))
+        root.startProcess(thumbnailProc, "thumbnail")
+    }
   }
 
   Process {
@@ -2089,6 +2111,7 @@ Panel {
     id = root.isVideoId(id) ? id : ""
     if (id === root.thumbnailVideoId) return
     root.thumbnailVideoId = id
+    root.thumbnailRetries = 0
     root.thumbnailSource = ""
     if (root.thumbnailVideoId !== "") root.startProcess(thumbnailProc, "thumbnail")
   }
@@ -2232,6 +2255,7 @@ Panel {
     property string emptyText: ""
     property var createHandler: null
     property string searchQuery: ""
+    property int highlightIndex: 0
 
     readonly property var shownItems: menu.searchable ? Model.filterByTitle(menu.menuItems, menu.searchQuery) : menu.menuItems
 
@@ -2252,7 +2276,14 @@ Panel {
     }
 
     contentItem: ColumnLayout {
+      id: menuColumn
       spacing: Style.spacing.labelGap
+      focus: !menu.searchable
+
+      Keys.onUpPressed: menu.moveHighlight(-1)
+      Keys.onDownPressed: menu.moveHighlight(1)
+      Keys.onReturnPressed: menu.triggerHighlighted()
+      Keys.onEnterPressed: menu.triggerHighlighted()
 
       TextField {
         id: menuSearchField
@@ -2282,7 +2313,8 @@ Panel {
           Layout.fillWidth: true
           implicitWidth: rowLabel.implicitWidth + 2 * Style.spacing.controlPaddingX
           implicitHeight: Style.spacing.popupRowHeight
-          color: rowMouse.containsMouse ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent"
+          color: (rowMouse.containsMouse || index === menu.highlightIndex)
+            ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent"
 
           Text {
             id: rowLabel
@@ -2293,7 +2325,8 @@ Panel {
             anchors.rightMargin: Style.spacing.controlPaddingX
             textFormat: Text.PlainText
             text: String(modelData.text)
-            color: rowMouse.containsMouse ? Style.hoverStateColor(Color.popups.text, Color.accent) : Color.popups.text
+            color: (rowMouse.containsMouse || index === menu.highlightIndex)
+              ? Style.hoverStateColor(Color.popups.text, Color.accent) : Color.popups.text
             font.family: root.fam
             font.pixelSize: Style.font.body
             elide: Text.ElideRight
@@ -2375,6 +2408,20 @@ Panel {
       close()
     }
 
+    function moveHighlight(delta) {
+      var n = menu.shownItems.length
+      if (n === 0) return
+      var i = (menu.highlightIndex + delta) % n
+      if (i < 0) i += n
+      menu.highlightIndex = i
+    }
+
+    function triggerHighlighted() {
+      var n = menu.shownItems.length
+      if (n === 0) { menu.triggerFirstOrCreate(); return }
+      menu.trigger(menu.shownItems[Math.max(0, Math.min(menu.highlightIndex, n - 1))])
+    }
+
     // Menu.popup(parent, x, y) replacement: x/y stay relative to parentItem.
     function popupAt(parentItem, px, py) {
       menuParent = parentItem
@@ -2398,7 +2445,9 @@ Panel {
     onOpened: {
       menuSearchField.text = ""
       menu.searchQuery = ""
+      menu.highlightIndex = 0
       if (menu.searchable) Qt.callLater(function() { menuSearchField.forceActiveFocus() })
+      else Qt.callLater(function() { menuColumn.forceActiveFocus() })
     }
 
     onImplicitWidthChanged: fitToParent()
@@ -4301,9 +4350,11 @@ Panel {
           }
 
           Text {
-            visible: root.playlistDetail && root.playlistTracks.length === 0 && !tracksProc.running
+            visible: root.playlistDetail
+              && (root.loadingText !== ""
+                || (root.playlistTracks.length === 0 && !tracksProc.running))
             textFormat: Text.PlainText
-            text: "Playlist is empty."
+            text: root.loadingText !== "" ? root.loadingText : "Playlist is empty."
             color: Qt.darker(root.fg, 1.4)
             font.family: root.fam
             font.pixelSize: Style.font.bodySmall
@@ -4507,10 +4558,11 @@ Panel {
 
             Text {
               visible: (root.activeTab === "library" || root.libraryDetail)
-                && root.libraryKind !== "" && root.libraryList.length === 0
-                && !libraryProc.running
+                && root.libraryKind !== ""
+                && (root.loadingText !== ""
+                  || (root.libraryList.length === 0 && !libraryProc.running))
               textFormat: Text.PlainText
-              text: "Nothing here."
+              text: root.loadingText !== "" ? root.loadingText : "Nothing here."
               color: Qt.darker(root.fg, 1.4)
               font.family: root.fam
               font.pixelSize: Style.font.bodySmall

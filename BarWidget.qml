@@ -13,6 +13,7 @@ BarWidget {
   readonly property string ctlPath: Quickshell.env("HOME") + "/.local/bin/yt-music-ctl"
   readonly property int iconPx: 12
   readonly property bool playing: Model.isPlaying(root.musicStatus)
+  readonly property bool paused: !!(root.musicStatus && root.musicStatus.paused && Model.isActive(root.musicStatus))
   readonly property string barText: Model.barLabel(root.musicStatus)
 
   function tooltipText() {
@@ -115,10 +116,12 @@ BarWidget {
 
       Text {
         id: noteIcon
-        text: Model.ICON.note
+        text: root.paused ? Model.ICON.pause : Model.ICON.note
         color: root.playing
           ? Color.accent
-          : root.bar ? root.bar.foreground : Style.text
+          : root.paused
+            ? Qt.darker(Color.accent, 1.4)
+            : (root.bar ? root.bar.foreground : Style.text)
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.icon
         anchors.verticalCenter: parent.verticalCenter
