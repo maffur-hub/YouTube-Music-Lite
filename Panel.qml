@@ -2703,7 +2703,10 @@ Panel {
               Row {
                 id: heroActions
                 anchors.left: albumArt.right
-                anchors.leftMargin: Style.space(18)
+                // Each button is a 28px cell with the glyph centred, so the
+                // glyph's visual left edge is inset ~9px. Pull the row left by
+                // that much so the icons align with the track text above.
+                anchors.leftMargin: Style.space(9)
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: Style.space(20)
                 spacing: Style.space(6)
