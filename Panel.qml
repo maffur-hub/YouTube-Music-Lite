@@ -2643,8 +2643,8 @@ Panel {
 
               Row {
                 id: heroActions
-                anchors.right: parent.right
-                anchors.rightMargin: Style.space(14)
+                anchors.left: albumArt.right
+                anchors.leftMargin: Style.space(18)
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: Style.space(20)
                 spacing: Style.space(6)
