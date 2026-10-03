@@ -96,7 +96,7 @@ Panel {
   // Local play history (newest first) from `yt-music-ctl last-played`.
   property var lastPlayed: []
   property int queuePosition: -1
-  property int contextQueueIndex: -1
+  property string contextQueueKey: ""
   property string queueKey: ""
   property string libraryKind: ""
   property string libraryTitle: ""
@@ -719,10 +719,16 @@ Panel {
     root.sendCmd("queue-jump", [String(index)])
   }
 
-  function queueRemove(index) {
-    if (root.busy) return
-    var key = Model.queueKeyAt(root.queueTracks, index)
-    if (key === "") return
+  function queueIndexForKey(key) {
+    if (!key) return -1
+    for (var i = 0; i < root.queueTracks.length; i++) {
+      if (Model.queueKeyAt(root.queueTracks, i) === key) return i
+    }
+    return -1
+  }
+
+  function queueRemoveKey(key) {
+    if (root.busy || !key) return
     root.sendCmd("queue-remove-keys", [key])
   }
 
@@ -1070,7 +1076,7 @@ Panel {
     root.contextArtist = artist || ""
     root.contextSource = source || ""
     root.contextTrackIndex = (source === "track") ? Number(listIndex) : -1
-    root.contextQueueIndex = (source === "queue") ? Number(listIndex) : -1
+    root.contextQueueKey = (source === "queue") ? Model.queueKeyAt(root.queueTracks, Number(listIndex)) : ""
     root.contextX = x; root.contextY = y
     root.rebuildContextMenu()
     contextMenu.popupAt(panelFlick, x, y)
@@ -1200,13 +1206,19 @@ Panel {
           addContextItem("Move down", function() { root.movePlaylistTrack(root.contextTrackIndex, root.contextTrackIndex + 1) })
       }
     }
-    if (root.contextSource === "queue" && root.contextQueueIndex >= 0) {
-      var qi = root.contextQueueIndex
-      if (qi > 0)
-        addContextItem("Move up", function() { root.queueMove(qi, qi - 1) })
-      if (qi < root.queueTracks.length - 1)
-        addContextItem("Move down", function() { root.queueMove(qi, qi + 1) })
-      addContextItem("Remove from queue", function() { root.queueRemove(qi) })
+    if (root.contextSource === "queue" && root.contextQueueKey !== "") {
+      var qidx = root.queueIndexForKey(root.contextQueueKey)
+      if (qidx > 0)
+        addContextItem("Move up", function() {
+          var idx = root.queueIndexForKey(root.contextQueueKey)
+          if (idx > 0) root.queueMove(idx, idx - 1)
+        })
+      if (qidx >= 0 && qidx < root.queueTracks.length - 1)
+        addContextItem("Move down", function() {
+          var idx = root.queueIndexForKey(root.contextQueueKey)
+          if (idx >= 0 && idx < root.queueTracks.length - 1) root.queueMove(idx, idx + 1)
+        })
+      addContextItem("Remove from queue", function() { root.queueRemoveKey(root.contextQueueKey) })
     }
   }
 
@@ -2481,12 +2493,10 @@ Panel {
         if (root.activeListKind === "last") return
         if (root.activeListKind === "queue" && root.selectedIndex >= 0
             && root.selectedIndex < root.queueTracks.length) {
-          root.queueRemove(root.selectedIndex)
+          root.queueRemoveKey(Model.queueKeyAt(root.queueTracks, root.selectedIndex))
         } else if (root.playlistTracks.length > 0 && root.selectedIndex >= 0
             && root.selectedIndex < root.playlistTracks.length) {
           root.sendCmd("remove", [root.activePlaylistId, root.playlistTracks[root.selectedIndex].videoId])
-        } else {
-          root.clearSearch()
         }
       }
       onTextKey: function(t) {

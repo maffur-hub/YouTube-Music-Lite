@@ -1516,6 +1516,62 @@ else
     fail "auth-validity marker (fresh skip, stale/force revalidate, empty backstop)" "$(cat "$ERR_FILE")"
 fi
 
+# ------------------------------------------------- track-change wait (offline)
+# cmd_next/cmd_prev/queue-jump must wait for the real mpv transition instead of
+# sleeping a fixed second. Unit-test wait_for_track_change against a scripted
+# get_mpv_props sequence. Fully offline; time.sleep is a no-op to stay fast.
+section "track-change wait (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import importlib.util, os, sys
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_trackchange_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+mod.time.sleep = lambda _seconds: None
+
+
+def run(sequence, previous_path, previous_pos=None, timeout=5):
+    calls = {"n": 0}
+
+    def fake_props():
+        i = calls["n"]
+        calls["n"] += 1
+        return sequence[min(i, len(sequence) - 1)]
+
+    mod.get_mpv_props = fake_props
+    props = mod.wait_for_track_change(previous_path, previous_pos, timeout)
+    return props, calls["n"]
+
+
+# 1. path changes on the 3rd call -> detected, and the call count is 3.
+base = {"path": "/a", "playlist-pos": 0}
+seq = [base, base, {"path": "/b", "playlist-pos": 1}]
+props, calls = run(seq, "/a", 0)
+assert props == {"path": "/b", "playlist-pos": 1}, props
+assert calls == 3, calls
+
+# 2. only playlist-pos changes (path constant) when previous_pos is given.
+seq = [base, base, {"path": "/a", "playlist-pos": 1}]
+props, calls = run(seq, "/a", 0)
+assert props == {"path": "/a", "playlist-pos": 1}, props
+assert calls == 3, calls
+
+# 3. never changes -> returns a dict after the timeout without raising.
+seq = [base]
+props, calls = run(seq, "/a", 0, timeout=0.2)
+assert isinstance(props, dict), props
+assert props == base, props
+PY
+if [[ $? -eq 0 ]]; then
+    pass "track-change wait (path change, pos-only change, timeout returns dict)"
+else
+    fail "track-change wait (path change, pos-only change, timeout returns dict)" "$(cat "$ERR_FILE")"
+fi
+
 printf '\nPASS %d / FAIL %d\n' "$PASS" "$FAIL"
 if [[ $FAIL -gt 0 ]]; then
     exit 1

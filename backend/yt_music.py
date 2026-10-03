@@ -1057,6 +1057,28 @@ def wait_for_mpv(timeout=8):
     return False
 
 
+def wait_for_track_change(previous_path, previous_pos=None, timeout=5):
+    """Poll mpv until path (or playlist-pos, when given) actually changes.
+
+    Captured before a next/prev/jump command is sent so we can wait for the
+    real transition instead of guessing with a fixed sleep. Returns the last
+    props dict observed, never raises, and never blocks past timeout.
+    """
+    deadline = time.time() + timeout
+    last = None
+    while True:
+        props = get_mpv_props()
+        if props:
+            last = props
+            if props.get("path") != previous_path:
+                return props
+            if previous_pos is not None and props.get("playlist-pos") != previous_pos:
+                return props
+        if time.time() >= deadline:
+            return last if last is not None else get_mpv_props()
+        time.sleep(0.1)
+
+
 def spawn_precache_next():
     """Fire-and-forget precache of the queue's next entry in a detached child.
 
@@ -1737,9 +1759,13 @@ def cmd_toggle(args):
 def cmd_next(args):
     if not mpv_is_running():
         fail("Nothing playing")
+    before = get_mpv_props()
     mpv_send("playlist-next", "force")
-    time.sleep(1)
-    props = get_mpv_props()
+    if before:
+        props = wait_for_track_change(before.get("path"), before.get("playlist-pos"))
+    else:
+        time.sleep(0.3)
+        props = get_mpv_props()
     write_status_from_mpv(props)
     print(json.dumps({"ok": True}))
 
@@ -1747,9 +1773,13 @@ def cmd_next(args):
 def cmd_prev(args):
     if not mpv_is_running():
         fail("Nothing playing")
+    before = get_mpv_props()
     mpv_send("playlist-prev", "force")
-    time.sleep(1)
-    props = get_mpv_props()
+    if before:
+        props = wait_for_track_change(before.get("path"), before.get("playlist-pos"))
+    else:
+        time.sleep(0.3)
+        props = get_mpv_props()
     write_status_from_mpv(props)
     print(json.dumps({"ok": True}))
 
@@ -3763,8 +3793,14 @@ def cmd_queue_jump(args):
     if not 0 <= index < count:
         print(json.dumps({"ok": False, "error": "Index out of range"}))
         return
+    before = get_mpv_props()
     mpv_send("set_property", ["playlist-pos", index])
-    write_status_from_mpv(get_mpv_props())
+    if before:
+        props = wait_for_track_change(before.get("path"), before.get("playlist-pos"))
+    else:
+        time.sleep(0.3)
+        props = get_mpv_props()
+    write_status_from_mpv(props)
     print(json.dumps({"ok": True, "position": index}))
 
 
