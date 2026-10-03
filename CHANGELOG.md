@@ -28,6 +28,13 @@ Review-driven fixes (see `docs/review-findings.md`, `docs/phase2-decisions.md`).
 - Stale backend responses no longer overwrite the current screen: library,
   playlist and search requests carry request tokens and are discarded if the
   user navigated away.
+- Transport commands wait for the actual track change instead of a fixed delay,
+  and queue edits use the row's stable key so a shifting queue cannot remove the
+  wrong entry.
+- The status daemon logs unexpected errors instead of silently retrying, and the
+  installer refuses to delete a directory that resolves to its own source tree.
+- UI: loading states for library/playlist loads, a distinct paused state in the
+  bar, keyboard-navigable menus, and bounded thumbnail retries.
 
 ## 2.2.0 — 2026-09-30
 

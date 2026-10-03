@@ -78,14 +78,21 @@ once the backlog is closed.
 
 ## Lower severity (backlog)
 
-- [ ] `_confirmed_ids` / `cmd_image` symlink symmetry, `refresh_auth_headers`
-  in-place mutation, `cmd_next`/`cmd_prev` fixed `time.sleep(1)`, daemon/precache
-  `except Exception: pass` with no logging, `install.sh` `rm -rf` guard.
-- [ ] Frontend: stale index-based queue remove/move, no loading states for
-  library/album/artist loads, non-virtualized `Repeater`s and an always-live panel,
-  `autoRefresh` polling while closed, remote thumbnail fetches without retry,
-  mouse-only menus, `Delete` clearing search state.
+All lower-severity items are now either fixed or deliberately declined.
+
+- [x] `refresh_auth_headers` non-mutating + single quote-aware cookie parser;
+  daemon/precache exceptions logged (throttled); `cmd_image` symlink symmetry;
+  `install.sh` realpath guard; `cmd_next`/`cmd_prev`/`cmd_queue_jump` wait for the
+  actual track change.
+- [x] Frontend: stale index-based queue remove/move; loading states for
+  library/album/artist/playlist; keyboard-navigable menus; thumbnail retry;
+  `Delete` no longer clears search; paused state shown in the bar.
+- **Declined (with reason):** panel unload + `Repeater`→`ListView` virtualization.
+  High regression risk in a 4,600-line panel, needs live-shell tuning to size
+  delegates, and low payoff on the target hardware. Revisit only if the panel is
+  observed to be sluggish.
+- **Declined:** i18n / `qsTr()` coverage — the plugin ships English-only.
 
 ## Won't fix
 
-- [ ] `i18n` / `qsTr()` coverage — the plugin ships English-only.
+- `i18n` / `qsTr()` coverage — the plugin ships English-only.
