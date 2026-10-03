@@ -47,10 +47,13 @@ Panel {
   property var playlistTracks: []
   property string activePlaylistTitle: ""
   property string activePlaylistId: ""
+  property int tracksRequestSeq: 0
+  property var pendingPlaylistOpen: null
   property var searchResults: []
   property string searchQuery: ""
   property string searchFilter: "songs"
   property bool searching: false
+  property var pendingSearch: ""
   property int selectedIndex: -1
   // Multi-select over the active list (search results / up-next queue): keys
   // are Model.rowKey(row) values and the value is the row itself, so the
@@ -100,6 +103,7 @@ Panel {
   property string librarySubtitle: ""
   property var libraryRows: []
   property string libraryRefId: ""
+  property int libraryRequestSeq: 0
   // Browse-level stack: opening an album/artist from a library list (or an
   // artist's similar-artists list) remembers the level you came from, so Back
   // returns there instead of dropping straight to the Home/Recent/… pills.
@@ -345,7 +349,7 @@ Panel {
   }
 
   function refresh() {
-    if (root.refreshing) return
+    if (statusProc.running) return
     root.refreshing = true
     root.startProcess(statusProc, "status")
   }
@@ -387,7 +391,44 @@ Panel {
 
   function startProcess(proc, key) {
     root.processOutput[key] = ""
+    var deadline = root.deadlineFor(key)
+    if (deadline) deadline.restart()
     proc.running = true
+  }
+
+  function deadlineFor(key) {
+    if (key === "status") return statusDeadline
+    if (key === "playlists") return playlistsDeadline
+    if (key === "tracks") return tracksDeadline
+    if (key === "search") return searchDeadline
+    if (key === "play") return playDeadline
+    if (key === "mix") return mixDeadline
+    if (key === "queue") return queueDeadline
+    if (key === "queueList") return queueListDeadline
+    if (key === "library") return libraryDeadline
+    if (key === "albumStatus") return albumStatusDeadline
+    if (key === "albumCmd") return albumCmdDeadline
+    if (key === "logout") return logoutDeadline
+    if (key === "create") return createDeadline
+    if (key === "cmd") return cmdDeadline
+    if (key === "lyrics") return lyricsDeadline
+    if (key === "thumbnail") return thumbnailDeadline
+    if (key === "cover") return coverDeadline
+    if (key === "lastPlayed") return lastPlayedDeadline
+    if (key === "lastPlayedClear") return lastPlayedClearDeadline
+    if (key === "likedSet") return likedSetDeadline
+    if (key === "queueClear") return queueClearDeadline
+    if (key === "restore") return restoreDeadline
+    return null
+  }
+
+  function commandTimeoutHit(key) {
+    root.statusText = "Backend unavailable — is yt-music-ctl installed?"
+    if (key === "status") root.refreshing = false
+    else if (key === "search") root.searching = false
+    else if (key === "play" || key === "mix" || key === "queue" || key === "logout" || key === "create" || key === "cmd") root.busy = false
+    else if (key === "albumCmd") { root.albumCmdRunning = false; root.pumpAlbumCmdQueue() }
+    else if (key === "lyrics") root.lyricsLoading = false
   }
 
   function appendProcessOutput(key, chunk) {
@@ -491,6 +532,19 @@ Panel {
     root.selectedIndex = -1
     root.renameOpen = false
     root.statusText = ""
+    if (tracksProc.running) {
+      // Drop the in-flight response for the playlist we are leaving, then
+      // load this one once it exits.
+      root.tracksRequestSeq++
+      root.pendingPlaylistOpen = { id: id, title: title }
+      return
+    }
+    root.startTracksRequest(id)
+  }
+
+  function startTracksRequest(id) {
+    root.tracksRequestSeq++
+    tracksProc.requestToken = root.tracksRequestSeq
     tracksProc.command = [root.ctlPath, "playlist", id]
     root.startProcess(tracksProc, "tracks")
   }
@@ -503,6 +557,8 @@ Panel {
   }
 
   function closePlaylist() {
+    root.tracksRequestSeq++
+    root.pendingPlaylistOpen = null
     root.activePlaylistId = ""
     root.activePlaylistTitle = ""
     root.playlistTracks = []
@@ -582,10 +638,19 @@ Panel {
 
   function search(query) {
     if (query === undefined || query.trim() === "") return
-    root.searchQuery = query.trim()
+    var q = query.trim()
+    if (searchProc.running) {
+      root.pendingSearch = q
+      return
+    }
+    root.startSearchRequest(q)
+  }
+
+  function startSearchRequest(q) {
+    root.searchQuery = q
     root.searchResults = []
     root.searching = true
-    searchProc.command = [root.ctlPath, "search", "-f", root.searchFilter, root.searchQuery]
+    searchProc.command = [root.ctlPath, "search", "-f", root.searchFilter, q]
     root.startProcess(searchProc, "search")
   }
 
@@ -595,6 +660,7 @@ Panel {
     root.searchFilter = "songs"
     root.searchResults = []
     root.searching = false
+    root.pendingSearch = ""
     root.selectedIndex = -1
   }
 
@@ -674,6 +740,17 @@ Panel {
     return null
   }
 
+  function invalidateLibraryRequest() {
+    root.libraryRequestSeq++
+  }
+
+  function startLibraryRequest(command) {
+    root.libraryRequestSeq++
+    libraryProc.requestToken = root.libraryRequestSeq
+    libraryProc.command = command
+    root.startProcess(libraryProc, "library")
+  }
+
   function loadLibrary(kind) {
     if (libraryProc.running) return
     var command = root.libraryCommand(kind)
@@ -694,8 +771,7 @@ Panel {
     root.selectedIndex = -1
     root.statusText = ""
     root.libraryDirty = false
-    libraryProc.command = command
-    root.startProcess(libraryProc, "library")
+    root.startLibraryRequest(command)
   }
 
   function refetchLibrary() {
@@ -711,8 +787,7 @@ Panel {
       if (!base) return
       command = base.concat(["-r"])
     }
-    libraryProc.command = command
-    root.startProcess(libraryProc, "library")
+    root.startLibraryRequest(command)
   }
 
   function resetLibraryInfo() {
@@ -739,8 +814,7 @@ Panel {
     root.libraryRefId = browseId
     root.detailTab = root.activeTab
     root.selectedIndex = -1
-    libraryProc.command = [root.ctlPath, "album", browseId]
-    root.startProcess(libraryProc, "library")
+    root.startLibraryRequest([root.ctlPath, "album", browseId])
     if (root.loggedIn) {
       root.albumInLibrary = false
       root.albumStatusRefId = browseId
@@ -765,8 +839,7 @@ Panel {
     root.libraryRefId = browseId
     root.detailTab = root.activeTab
     root.selectedIndex = -1
-    libraryProc.command = [root.ctlPath, "artist", browseId]
-    root.startProcess(libraryProc, "library")
+    root.startLibraryRequest([root.ctlPath, "artist", browseId])
   }
 
   function snapshotLibrary() {
@@ -818,6 +891,7 @@ Panel {
   // Back / tab pop for the library: return to the browse level you came from,
   // and only close the whole section from the top level.
   function libraryBack() {
+    root.invalidateLibraryRequest()
     if (root.libraryParents.length > 0) {
       var stack = root.libraryParents.slice()
       var parent = stack.pop()
@@ -833,6 +907,7 @@ Panel {
   }
 
   function closeLibrary() {
+    root.invalidateLibraryRequest()
     root.libraryParents = []
     root.libraryKind = ""
     root.libraryTitle = ""
@@ -1282,12 +1357,12 @@ Panel {
         root.loggedIn = false
         root.playlists = []
       }
-      root.refreshing = false
     }
   }
 
   Process {
     id: tracksProc
+    property int requestToken: 0
     stdout: SplitParser {
       onRead: function(data) { root.appendProcessOutput("tracks", data) }
     }
@@ -1297,18 +1372,25 @@ Panel {
     onStarted: tracksDeadline.start()
     onExited: function(exitCode) {
       tracksDeadline.stop()
-      var data = root.parseProcessJson(root.processText("tracks"))
-      var msg = root.processText("tracksErr").trim()
-      if (data && data.ok) {
-        root.playlistTracks = root.normalizeSongs(data.tracks, 500)
-        root.activePlaylistTitle = root.boundedString(data.title || root.activePlaylistTitle, 256)
-        if (root.playlistTracks.length === 0) root.statusText = "Playlist is empty"
-      } else if (data && data.error) {
-        root.statusText = root.boundedString(data.error, 256)
+      if (tracksProc.requestToken === root.tracksRequestSeq) {
+        var data = root.parseProcessJson(root.processText("tracks"))
+        var msg = root.processText("tracksErr").trim()
+        if (data && data.ok) {
+          root.playlistTracks = root.normalizeSongs(data.tracks, 500)
+          root.activePlaylistTitle = root.boundedString(data.title || root.activePlaylistTitle, 256)
+          if (root.playlistTracks.length === 0) root.statusText = "Playlist is empty"
+        } else if (data && data.error) {
+          root.statusText = root.boundedString(data.error, 256)
+        }
+        if (msg !== "") root.statusText = root.boundedString(msg.split("\n")[0], 256)
+        if (exitCode !== 0 && root.statusText === "")
+          root.statusText = "Could not load playlist"
       }
-      if (msg !== "") root.statusText = root.boundedString(msg.split("\n")[0], 256)
-      if (exitCode !== 0 && root.statusText === "")
-        root.statusText = "Could not load playlist"
+      if (root.pendingPlaylistOpen !== null) {
+        var pending = root.pendingPlaylistOpen
+        root.pendingPlaylistOpen = null
+        root.startTracksRequest(pending.id)
+      }
     }
   }
 
@@ -1327,6 +1409,11 @@ Panel {
       if (data && data.ok && data.query === root.searchQuery)
         root.searchResults = root.normalizeMixedRows(data.items, 100)
       root.searching = false
+      if (root.pendingSearch !== "") {
+        var q = root.pendingSearch
+        root.pendingSearch = ""
+        root.startSearchRequest(q)
+      }
     }
   }
 
@@ -1541,6 +1628,7 @@ Panel {
 
   Process {
     id: libraryProc
+    property int requestToken: 0
     stdout: SplitParser {
       onRead: function(data) { root.appendProcessOutput("library", data) }
     }
@@ -1550,6 +1638,7 @@ Panel {
     onStarted: libraryDeadline.start()
     onExited: function(exitCode) {
       libraryDeadline.stop()
+      if (libraryProc.requestToken !== root.libraryRequestSeq) return
       var data = root.parseProcessJson(root.processText("library"))
       if (!data || !data.ok) {
         var libMsg = root.processText("libraryErr").trim()
@@ -1767,8 +1856,7 @@ Panel {
           root.playlistAddLabels = ({})
           var dest = String(cmdProc.command[2] || "")
           if (dest !== "" && dest === root.activePlaylistId) {
-            tracksProc.command = [root.ctlPath, "playlist", root.activePlaylistId]
-            root.startProcess(tracksProc, "tracks")
+            root.startTracksRequest(root.activePlaylistId)
           }
         } else {
           statusText = root.boundedString((d && d.error) || "Add failed", 256)
@@ -1809,8 +1897,7 @@ Panel {
         if (mv && mv.ok) {
           statusText = "Track moved ✓"
           if (root.activePlaylistId) {
-            tracksProc.command = [root.ctlPath, "playlist", root.activePlaylistId]
-            root.startProcess(tracksProc, "tracks")
+            root.startTracksRequest(root.activePlaylistId)
           }
         } else {
           statusText = root.boundedString((mv && mv.error) || "Move failed", 256)
@@ -1853,27 +1940,26 @@ Panel {
       if (!root.isQuietCommand(cmdName))
         statusText = action + " ✓"
       if (action === "Remove" && root.activePlaylistId) {
-        tracksProc.command = [root.ctlPath, "playlist", root.activePlaylistId]
-        root.startProcess(tracksProc, "tracks")
+        root.startTracksRequest(root.activePlaylistId)
       }
       afterCommand.restart()
     }
   }
 
-  Timer { id: statusDeadline; interval: root.commandTimeout; onTriggered: { if (statusProc.running) { statusProc.running = false; root.statusText = "Status request timed out" } } }
+  Timer { id: statusDeadline; interval: root.commandTimeout; onTriggered: { if (statusProc.running) { statusProc.running = false; root.statusText = "Status request timed out" } else root.commandTimeoutHit("status") } }
   Timer { id: playlistsDeadline; interval: root.commandTimeout; onTriggered: { if (playlistsProc.running) { playlistsProc.running = false; root.statusText = "Library request timed out" } } }
   Timer { id: tracksDeadline; interval: root.commandTimeout; onTriggered: { if (tracksProc.running) { tracksProc.running = false; root.statusText = "Playlist request timed out" } } }
-  Timer { id: searchDeadline; interval: root.commandTimeout; onTriggered: { if (searchProc.running) { searchProc.running = false; root.statusText = "Search timed out" } } }
-  Timer { id: playDeadline; interval: root.commandTimeout; onTriggered: { if (playNowProc.running) playNowProc.running = false } }
-  Timer { id: mixDeadline; interval: root.commandTimeout; onTriggered: { if (mixProc.running) mixProc.running = false } }
-  Timer { id: queueDeadline; interval: root.commandTimeout; onTriggered: { if (queueProc.running) queueProc.running = false } }
+  Timer { id: searchDeadline; interval: root.commandTimeout; onTriggered: { if (searchProc.running) { searchProc.running = false; root.statusText = "Search timed out" } else root.commandTimeoutHit("search") } }
+  Timer { id: playDeadline; interval: root.commandTimeout; onTriggered: { if (playNowProc.running) playNowProc.running = false; else root.commandTimeoutHit("play") } }
+  Timer { id: mixDeadline; interval: root.commandTimeout; onTriggered: { if (mixProc.running) mixProc.running = false; else root.commandTimeoutHit("mix") } }
+  Timer { id: queueDeadline; interval: root.commandTimeout; onTriggered: { if (queueProc.running) queueProc.running = false; else root.commandTimeoutHit("queue") } }
   Timer { id: queueListDeadline; interval: root.commandTimeout; onTriggered: { if (queueListProc.running) queueListProc.running = false } }
   Timer { id: libraryDeadline; interval: root.commandTimeout; onTriggered: { if (libraryProc.running) libraryProc.running = false } }
   Timer { id: albumStatusDeadline; interval: root.commandTimeout; onTriggered: { if (albumStatusProc.running) albumStatusProc.running = false } }
   Timer { id: albumCmdDeadline; interval: root.commandTimeout; onTriggered: { if (albumCmdProc.running) albumCmdProc.running = false; root.albumCmdRunning = false; root.pumpAlbumCmdQueue() } }
-  Timer { id: logoutDeadline; interval: root.commandTimeout; onTriggered: { if (logoutProc.running) logoutProc.running = false } }
-  Timer { id: createDeadline; interval: root.commandTimeout; onTriggered: { if (createPlaylistProc.running) createPlaylistProc.running = false } }
-  Timer { id: cmdDeadline; interval: root.commandTimeout; onTriggered: { if (cmdProc.running) cmdProc.running = false } }
+  Timer { id: logoutDeadline; interval: root.commandTimeout; onTriggered: { if (logoutProc.running) logoutProc.running = false; else root.commandTimeoutHit("logout") } }
+  Timer { id: createDeadline; interval: root.commandTimeout; onTriggered: { if (createPlaylistProc.running) createPlaylistProc.running = false; else root.commandTimeoutHit("create") } }
+  Timer { id: cmdDeadline; interval: root.commandTimeout; onTriggered: { if (cmdProc.running) cmdProc.running = false; else root.commandTimeoutHit("cmd") } }
   Timer {
     id: libraryRefreshTimer
     interval: 6000
@@ -1932,7 +2018,7 @@ Panel {
     }
   }
 
-  Timer { id: lyricsDeadline; interval: root.commandTimeout; onTriggered: { if (lyricsProc.running) { lyricsProc.running = false; root.lyricsLoading = false } } }
+  Timer { id: lyricsDeadline; interval: root.commandTimeout; onTriggered: { if (lyricsProc.running) { lyricsProc.running = false; root.lyricsLoading = false } else root.commandTimeoutHit("lyrics") } }
 
   Process {
     id: thumbnailProc

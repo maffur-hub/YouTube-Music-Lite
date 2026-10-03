@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+Review-driven fixes (see `docs/review-findings.md`, `docs/phase2-decisions.md`).
+
+- Fixed `yt-music-ctl volume` printing a traceback on non-numeric input; it now
+  fails with a usage error like the other commands.
+- Hardened `~/.config/yt-music/` and `auth.json` to 0700/0600 (they hold browser
+  session cookies), matching the state/cache directories.
+- Metadata cache refresh sentinels are now per-query instead of one global lock,
+  so a stale screen no longer suppresses refreshes for other screens.
+- Playlist edits and lookups now fetch the whole playlist (`limit=None`) instead
+  of the first 100 tracks, so duplicates are detected and tracks beyond #100 can
+  be removed or reordered. Queueing a very large playlist now queues all of it
+  (previously capped at 100).
+- Added a 12-hour on-disk auth-validity marker so most commands skip the live
+  account-info validation round-trip; `-r`/`--refresh` and login still force it,
+  and an empty playlist list triggers one revalidation.
+- The status daemon now only attaches to the plugin's own mpv (verified by
+  pid/start-time/executable/socket), refusing foreign sockets and logging the
+  refusal. A manually launched mpv on the plugin socket is no longer mirrored.
+- Playlist edit results are strictly classified; unrecognised responses are
+  verified by re-reading the playlist instead of assuming every add succeeded.
+- The panel no longer gets stuck with `busy`/`refreshing`/`searching` when
+  `yt-music-ctl` is missing or fails to start: deadlines are armed at request
+  time and clear the flow with a "backend unavailable" message.
+- Stale backend responses no longer overwrite the current screen: library,
+  playlist and search requests carry request tokens and are discarded if the
+  user navigated away.
+
 ## 2.2.0 — 2026-09-30
 
 - Renamed the plugin to **YouTube Music Bar** with the unique manifest id

@@ -1188,6 +1188,334 @@ if [[ $FULL -eq 1 ]]; then
     check_queue_saved
 fi
 
+# ------------------------------------------------- review regressions (offline)
+# Regression checks for the 2026-10 review quick wins that need no network or
+# account: the per-key background-refresh sentinel (B3) and the private-dir
+# helper (B2). Importing the backend is safe because its entry point is guarded.
+section "review regressions (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import importlib.util, os, sys, tempfile
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_review_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+tmp = tempfile.mkdtemp(prefix="yt-music-review-")
+mod.STATE_DIR = tmp
+
+spawned = []
+class _FakePopen:
+    def __init__(self, *args, **kwargs):
+        spawned.append(args)
+mod.subprocess.Popen = _FakePopen
+
+# Same (namespace, args) is suppressed; a different namespace is not, and the
+# old shared "refresh.lock" name is gone.
+assert mod.spawn_background_refresh("alpha", ["x"]) is True
+assert mod.spawn_background_refresh("alpha", ["x"]) is False
+assert mod.spawn_background_refresh("beta", ["x"]) is True
+locks = sorted(n for n in os.listdir(tmp) if n.startswith("refresh-"))
+assert len(locks) == 2, locks
+assert "refresh.lock" not in locks, locks
+
+# A different key in the same namespace gets its own sentinel.
+assert mod.spawn_background_refresh("alpha", ["y"]) is True
+assert len([n for n in os.listdir(tmp) if n.startswith("refresh-")]) == 3
+
+# _ensure_private_dir tightens an already-existing loose directory to 0700.
+loose = os.path.join(tmp, "loose")
+os.makedirs(loose, mode=0o755)
+os.chmod(loose, 0o755)
+mod._ensure_private_dir(loose)
+assert (os.stat(loose).st_mode & 0o777) == 0o700, oct(os.stat(loose).st_mode & 0o777)
+PY
+if [[ $? -eq 0 ]]; then
+    pass "per-key refresh sentinel + private-dir helper"
+else
+    fail "per-key refresh sentinel + private-dir helper" "$(cat "$ERR_FILE")"
+fi
+
+# ------------------------------------------------- full-page playlist fetch (offline)
+# The correctness sites that resolve duplicates/indices must fetch the whole
+# playlist (limit=None); only the display path may keep a 100-item page.
+section "full-page playlist fetch (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import importlib.util, os, sys
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_paging_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+src = open(path).read()
+paged = [ln for ln in src.splitlines() if "get_playlist(" in ln and "limit=100" in ln]
+assert len(paged) == 1, (
+    "expected exactly 1 paged get_playlist (display-only), "
+    f"found {len(paged)}; total 'limit=100' occurrences={src.count('limit=100')}"
+)
+
+class FakeYT:
+    def __init__(self, tracks):
+        self.tracks = tracks
+        self.limits = []
+    def get_playlist(self, pid, limit=100, **kw):
+        self.limits.append(limit)
+        return {"tracks": self.tracks}
+
+tracks = [{"videoId": f"v{i:03d}"} for i in range(150)]
+fake = FakeYT(tracks)
+added, duplicates, skipped, dup_ids, skip_ids = mod._add_video_ids(fake, "PL_TEST", ["v120"])
+assert fake.limits == [None], fake.limits
+assert duplicates == 1, duplicates
+assert "v120" in dup_ids, dup_ids
+PY
+if [[ $? -eq 0 ]]; then
+    pass "full-page playlist fetch (duplicate detection beyond 100 tracks)"
+else
+    fail "full-page playlist fetch (duplicate detection beyond 100 tracks)" "$(cat "$ERR_FILE")"
+fi
+
+# ------------------------------------------------- playlist edit result classification (offline)
+# _confirmed_ids must strictly classify known ytmusicapi edit shapes and return
+# None for anything it cannot trust; _add_video_ids then verifies against the
+# playlist itself instead of assuming the whole request landed.
+section "playlist edit result classification (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import importlib.util, os, sys
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_edit_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# Recognised shapes
+assert mod._confirmed_ids(
+    {"status": "STATUS_SUCCEEDED",
+     "playlistEditResults": [{"videoId": "a", "setVideoId": "s1"},
+                             {"videoId": "b", "setVideoId": "s2"}]},
+    ["a", "b"]) == ["a", "b"]
+assert mod._confirmed_ids(
+    {"playlistEditResults": [
+        {"playlistEditVideoAddedResultData": {"videoId": "a", "setVideoId": "s1"}}]},
+    ["a"]) == ["a"]
+assert mod._confirmed_ids(
+    {"playlistEditResults": [{"videoId": "a", "setVideoId": "s1"},
+                             {"videoId": "b"}]},
+    ["a", "b"]) == ["a"]
+
+# Unknown shapes must return None
+assert mod._confirmed_ids({}, ["a"]) is None
+assert mod._confirmed_ids({"playlistEditResults": "nope"}, ["a"]) is None
+assert mod._confirmed_ids(
+    {"playlistEditResults": [{"playlistEditVideoAddedResultData": None}]}, ["a"]) is None
+assert mod._confirmed_ids(None, ["a"]) is None
+assert mod._confirmed_ids([{"videoId": "a"}], ["a"]) is None
+
+class FakeYT:
+    def __init__(self, before, after, edit_response, fail_after=False):
+        self.before, self.after = before, after
+        self.edit_response, self.fail_after = edit_response, fail_after
+        self.calls = 0
+    def get_playlist(self, pid, limit=None, **kw):
+        self.calls += 1
+        if self.calls == 1:
+            return {"tracks": self.before}
+        if self.fail_after:
+            raise RuntimeError("network down")
+        return {"tracks": self.after}
+    def add_playlist_items(self, pid, ids, duplicates=False):
+        return self.edit_response
+
+# Unknown response: verify against the playlist itself
+fake = FakeYT([{"videoId": "a"}], [{"videoId": "a"}, {"videoId": "b"}], {})
+added, duplicates, skipped, dup_ids, skip_ids = mod._add_video_ids(
+    fake, "PL_TEST", ["b", "c"])
+assert added == 1, added
+assert skipped == 1, skipped
+assert fake.calls == 2, fake.calls
+
+# Recognised response: no re-read
+fake = FakeYT([], [], {"playlistEditResults": [{"videoId": "b", "setVideoId": "s"}]})
+added, duplicates, skipped, dup_ids, skip_ids = mod._add_video_ids(
+    fake, "PL_TEST", ["b"])
+assert added == 1, added
+assert fake.calls == 1, fake.calls
+
+# Re-read failure propagates
+fake = FakeYT([], [], {}, fail_after=True)
+try:
+    mod._add_video_ids(fake, "PL_TEST", ["b"])
+except Exception:
+    pass
+else:
+    raise AssertionError("expected _add_video_ids to raise when re-read fails")
+PY
+if [[ $? -eq 0 ]]; then
+    pass "playlist edit result classification (recognised/unknown shapes + re-read fallback)"
+else
+    fail "playlist edit result classification (recognised/unknown shapes + re-read fallback)" "$(cat "$ERR_FILE")"
+fi
+
+# ------------------------------------------------- managed mpv identity gate (offline)
+# monitor_mpv_events must only attach to the plugin's own mpv. A foreign
+# uid-owned socket with a missing/stale pidfile must be refused, and the
+# refusal logged once per distinct socket, instead of mirroring or mutating a
+# foreign player.
+section "managed mpv identity gate (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import importlib.util, os, sys
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_identity_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+EXE = "/usr/bin/mpv"
+mod.mpv_process_identity = lambda pid: ("100", EXE)
+base = {"pid": 123, "start_time": "100", "executable": EXE, "socket": mod.MPV_SOCKET}
+
+assert mod.managed_mpv_identity_matches(dict(base), EXE) is True
+assert mod.managed_mpv_identity_matches({**base, "start_time": "999"}, EXE) is False
+assert mod.managed_mpv_identity_matches({**base, "executable": "/usr/bin/other"}, EXE) is False
+assert mod.managed_mpv_identity_matches({**base, "pid": 0}, EXE) is False
+assert mod.managed_mpv_identity_matches({**base, "pid": "x"}, EXE) is False
+missing = dict(base)
+del missing["pid"]
+assert mod.managed_mpv_identity_matches(missing, EXE) is False
+assert mod.managed_mpv_identity_matches(None, EXE) is False
+assert mod.managed_mpv_identity_matches("nope", EXE) is False
+assert mod.managed_mpv_identity_matches({**base, "socket": "/tmp/other.sock"}, EXE) is False
+
+mod.mpv_process_identity = lambda pid: None
+assert mod.managed_mpv_identity_matches(dict(base), EXE) is False
+
+# With no identity available monitor_mpv_events must log and return before ever
+# touching the socket; socket.socket raising proves no connect is attempted.
+logged = []
+mod.load_mpv_pid = lambda: None
+mod.get_mpv_props = lambda: {"x": 1}
+mod._daemon_log = lambda message: logged.append(message)
+def _must_not_connect(*args, **kwargs):
+    raise AssertionError("must not connect")
+mod.socket.socket = _must_not_connect
+mod.monitor_mpv_events()
+assert logged, "a refused socket must be logged"
+PY
+if [[ $? -eq 0 ]]; then
+    pass "managed mpv identity gate (identity predicate + refused socket)"
+else
+    fail "managed mpv identity gate (identity predicate + refused socket)" "$(cat "$ERR_FILE")"
+fi
+
+# ------------------------------------------------- auth-validity marker (offline)
+# The per-command network validation in get_ytmusic must be skipped while a
+# recent positive check is trusted, force_auth must always revalidate, and the
+# empty-playlist backstop must revalidate once. Fully offline: temp dirs plus a
+# fake YTMusic replace the real config/state and network.
+section "auth-validity marker (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import importlib.util, io, json, os, sys, tempfile, time
+from contextlib import redirect_stdout
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_authmark_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+tmp = tempfile.mkdtemp(prefix="yt-music-authmark-")
+tmpcfg = os.path.join(tmp, "config")
+tmpstate = os.path.join(tmp, "state")
+os.makedirs(tmpcfg)
+os.makedirs(tmpstate)
+mod.CONFIG_DIR = tmpcfg
+mod.STATE_DIR = tmpstate
+mod.AUTH_VALID_PATH = os.path.join(tmpstate, "auth-valid.json")
+
+auth_path = os.path.join(tmpcfg, "auth.json")
+with open(auth_path, "w") as fh:
+    json.dump({"Cookie": "SID=abc; __Secure-3PAPISID=xyz", "Origin": "https://music.youtube.com"}, fh)
+
+count = {"n": 0}
+def fake_validate(auth):
+    count["n"] += 1
+    return True
+mod.validate_auth = fake_validate
+
+class FakeYTMusic:
+    def __init__(self, *args, **kwargs):
+        pass
+# Inject a stub ytmusicapi so this offline test does not require the venv.
+import types
+_fake_ytmusicapi = types.ModuleType("ytmusicapi")
+_fake_ytmusicapi.YTMusic = FakeYTMusic
+sys.modules["ytmusicapi"] = _fake_ytmusicapi
+
+# 1. Fresh marker: no network validation.
+mod._write_auth_marker()
+assert mod._auth_marker_fresh() is True
+before = count["n"]
+mod.get_ytmusic()
+assert count["n"] == before, count
+
+# 2. Stale marker: one validation, then the marker is rewritten fresh.
+with open(mod.AUTH_VALID_PATH, "w") as fh:
+    json.dump({"ts": time.time() - 13 * 3600}, fh)
+assert mod._auth_marker_fresh() is False
+before = count["n"]
+mod.get_ytmusic()
+assert count["n"] == before + 1, count
+assert mod._auth_marker_fresh() is True
+
+# 3. force_auth=True revalidates even with a fresh marker.
+mod._write_auth_marker()
+assert mod._auth_marker_fresh() is True
+before = count["n"]
+mod.get_ytmusic(force_auth=True)
+assert count["n"] == before + 1, count
+
+# 4. cmd_playlists backstop: an empty library under a fresh marker revalidates
+#    once and retries with a forced client.
+class _FakeYtmEmpty:
+    def get_library_playlists(self, limit=50):
+        return []
+class _FakeYtmOne:
+    def get_library_playlists(self, limit=50):
+        return [{"playlistId": "PL1", "title": "Mix", "count": "3"}]
+
+calls = {"get": 0, "cleared": 0}
+def fake_get_ytmusic(require_auth=True, force_auth=False):
+    calls["get"] += 1
+    return _FakeYtmEmpty() if calls["get"] == 1 else _FakeYtmOne()
+mod.get_ytmusic = fake_get_ytmusic
+mod._auth_marker_fresh = lambda: True
+mod._clear_auth_marker = lambda: calls.__setitem__("cleared", calls["cleared"] + 1)
+
+out = io.StringIO()
+with redirect_stdout(out):
+    mod.cmd_playlists([])
+payload = json.loads(out.getvalue())
+assert payload.get("ok") is True, payload
+assert len(payload.get("playlists") or []) == 1, payload
+assert calls["cleared"] == 1, calls
+assert calls["get"] == 2, calls
+PY
+if [[ $? -eq 0 ]]; then
+    pass "auth-validity marker (fresh skip, stale/force revalidate, empty backstop)"
+else
+    fail "auth-validity marker (fresh skip, stale/force revalidate, empty backstop)" "$(cat "$ERR_FILE")"
+fi
+
 printf '\nPASS %d / FAIL %d\n' "$PASS" "$FAIL"
 if [[ $FAIL -gt 0 ]]; then
     exit 1

@@ -41,6 +41,8 @@ TRACK_META_MAX = 500
 DAEMON_LOCK = os.path.join(STATE_DIR, "daemon.lock")
 DAEMON_PID_PATH = os.path.join(STATE_DIR, "daemon.pid")
 DAEMON_LOG = os.path.join(STATE_DIR, "daemon.log")
+AUTH_VALID_PATH = os.path.join(STATE_DIR, "auth-valid.json")
+AUTH_VALID_TTL_SECONDS = 12 * 3600
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 MPV_RUNTIME_DIR = os.path.join(RUNTIME_DIR, "yt-music")
 MPV_SOCKET = os.path.join(MPV_RUNTIME_DIR, "mpv.sock")
@@ -192,7 +194,8 @@ def json_dump(path, data, mode=0o600):
     parent = os.path.dirname(path)
     # State lives in private dirs: keep them 0700 even if an older install
     # created them with the default umask.
-    if parent == STATE_DIR or parent.startswith(STATE_DIR + os.sep):
+    if (parent == STATE_DIR or parent.startswith(STATE_DIR + os.sep)
+            or parent == CONFIG_DIR):
         _ensure_private_dir(parent)
     else:
         os.makedirs(parent, exist_ok=True)
@@ -418,12 +421,29 @@ def spawn_background_refresh(namespace, args):
 
     The child re-runs the command with -r and rewrites the cache, so the next
     read is fresh. A sentinel file keeps a burst of stale reads from forking
-    one refresher each: while refresh.lock is younger than 120 s nothing new
-    is spawned, and the child deliberately never touches it (the staleness
+    one refresher each: while the per-key sentinel is younger than 120 s nothing
+    new is spawned, and the child deliberately never touches it (the staleness
     window makes deleting it racy). Never raises.
     """
     try:
-        lock = os.path.join(STATE_DIR, "refresh.lock")
+        safe_ns = "".join(c if c.isalnum() or c in "-_" else "_"
+                          for c in str(namespace))[:32] or "ns"
+        seed = "\x00".join([str(namespace)] + [str(a) for a in args])
+        digest = hashlib.sha256(seed.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+        lock = os.path.join(STATE_DIR, f"refresh-{safe_ns}-{digest}.lock")
+        try:
+            cutoff = time.time() - 600
+            for name in os.listdir(STATE_DIR):
+                if not (name.startswith("refresh-") and name.endswith(".lock")):
+                    continue
+                stale = os.path.join(STATE_DIR, name)
+                try:
+                    if os.lstat(stale).st_mtime < cutoff:
+                        os.unlink(stale)
+                except OSError:
+                    pass
+        except OSError:
+            pass
         try:
             if time.time() - os.lstat(lock).st_mtime < 120:
                 return False
@@ -516,6 +536,29 @@ def mpv_process_identity(pid):
         return start_time, executable
     except (OSError, IndexError):
         return None
+
+
+def managed_mpv_identity_matches(pid_data, expected_executable=None):
+    """Return whether pid_data identifies this plugin's own mpv instance.
+
+    Rejects anything that is not a dict with a live process whose start time,
+    executable and socket still match the recorded identity. When
+    `expected_executable` is omitted it is recomputed from the mpv on PATH.
+    """
+    if not isinstance(pid_data, dict):
+        return False
+    pid = pid_data.get("pid")
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    identity = mpv_process_identity(pid)
+    if identity is None:
+        return False
+    if expected_executable is None:
+        expected_executable = os.path.realpath(shutil.which("mpv") or "")
+    return (identity[0] == pid_data.get("start_time")
+            and identity[1] == pid_data.get("executable")
+            and identity[1] == expected_executable
+            and pid_data.get("socket") == MPV_SOCKET)
 
 
 def mpv_pid_record(proc):
@@ -782,7 +825,37 @@ def notify_track_change(previous, current):
         pass
 
 
-def get_ytmusic(require_auth=True):
+def _auth_marker_fresh():
+    """True while a recent successful auth check may be trusted.
+
+    Best-effort: any missing or unreadable marker counts as not fresh so the
+    caller falls back to a real validation.
+    """
+    try:
+        data = json_load(AUTH_VALID_PATH)
+        ts = float(data.get("ts") or 0)
+        return time.time() - ts < AUTH_VALID_TTL_SECONDS
+    except Exception:
+        return False
+
+
+def _write_auth_marker():
+    """Record a successful auth check. Best-effort: never raises."""
+    try:
+        json_dump(AUTH_VALID_PATH, {"ts": time.time()})
+    except Exception:
+        pass
+
+
+def _clear_auth_marker():
+    """Drop the auth-valid marker. Best-effort: never raises."""
+    try:
+        os.unlink(AUTH_VALID_PATH)
+    except OSError:
+        pass
+
+
+def get_ytmusic(require_auth=True, force_auth=False):
     try:
         from ytmusicapi import YTMusic
     except ImportError:
@@ -799,13 +872,17 @@ def get_ytmusic(require_auth=True):
 
     # Browser cookies can expire while the local auth file still exists. In
     # that case YouTube returns an anonymous library page instead of an error,
-    # which otherwise looks like an empty playlist collection.
-    if not validate_auth(auth):
-        fresh_auth = build_browser_auth()
-        if fresh_auth and validate_auth(fresh_auth):
-            auth = fresh_auth
-        else:
-            fail("YouTube session expired. Run: yt-music-ctl login")
+    # which otherwise looks like an empty playlist collection. The network
+    # round-trip is skipped while a recent positive check is still trusted;
+    # `force_auth` (or -r/--refresh) always revalidates.
+    if force_auth or not _auth_marker_fresh():
+        if not validate_auth(auth):
+            fresh_auth = build_browser_auth()
+            if fresh_auth and validate_auth(fresh_auth):
+                auth = fresh_auth
+            else:
+                fail("YouTube session expired. Run: yt-music-ctl login")
+        _write_auth_marker()
     json_dump(auth_path, auth)
     return YTMusic(auth_path)
 
@@ -931,12 +1008,7 @@ def mpv_kill():
     pid = pid_data.get("pid")
     identity = mpv_process_identity(pid) if isinstance(pid, int) and pid > 1 else None
     expected_executable = os.path.realpath(shutil.which("mpv") or "")
-    identity_matches = (
-        identity is not None
-        and identity[0] == pid_data.get("start_time")
-        and identity[1] == pid_data.get("executable") == expected_executable
-        and pid_data.get("socket") == MPV_SOCKET
-    )
+    identity_matches = managed_mpv_identity_matches(pid_data, expected_executable)
     if identity_matches:
         pidfd = None
         try:
@@ -1214,7 +1286,8 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
 
 def cmd_login(args):
     auth_path = os.path.join(CONFIG_DIR, "auth.json")
-    os.makedirs(CONFIG_DIR, exist_ok=True)
+    _ensure_private_dir(CONFIG_DIR)
+    _clear_auth_marker()
 
     # try to read auth straight from the browser cookies — no manual paste
     if "--manual" not in args:
@@ -1223,6 +1296,7 @@ def cmd_login(args):
         if auth:
             if validate_auth(auth):
                 json_dump(auth_path, auth)
+                _write_auth_marker()
                 print(f"Success! Auth saved to {auth_path}")
                 print("You can now use yt-music-ctl: playlists, search, play, mix, like")
                 return
@@ -1253,6 +1327,10 @@ def cmd_login(args):
         fail("Login cancelled — no changes made.")
     except Exception as e:
         fail(f"Login failed: {e}")
+    try:
+        os.chmod(auth_path, 0o600)
+    except OSError:
+        pass
     print(f"Auth saved to {auth_path}")
     print("You can now use yt-music-ctl commands: playlists, search, play, mix")
 
@@ -1274,6 +1352,7 @@ def cmd_logout(args):
         pass
     except OSError as e:
         fail(f"Could not remove {auth_path}: {e}")
+    _clear_auth_marker()
     print(json.dumps({"ok": True, "removed": removed, "authPath": auth_path}))
 
 
@@ -1378,22 +1457,25 @@ def _confirmed_ids(response, requested):
     YouTube silently drops edit actions it will not apply (private, region
     locked, or otherwise unaddable videos) while still answering
     STATUS_SUCCEEDED, so the per-item results -- not the request -- decide.
-    An action only counts when its result carries a setVideoId. If the shape
-    is not what we expect, assume the whole request landed."""
+    An action only counts when its result carries a setVideoId. Returns None
+    when the response shape cannot be trusted, so the caller can verify
+    against the playlist instead of assuming the whole request landed."""
     if not isinstance(response, dict):
-        return list(requested)
+        return None
     results = response.get("playlistEditResults")
     if not isinstance(results, list):
-        return list(requested)
+        return None
     confirmed = []
     for item in results:
         if not isinstance(item, dict):
-            continue
+            return None
         data = item.get("playlistEditVideoAddedResultData")
         if not isinstance(data, dict):
             data = item
         vid = data.get("videoId")
-        if vid and data.get("setVideoId") and vid not in confirmed:
+        if not vid:
+            return None
+        if data.get("setVideoId") and vid not in confirmed:
             confirmed.append(vid)
     return confirmed
 
@@ -1419,7 +1501,8 @@ def _add_video_ids(ytm, playlist_id, video_ids):
             ytm.rate_song(vid, "LIKE")
         added = len(ids)
     elif ids:
-        existing = ytm.get_playlist(playlist_id, limit=100)
+        # limit=None: a truncated page mis-detects duplicates and mis-resolves indices
+        existing = ytm.get_playlist(playlist_id, limit=None)
         have = {t.get("videoId") for t in (existing.get("tracks") or [])}
         duplicate_ids = [vid for vid in ids if vid in have]
         fresh = [vid for vid in ids if vid not in have]
@@ -1427,9 +1510,22 @@ def _add_video_ids(ytm, playlist_id, video_ids):
         if fresh:
             response = ytm.add_playlist_items(playlist_id, fresh, duplicates=False)
             confirmed = _confirmed_ids(response, fresh)
-            confirmed_set = set(confirmed)
-            added_ids = [vid for vid in fresh if vid in confirmed_set]
-            skipped_ids = [vid for vid in fresh if vid not in confirmed_set]
+            if confirmed is None:
+                # Unrecognised edit response: verify against the playlist
+                # itself rather than claiming the whole request landed.
+                try:
+                    after = ytm.get_playlist(playlist_id, limit=None)
+                except Exception as e:
+                    raise RuntimeError(
+                        "playlist edit returned an unrecognised response and "
+                        f"could not be verified: {e}") from e
+                present = {t.get("videoId") for t in (after.get("tracks") or [])}
+                added_ids = [vid for vid in fresh if vid in present]
+                skipped_ids = [vid for vid in fresh if vid not in present]
+            else:
+                confirmed_set = set(confirmed)
+                added_ids = [vid for vid in fresh if vid in confirmed_set]
+                skipped_ids = [vid for vid in fresh if vid not in confirmed_set]
             added = len(added_ids)
             skipped = len(skipped_ids)
     if added > 0:
@@ -1491,7 +1587,7 @@ def cmd_playlist_add_items(args):
                 rows = songs.get("results") or []
                 ids = [t.get("videoId") for t in rows if isinstance(t, dict)]
             else:  # p:<playlistId>
-                pl = ytm.get_playlist(token[2:], limit=100) or {}
+                pl = ytm.get_playlist(token[2:], limit=None) or {}
                 tracks = pl.get("tracks") if isinstance(pl, dict) else []
                 ids = [t.get("videoId") for t in (tracks or []) if isinstance(t, dict)]
             for vid in ids:
@@ -1584,7 +1680,7 @@ def cmd_playlist_move(args):
         fail(usage)
     ytm = get_ytmusic()
     try:
-        tracks = [t for t in (ytm.get_playlist(playlist_id, limit=100).get("tracks") or [])
+        tracks = [t for t in (ytm.get_playlist(playlist_id, limit=None).get("tracks") or [])
                   if t.get("videoId") and t.get("setVideoId")]
         if not (0 <= source < len(tracks)) or not (0 <= target < len(tracks)):
             print(json.dumps({"ok": False, "error": "Index out of range"}))
@@ -1718,7 +1814,7 @@ def cmd_dislike(args):
             if not playlist_id:
                 continue
             try:
-                tracks = ytm.get_playlist(playlist_id, limit=100).get("tracks") or []
+                tracks = ytm.get_playlist(playlist_id, limit=None).get("tracks") or []
                 matches = [
                     {"videoId": track["videoId"], "setVideoId": track["setVideoId"]}
                     for track in tracks
@@ -1762,22 +1858,34 @@ def cmd_unlike(args):
         print(json.dumps({"ok": False, "error": str(e)}))
 
 
+def _library_playlists(ytm):
+    """Map the account's library playlists to the JSON shape we surface."""
+    playlists = ytm.get_library_playlists(limit=50)
+    result = []
+    for pl in playlists:
+        # `count` is the real track count for owned playlists but absent
+        # for system/auto playlists (Liked Music, radio mixes, episodes),
+        # so it is reported as null rather than a bogus number.
+        raw_count = str(pl.get("count") or "").strip()
+        result.append({
+            "id": pl.get("playlistId", ""),
+            "title": pl.get("title", ""),
+            "count": int(raw_count) if raw_count.isdigit() else None,
+            "description": pl.get("description", ""),
+        })
+    return result
+
+
 def cmd_playlists(args):
     ytm = get_ytmusic()
     try:
-        playlists = ytm.get_library_playlists(limit=50)
-        result = []
-        for pl in playlists:
-            # `count` is the real track count for owned playlists but absent
-            # for system/auto playlists (Liked Music, radio mixes, episodes),
-            # so it is reported as null rather than a bogus number.
-            raw_count = str(pl.get("count") or "").strip()
-            result.append({
-                "id": pl.get("playlistId", ""),
-                "title": pl.get("title", ""),
-                "count": int(raw_count) if raw_count.isdigit() else None,
-                "description": pl.get("description", ""),
-            })
+        result = _library_playlists(ytm)
+        if not result and _auth_marker_fresh():
+            # Anonymous access looks like an empty library. Force a real
+            # revalidation (refreshing from browser cookies) and retry once.
+            _clear_auth_marker()
+            ytm = get_ytmusic(force_auth=True)
+            result = _library_playlists(ytm)
         print(json.dumps({"ok": True, "playlists": result}))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
@@ -1823,7 +1931,7 @@ def cmd_playlist_tracks(args):
             print(json.dumps(_cache_served(payload, stale=True)))
             spawn_background_refresh("playlist", [playlist_id])
             return
-    ytm = _ytmusic_for_cache("playlist", key, ttl)
+    ytm = _ytmusic_for_cache("playlist", key, ttl, force_auth=refresh)
     if ytm is None:
         return
     try:
@@ -1871,7 +1979,7 @@ def cmd_remove(args):
             print(json.dumps({"ok": True, "removed": 1}))
             return
 
-        playlist = ytm.get_playlist(playlist_id, limit=100)
+        playlist = ytm.get_playlist(playlist_id, limit=None)
         matches = [
             {"videoId": track["videoId"], "setVideoId": track["setVideoId"]}
             for track in (playlist.get("tracks") or [])
@@ -1983,7 +2091,7 @@ def cmd_liked(args):
             print(json.dumps(_cache_served(payload, stale=True)))
             spawn_background_refresh("liked", [limit])
             return
-    ytm = _ytmusic_for_cache("liked", key, ttl)
+    ytm = _ytmusic_for_cache("liked", key, ttl, force_auth=refresh)
     if ytm is None:
         return
     try:
@@ -2026,7 +2134,7 @@ def cmd_library(args):
             print(json.dumps(_cache_served(payload, stale=True)))
             spawn_background_refresh("library", [kind, limit])
             return
-    ytm = _ytmusic_for_cache("library", key, ttl)
+    ytm = _ytmusic_for_cache("library", key, ttl, force_auth=refresh)
     if ytm is None:
         return
     try:
@@ -2067,7 +2175,7 @@ def cmd_album(args):
             print(json.dumps(_cache_served(payload, stale=True)))
             spawn_background_refresh("album", [browse_id])
             return
-    ytm = _ytmusic_for_cache("album", key, ttl)
+    ytm = _ytmusic_for_cache("album", key, ttl, force_auth=refresh)
     if ytm is None:
         return
     try:
@@ -2198,7 +2306,7 @@ def cmd_artist(args):
             print(json.dumps(_cache_served(payload, stale=True)))
             spawn_background_refresh("artist", [browse_id])
             return
-    ytm = _ytmusic_for_cache("artist", key, ttl)
+    ytm = _ytmusic_for_cache("artist", key, ttl, force_auth=refresh)
     if ytm is None:
         return
     try:
@@ -2272,7 +2380,7 @@ def cmd_artist_radio(args):
             spawn_background_refresh("radio", [browse_id])
             _mix_launch(track_list)
             return
-    ytm = _ytmusic_for_cache("radio", key, ttl)
+    ytm = _ytmusic_for_cache("radio", key, ttl, force_auth=refresh)
     if ytm is None:
         return
     try:
@@ -2382,7 +2490,7 @@ def cmd_home(args):
             print(json.dumps(_cache_served(payload, stale=True)))
             spawn_background_refresh("home", [sections])
             return
-    ytm = _ytmusic_for_cache("home", key, ttl)
+    ytm = _ytmusic_for_cache("home", key, ttl, force_auth=refresh)
     if ytm is None:
         return
     try:
@@ -2425,7 +2533,7 @@ def cmd_history(args):
             print(json.dumps(_cache_served(payload, stale=True)))
             spawn_background_refresh("history", [limit])
             return
-    ytm = _ytmusic_for_cache("history", key, ttl)
+    ytm = _ytmusic_for_cache("history", key, ttl, force_auth=refresh)
     if ytm is None:
         return
     try:
@@ -2541,7 +2649,7 @@ def cmd_lyrics(args):
             print(json.dumps(_cache_served(payload, stale=True)))
             spawn_background_refresh("lyrics", [video_id])
             return
-    ytm = _ytmusic_for_cache("lyrics", key, ttl)
+    ytm = _ytmusic_for_cache("lyrics", key, ttl, force_auth=refresh)
     if ytm is None:
         return
     try:
@@ -3314,7 +3422,7 @@ def cmd_mix(args):
             spawn_background_refresh("mix", list(args))
             _mix_launch(track_list)
             return
-    ytm = get_ytmusic(require_auth=False)
+    ytm = get_ytmusic(require_auth=False, force_auth=refresh)
     try:
         watchlist = ytm.get_watch_playlist(seed_id, limit=50)
         tracks = []
@@ -3359,7 +3467,7 @@ def cmd_queue_playlist(args):
     playlist_id = args[0]
     ytm = get_ytmusic()
     try:
-        pl = ytm.get_playlist(playlist_id, limit=100)
+        pl = ytm.get_playlist(playlist_id, limit=None)
         tracks = pl.get("tracks") or []
         urls = []
         meta = []
@@ -3424,7 +3532,7 @@ def cmd_enqueue(args):
             data = ytm.get_artist(target_id)
             tracks = ((data.get("songs") or {}).get("results") or [])
         else:  # playlist
-            data = ytm.get_playlist(target_id, limit=100)
+            data = ytm.get_playlist(target_id, limit=None)
             tracks = data.get("tracks") or []
         meta = []
         for t in tracks:
@@ -3875,7 +3983,10 @@ def cmd_volume(args):
     if not args:
         props = get_mpv_props()
         return
-    vol = max(0, min(150, int(args[0])))
+    try:
+        vol = max(0, min(150, int(args[0])))
+    except (TypeError, ValueError):
+        fail("Usage: yt-music-ctl volume <0-150>")
     mpv_send("set_property", ["volume", vol])
     props = get_mpv_props()
     write_status_from_mpv(props)
@@ -3971,6 +4082,37 @@ def daemon_is_running():
             and identity[1] == record.get("executable"))
 
 
+def _daemon_log(message):
+    """Best-effort append of a timestamped line to DAEMON_LOG. Never raises."""
+    try:
+        _ensure_private_dir(STATE_DIR)
+        fd = os.open(DAEMON_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, "a") as log:
+            log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+    except Exception:
+        pass
+
+
+_REFUSED_MPV_SOCKET_UNSET = object()
+_refused_mpv_socket_signature = _REFUSED_MPV_SOCKET_UNSET
+
+
+def _log_refused_mpv_socket():
+    """Log once per distinct socket that the daemon refused to attach to."""
+    global _refused_mpv_socket_signature
+    try:
+        st = os.lstat(MPV_SOCKET)
+        signature = (st.st_ino, st.st_mtime_ns)
+    except OSError:
+        signature = None
+    if signature == _refused_mpv_socket_signature:
+        return
+    _refused_mpv_socket_signature = signature
+    _daemon_log(
+        f"refused to attach to {MPV_SOCKET}: mpv identity did not match"
+    )
+
+
 def ensure_daemon():
     """Start the detached status daemon when it is missing or stale."""
     try:
@@ -4053,6 +4195,9 @@ def daemon_stop():
 
 def monitor_mpv_events():
     """Stream mpv property changes into status.json until the socket dies."""
+    if not managed_mpv_identity_matches(load_mpv_pid() or {}):
+        _log_refused_mpv_socket()
+        return
     cache = get_mpv_props()
     if not cache:
         return
