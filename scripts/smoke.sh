@@ -1572,6 +1572,53 @@ else
     fail "track-change wait (path change, pos-only change, timeout returns dict)" "$(cat "$ERR_FILE")"
 fi
 
+# ------------------------------------------------- offline hardening (offline)
+# parse_cookie_string keeps a quoted ';' literal, refresh_auth_headers returns
+# a copy instead of mutating its argument, and the image cache predicate only
+# accepts an owned regular file (never a symlink). No network, no real state
+# directory touched.
+section "offline hardening (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import importlib.util, os, sys, tempfile
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_hardening_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# 1. One cookie parser; a ';' inside a double-quoted value is not a separator.
+cookies = mod.parse_cookie_string('a=1; b="x;y"; c=3')
+assert cookies == {"a": "1", "b": "x;y", "c": "3"}, cookies
+
+# 2. refresh_auth_headers returns a fresh dict and leaves its input untouched.
+source = {"Cookie": "__Secure-3PAPISID=abc; SID=def",
+          "Origin": "https://music.youtube.com"}
+before = dict(source)
+refreshed = mod.refresh_auth_headers(source)
+assert source == before, source
+assert refreshed is not source, refreshed
+assert refreshed.get("Authorization", "").startswith("SAPISIDHASH "), refreshed
+assert "Authorization" not in source, source
+
+# 3. The image cache predicate accepts a regular file, rejects a symlink.
+tmp = tempfile.mkdtemp(prefix="yt-music-image-")
+target = os.path.join(tmp, "real.jpg")
+with open(target, "wb") as fh:
+    fh.write(b"x")
+link = os.path.join(tmp, "link.jpg")
+os.symlink(target, link)
+assert mod._owned_regular_file(target) is True, target
+assert mod._owned_regular_file(link) is False, link
+assert mod._owned_regular_file(os.path.join(tmp, "missing.jpg")) is False
+PY
+if [[ $? -eq 0 ]]; then
+    pass "offline hardening (cookie parser, non-mutating auth, lstat image cache)"
+else
+    fail "offline hardening (cookie parser, non-mutating auth, lstat image cache)" "$(cat "$ERR_FILE")"
+fi
+
 printf '\nPASS %d / FAIL %d\n' "$PASS" "$FAIL"
 if [[ $FAIL -gt 0 ]]; then
     exit 1

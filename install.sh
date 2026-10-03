@@ -48,11 +48,27 @@ python3 -m venv "${VENV}"
 "${VENV}/bin/python" -m pip install --require-hashes --only-binary=:all: \
   -r "${ROOT}/requirements.txt"
 
-if [[ "${ROOT}" == "${PLUGIN_DIR}" ]]; then
+# Resolve both paths through any symlinks before the `rm -rf` below. A
+# string comparison can miss that the install target is this very checkout,
+# which would delete the source tree.
+ROOT_REAL=$(realpath -m -- "${ROOT}")
+PLUGIN_DIR_REAL=$(realpath -m -- "${PLUGIN_DIR}")
+
+if [[ "${ROOT_REAL}" == "${PLUGIN_DIR_REAL}" ]]; then
   # Running from inside the plugin checkout (the dev/`plugin clone --edit`
   # layout): copying would mean `rm -rf`-ing our own source tree, so skip it.
   printf 'Running inside the plugin directory; skipping the copy step.\n'
 else
+  # Refuse when the install target is an ancestor of this checkout: `rm -rf`
+  # would take the source tree with it. A differing target that is a real git
+  # checkout (matching manifest.json + .git) still proceeds as before.
+  case "${ROOT_REAL}/" in
+    "${PLUGIN_DIR_REAL}/"*)
+      printf 'Refusing to remove %s: it contains the source checkout %s\n' \
+        "${PLUGIN_DIR}" "${ROOT}" >&2
+      exit 1
+      ;;
+  esac
   rm -rf "${PLUGIN_DIR}"
   mkdir -p "${PLUGIN_DIR}"
   cp "${ROOT}/BarWidget.qml" "${ROOT}/Model.js" \

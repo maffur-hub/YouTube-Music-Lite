@@ -233,6 +233,15 @@ def _cache_path(namespace, args):
                         f"{namespace}-{_cache_key(namespace, args)}.json")
 
 
+def _owned_regular_file(path):
+    """True only for a regular file (never a symlink) owned by this user."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid()
+
+
 def cache_read(namespace, args, ttl):
     """Return (payload, fresh) for a cache key. Never raises.
 
@@ -573,29 +582,60 @@ def mpv_pid_record(proc):
     }
 
 
-def refresh_auth_headers(auth):
-    """Refresh the timestamped auth signature before using stored cookies."""
-    if not isinstance(auth, dict):
-        return auth
+def parse_cookie_string(cookie_str):
+    """Parse a Cookie header into a dict.
 
-    cookie_header = auth.get("Cookie", "")
+    Splits on `;` but treats a `;` inside a double-quoted value as literal, so
+    `b="x;y"` survives as one cookie. Surrounding quotes are stripped from the
+    value. Non-string input yields an empty dict.
+    """
     cookies = {}
-    for part in cookie_header.split(";"):
+    if not isinstance(cookie_str, str):
+        return cookies
+    parts = []
+    current = []
+    in_quotes = False
+    for char in cookie_str:
+        if char == '"':
+            in_quotes = not in_quotes
+            current.append(char)
+        elif char == ";" and not in_quotes:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    for part in parts:
         if "=" not in part:
             continue
         name, value = part.strip().split("=", 1)
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            value = value[1:-1]
         cookies[name] = value
+    return cookies
 
-    sapisid = cookies.get("__Secure-3PAPISID") or cookies.get("SAPISID")
-    if not sapisid:
+
+def refresh_auth_headers(auth):
+    """Return a copy of the auth headers with a fresh timestamped signature.
+
+    The caller's dict is never mutated; the refreshed copy is returned so the
+    caller can persist it.
+    """
+    if not isinstance(auth, dict):
         return auth
 
+    refreshed = dict(auth)
+    cookies = parse_cookie_string(refreshed.get("Cookie", ""))
+    sapisid = cookies.get("__Secure-3PAPISID") or cookies.get("SAPISID")
+    if not sapisid:
+        return refreshed
+
     import hashlib
-    origin = auth.get("Origin") or auth.get("X-Origin") or "https://music.youtube.com"
+    origin = refreshed.get("Origin") or refreshed.get("X-Origin") or "https://music.youtube.com"
     ts = str(int(time.time()))
     digest = hashlib.sha1(f"{ts} {sapisid} {origin}".encode()).hexdigest()
-    auth["Authorization"] = f"SAPISIDHASH {ts}_{digest}"
-    return auth
+    refreshed["Authorization"] = f"SAPISIDHASH {ts}_{digest}"
+    return refreshed
 
 
 def write_status(status):
@@ -868,7 +908,7 @@ def get_ytmusic(require_auth=True, force_auth=False):
     auth = json_load(auth_path)
     if not auth:
         fail("Authentication data is invalid. Run: yt-music-ctl login")
-    refresh_auth_headers(auth)
+    auth = refresh_auth_headers(auth)
 
     # Browser cookies can expire while the local auth file still exists. In
     # that case YouTube returns an anonymous library page instead of an error,
@@ -2874,7 +2914,7 @@ def cmd_image(args):
     key = hashlib.sha256(url.encode()).hexdigest()[:32]
     path = os.path.join(IMAGE_CACHE_DIR, f"{key}.jpg")
     try:
-        if os.path.isfile(path) and os.path.getsize(path) > 0:
+        if _owned_regular_file(path) and os.path.getsize(path) > 0:
             return
         request = urllib.request.Request(url, headers={"User-Agent": "yt-music-ctl/1"})
         with _urlopen_no_redirect(request, timeout=8) as response:
@@ -4129,6 +4169,20 @@ def _daemon_log(message):
         pass
 
 
+_last_daemon_error = (None, 0.0)
+
+
+def _daemon_log_throttled(message):
+    """_daemon_log, but suppressed until the message changes or 60s passes."""
+    global _last_daemon_error
+    last_message, last_time = _last_daemon_error
+    now = time.time()
+    if message == last_message and now - last_time <= 60.0:
+        return
+    _last_daemon_error = (message, now)
+    _daemon_log(message)
+
+
 _REFUSED_MPV_SOCKET_UNSET = object()
 _refused_mpv_socket_signature = _REFUSED_MPV_SOCKET_UNSET
 
@@ -4370,7 +4424,8 @@ def monitor_mpv_events():
                 flush()
             if shutdown:
                 break
-    except Exception:
+    except Exception as e:
+        _daemon_log_throttled(f"monitor_mpv_events: {e!r}")
         pass
     finally:
         try:
@@ -4432,7 +4487,8 @@ def run_daemon_loop():
                     idle = True
                 else:
                     time.sleep(0.2)
-            except Exception:
+            except Exception as e:
+                _daemon_log_throttled(f"run_daemon_loop: {e!r}")
                 time.sleep(0.5)
     finally:
         if lock_fd is not None:
