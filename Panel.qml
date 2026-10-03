@@ -139,6 +139,16 @@ Panel {
       || root.libraryMeta !== "" || root.libraryDescription !== "")
   readonly property var libraryList: root.libraryRows
   property bool queueSaved: false
+  // Max height available to the active tab's scroll viewport: the panel's
+  // usable height minus the fixed chrome above it (now-playing card, lyrics
+  // section and tab strip). tabFlick.y comes from the Column layout and does
+  // not depend on the Flickable's own height, so this is loop-free.
+  readonly property real tabBodyMaxHeight: {
+    var avail = panel.availableCardHeight - panel.verticalContentInset
+      - (tabFlick ? tabFlick.y : 0)
+    if (!isFinite(avail) || avail < Style.space(96)) avail = Style.space(96)
+    return avail
+  }
   // Track shown in the hero card: the playing track, or the most recent
   // last-played one when nothing is playing.
   readonly property var heroTrack: Model.isActive(root.musicStatus)
@@ -204,6 +214,8 @@ Panel {
     // A detail belongs to the tab it was opened from; leaving that tab shows
     // the tab's own content instead of a stale detail.
     if (root.detailActive && root.activeTab !== root.detailTab) root.closeDetail()
+    // Opening Up Next should land on the playing row, not the top of the queue.
+    if (root.activeTab === "queue") queueScrollTimer.restart()
   }
   onActiveListKindChanged: root.selectedIndex = -1
   function hasTab(key) {
@@ -383,6 +395,37 @@ Panel {
     var pos = (typeof root.queuePosition === "number") ? root.queuePosition : 0
     if (pos >= 0) remaining -= pos
     return Math.max(0, remaining)
+  }
+
+  // Index of the currently-playing/queued row, or -1. Prefers mpv's reported
+  // position, falling back to the row flagged `current` from the backend so the
+  // saved-queue (nothing playing) view works too.
+  function queueCurrentIndex() {
+    for (var i = 0; i < root.queueTracks.length; i++) {
+      var row = root.queueTracks[i]
+      if ((row && row.current) || i === root.queuePosition) return i
+    }
+    return (root.queuePosition >= 0 && root.queuePosition < root.queueTracks.length)
+      ? root.queuePosition : -1
+  }
+
+  // Bring the current queue row into view so the top of the Up Next tab is not
+  // mistaken for the next track (the list holds the whole queue, played rows
+  // included). When the row is off screen it is placed with one row of context
+  // above it, so the track after it - the real "next" - is visible too. The
+  // view is left alone when the current row is already on screen.
+  function scrollQueueToCurrent() {
+    if (root.activeTab !== "queue") return
+    var index = root.queueCurrentIndex()
+    if (index < 0) return
+    var item = queueRepeater.itemAt(index)
+    if (!item) return
+    var flick = queueListFlick
+    var pt = item.mapToItem(flick, 0, 0)
+    if (pt.y >= 0 && pt.y + item.height <= flick.height) return
+    var maxY = Math.max(0, flick.contentHeight - flick.height)
+    flick.contentY = Math.max(0, Math.min(maxY,
+      flick.contentY + pt.y - item.height))
   }
 
   function restoreSession() {
@@ -1313,22 +1356,55 @@ Panel {
     root.ensureSelectionVisible()
   }
 
+  // Viewport height for a tab's list: whatever room is left in the tab body
+  // below the fixed header rows above `item`, capped by the list's content.
+  // `item` is the list's Flickable and its y is set by the layout, so it does
+  // not depend on the Flickable's own height and this cannot loop.
+  function listViewportHeight(item, wanted) {
+    // Walk the ancestor chain reading `y` in JS (rather than mapToItem) so the
+    // binding records those properties and re-runs when the header above the
+    // list changes height or the tab is laid out.
+    var top = 0
+    var it = item
+    while (it && it !== tabBody) { top += it.y || 0; it = it.parent }
+    var avail = root.tabBodyMaxHeight - top
+    if (!isFinite(avail) || avail < 0) avail = 0
+    if (!isFinite(wanted)) return avail
+    if (wanted <= avail) return wanted
+    return Math.max(Style.space(96), avail)
+  }
+
+  // Scroll `index` of a list `repeater` into view inside `view` (defaults to
+  // the active tab's scroll viewport; each list passes its own inner viewport).
+  // Kept separate from the selection helper so the queue can scroll to the
+  // currently-playing row without moving the keyboard cursor.
+  function scrollListToRow(repeater, index, view) {
+    var flick = view || tabFlick
+    if (!repeater || index < 0) return
+    if (flick.contentHeight <= flick.height) return
+    var item = repeater.itemAt(index)
+    if (!item) return
+    var pt = item.mapToItem(flick, 0, 0)
+    var maxY = Math.max(0, flick.contentHeight - flick.height)
+    if (pt.y < 0)
+      flick.contentY = Math.max(0, flick.contentY + pt.y)
+    else if (pt.y + item.height > flick.height)
+      flick.contentY = Math.min(maxY, flick.contentY + pt.y + item.height - flick.height)
+  }
+
   function ensureSelectionVisible() {
     if (root.selectedIndex < 0) return
-    if (panelFlick.contentHeight <= panelFlick.height) return
     var repeater = root.activeListKind === "search" ? searchRepeater
       : (root.activeListKind === "last" ? lastRepeater
       : (root.activeListKind === "playlist" ? trackRepeater
       : (root.activeListKind === "library" ? libraryRepeater : queueRepeater)))
-    if (!repeater) return
-    var item = repeater.itemAt(root.selectedIndex)
-    if (!item) return
-    var pt = item.mapToItem(panelFlick, 0, 0)
-    var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
-    if (pt.y < 0)
-      panelFlick.contentY = Math.max(0, panelFlick.contentY + pt.y)
-    else if (pt.y + item.height > panelFlick.height)
-      panelFlick.contentY = Math.min(maxY, panelFlick.contentY + pt.y + item.height - panelFlick.height)
+    var view = root.activeListKind === "queue" ? queueListFlick
+      : root.activeListKind === "last" ? lastList
+      : root.activeListKind === "search" ? searchList
+      : root.activeListKind === "playlist" ? trackList
+      : root.activeListKind === "library" ? libraryView
+      : tabFlick
+    root.scrollListToRow(repeater, root.selectedIndex, view)
   }
 
   // -------------------------------------------------------------- status refresh
@@ -1537,6 +1613,7 @@ Panel {
           })
         }
         root.queueTracks = rows
+        queueScrollTimer.restart()
       } else {
         root.queueSaved = false
       }
@@ -2157,6 +2234,15 @@ Panel {
     onTriggered: { root.refresh(); root.refreshQueue(); root.refreshLastPlayed() }
   }
 
+  // Waits a beat after the queue model changes so the Repeater has created the
+  // delegate before scrollQueueToCurrent looks it up.
+  Timer {
+    id: queueScrollTimer
+    interval: 120
+    repeat: false
+    onTriggered: root.scrollQueueToCurrent()
+  }
+
   Timer {
     id: statusClear
     // Messages are transient by design: long enough to read, gone before the
@@ -2255,7 +2341,10 @@ Panel {
     property string emptyText: ""
     property var createHandler: null
     property string searchQuery: ""
-    property int highlightIndex: 0
+    // A single "active row" cursor shared by the mouse and the arrow keys, so
+    // hovering one row can never leave a second row looking selected. -1 means
+    // nothing is current until the pointer or a key picks a row.
+    property int highlightIndex: -1
 
     readonly property var shownItems: menu.searchable ? Model.filterByTitle(menu.menuItems, menu.searchQuery) : menu.menuItems
 
@@ -2313,7 +2402,7 @@ Panel {
           Layout.fillWidth: true
           implicitWidth: rowLabel.implicitWidth + 2 * Style.spacing.controlPaddingX
           implicitHeight: Style.spacing.popupRowHeight
-          color: (rowMouse.containsMouse || index === menu.highlightIndex)
+          color: index === menu.highlightIndex
             ? Style.hoverFillFor(Color.popups.text, Color.accent) : "transparent"
 
           Text {
@@ -2325,7 +2414,7 @@ Panel {
             anchors.rightMargin: Style.spacing.controlPaddingX
             textFormat: Text.PlainText
             text: String(modelData.text)
-            color: (rowMouse.containsMouse || index === menu.highlightIndex)
+            color: index === menu.highlightIndex
               ? Style.hoverStateColor(Color.popups.text, Color.accent) : Color.popups.text
             font.family: root.fam
             font.pixelSize: Style.font.body
@@ -2337,6 +2426,9 @@ Panel {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
+            // Hover and the arrow keys drive the same cursor, so only one row
+            // is ever highlighted.
+            onEntered: menu.highlightIndex = index
             onClicked: menu.trigger(modelData)
           }
         }
@@ -2411,6 +2503,10 @@ Panel {
     function moveHighlight(delta) {
       var n = menu.shownItems.length
       if (n === 0) return
+      if (menu.highlightIndex < 0) {
+        menu.highlightIndex = delta > 0 ? 0 : n - 1
+        return
+      }
       var i = (menu.highlightIndex + delta) % n
       if (i < 0) i += n
       menu.highlightIndex = i
@@ -2419,7 +2515,8 @@ Panel {
     function triggerHighlighted() {
       var n = menu.shownItems.length
       if (n === 0) { menu.triggerFirstOrCreate(); return }
-      menu.trigger(menu.shownItems[Math.max(0, Math.min(menu.highlightIndex, n - 1))])
+      var i = menu.highlightIndex < 0 ? 0 : Math.max(0, Math.min(menu.highlightIndex, n - 1))
+      menu.trigger(menu.shownItems[i])
     }
 
     // Menu.popup(parent, x, y) replacement: x/y stay relative to parentItem.
@@ -2445,7 +2542,7 @@ Panel {
     onOpened: {
       menuSearchField.text = ""
       menu.searchQuery = ""
-      menu.highlightIndex = 0
+      menu.highlightIndex = -1
       if (menu.searchable) Qt.callLater(function() { menuSearchField.forceActiveFocus() })
       else Qt.callLater(function() { menuColumn.forceActiveFocus() })
     }
@@ -3158,329 +3255,32 @@ Panel {
             }
           }
 
-          // ---- up next (queue)
-          Column {
-            visible: root.activeTab === "queue"
+          // Active tab content scrolls in its own viewport under the tab
+          // strip, so the now-playing card and tabs stay fixed on every tab.
+          Flickable {
+            id: tabFlick
             width: parent.width
-            spacing: Style.space(6)
-
-            PanelSeparator {
-              foreground: root.fg
+            height: {
+              var wanted = tabBody.implicitHeight
+              if (!isFinite(wanted)) wanted = root.tabBodyMaxHeight
+              return Math.min(Math.max(0, wanted), root.tabBodyMaxHeight)
             }
-
-            Row {
-              width: parent.width
-              height: Style.spacing.controlHeight
-              spacing: Style.spacing.sm
-
-              PanelSectionHeader {
-                id: queueHeaderTitle
-                text: "UP NEXT"
-                foreground: root.fg
-                fontFamily: root.fam
-                height: parent.height
-                verticalAlignment: Text.AlignVCenter
-              }
-
-              Item {
-                width: Math.max(0, parent.width - queueHeaderTitle.implicitWidth
-                  - queueHeaderActions.implicitWidth - Style.spacing.sm * 2)
-                height: Style.spacing.hairline
-              }
-
-              Row {
-                id: queueHeaderActions
-                spacing: Style.spacing.sm
-
-                Button {
-                  width: Style.space(60)
-                  height: Style.spacing.controlHeight
-                  text: "Resume"
-                  fontFamily: root.fam
-                  fontSize: Style.font.bodySmall
-                  foreground: root.fg
-                  visible: root.queueSaved && root.queueTracks.length > 0 && !root.selectMode
-                  enabled: !root.busy
-                  onClicked: root.restoreSession()
-                }
-
-                Button {
-                  width: Style.space(52)
-                  height: Style.spacing.controlHeight
-                  text: root.selectMode ? "Done" : "Select"
-                  iconText: root.selectMode ? Model.ICON.check : ""
-                  fontFamily: root.fam
-                  fontSize: Style.font.bodySmall
-                  foreground: root.fg
-                  visible: root.queueTracks.length > 0
-                  onClicked: {
-                    if (root.selectMode) root.clearSelection()
-                    else root.selectMode = true
-                  }
-                }
-
-                Button {
-                  width: Style.space(52)
-                  height: Style.spacing.controlHeight
-                  text: "Save"
-                  fontFamily: root.fam
-                  fontSize: Style.font.bodySmall
-                  foreground: root.fg
-                  visible: root.queueTracks.length > 0 && !root.selectMode
-                  enabled: !root.busy
-                  onClicked: root.queueSaveOpen = true
-                }
-
-                Button {
-                  width: Style.space(52)
-                  height: Style.spacing.controlHeight
-                  text: "Clear"
-                  fontFamily: root.fam
-                  fontSize: Style.font.bodySmall
-                  foreground: root.fg
-                  visible: !root.selectMode
-                  enabled: (root.queueSaved ? root.queueTracks.length > 0
-                                            : root.queueUpcomingCount() > 0) && !root.busy
-                  onClicked: root.clearQueue()
-                }
-              }
-            }
-
-            Row {
-              visible: root.selectMode
-              width: parent.width - Style.space(40)
-              height: Style.spacing.controlHeight
-              anchors.horizontalCenter: parent.horizontalCenter
-              spacing: Style.spacing.sm
-
-              Text {
-                textFormat: Text.PlainText
-                height: Style.spacing.controlHeight
-                verticalAlignment: Text.AlignVCenter
-                text: root.selectedCount + " selected"
-                color: root.fg
-                font.family: root.fam
-                font.pixelSize: Style.font.caption
-              }
-
-              Button {
-                id: queueAddSelectedButton
-                width: Style.space(120)
-                height: Style.spacing.controlHeight
-                text: "Add to playlist…"
-                iconText: Model.ICON.plus
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                enabled: root.selectedCount > 0 && root.loggedIn && !root.busy
-                onClicked: root.openPlaylistPickerForSelection(queueAddSelectedButton)
-              }
-
-              Button {
-                width: Style.space(72)
-                height: Style.spacing.controlHeight
-                text: "Remove"
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                enabled: root.selectedCount > 0 && !root.busy
-                onClicked: root.removeSelectedFromQueue()
-              }
-            }
-
-            Row {
-              visible: root.queueSaveOpen
-              width: parent.width - Style.space(40)
-              height: Style.spacing.controlHeight
-              anchors.horizontalCenter: parent.horizontalCenter
-              spacing: Style.spacing.sm
-
-              TextField {
-                id: queueSaveField
-                width: parent.width - Style.space(52) - Style.space(80) - parent.spacing * 2
-                height: Style.spacing.controlHeight
-                placeholderText: "New playlist name"
-                foreground: root.fg
-                hasCursor: false
-                onAccepted: root.saveQueueAsPlaylist()
-              }
-
-              Button {
-                width: Style.space(52)
-                height: Style.spacing.controlHeight
-                text: "Save"
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                enabled: !root.busy
-                onClicked: root.saveQueueAsPlaylist()
-              }
-
-              Button {
-                width: Style.space(80)
-                height: Style.spacing.controlHeight
-                text: "Cancel"
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                onClicked: root.queueSaveOpen = false
-              }
-            }
+            contentWidth: width
+            contentHeight: tabBody.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            flickableDirection: Flickable.VerticalFlick
+            interactive: contentHeight > height
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
             Column {
-              width: parent.width
-              spacing: 0
-
-              Repeater {
-                id: queueRepeater
-                model: root.queueTracks
-                delegate: Item {
-                  id: queueRow
-                  width: contentColumn.width
-                  height: Style.space(32)
-
-                  RowHighlight {
-                    id: queueRowBg
-                    foreground: root.fg
-                    multi: root.isRowSelected(modelData)
-                    hasCursor: index === root.selectedIndex
-                    hovered: queueRowClick.containsMouse
-                    current: modelData.current || index === root.queuePosition
-                  }
-
-                  MouseArea {
-                    id: queueRowClick
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: function(mouse) {
-                      if (root.handleRowClick(index, mouse.modifiers)) return
-                      root.selectIndex(index)
-                    }
-                  }
-
-                  Row {
-                    anchors.fill: parent
-                    spacing: Style.spacing.sm
-
-                    Item {
-                      width: Style.space(20)
-                      height: parent.height
-
-                      Text {
-                        visible: !root.selectMode
-                        anchors.left: parent.left
-                        width: Style.space(20)
-                        textFormat: Text.PlainText
-                        text: (modelData.current || index === root.queuePosition)
-                          ? Model.ICON.play
-                          : String(index + 1)
-                        color: (modelData.current || index === root.queuePosition)
-                          ? Color.accent
-                          : Qt.darker(root.fg, 1.4)
-                        font.family: root.fam
-                        font.pixelSize: Style.font.caption
-                        verticalAlignment: Text.AlignVCenter
-                      }
-
-                      Rectangle {
-                        visible: root.selectMode && !root.isRowSelected(modelData)
-                        anchors.centerIn: parent
-                        width: Style.space(12)
-                        height: Style.space(12)
-                        radius: width / 2
-                        color: "transparent"
-                        border.width: Style.normalBorderWidth
-                        border.color: Qt.darker(root.fg, 1.3)
-                      }
-
-                      Text {
-                        visible: root.isRowSelected(modelData)
-                        anchors.centerIn: parent
-                        textFormat: Text.PlainText
-                        text: Model.ICON.check
-                        color: Color.accent
-                        font.family: root.fam
-                        font.pixelSize: Style.font.caption
-                      }
-                    }
-
-                    Column {
-                      width: parent.width - Style.space(20) - Style.space(56)
-                        - Style.space(44) - Style.spacing.sm * 3
-                      spacing: 0
-
-                      Text {
-                        textFormat: Text.PlainText
-                        width: parent.width
-                        elide: Text.ElideRight
-                        text: modelData.title || "Unknown"
-                        color: root.fg
-                        font.family: root.fam
-                        font.pixelSize: Style.font.bodySmall
-                      }
-                      Text {
-                        textFormat: Text.PlainText
-                        width: parent.width
-                        elide: Text.ElideRight
-                        text: root.songSubtitle(modelData)
-                        color: Qt.darker(root.fg, 1.4)
-                        font.family: root.fam
-                        font.pixelSize: Style.font.caption
-                      }
-                    }
-
-                    Text {
-                      textFormat: Text.PlainText
-                      width: Style.space(56)
-                      text: modelData.duration > 0 ? Model.fmtDuration(modelData.duration) : ""
-                      horizontalAlignment: Text.AlignRight
-                      color: Qt.darker(root.fg, 1.4)
-                      font.family: root.fam
-                      font.pixelSize: Style.font.caption
-                      verticalAlignment: Text.AlignVCenter
-                    }
-
-                    PanelActionButton {
-                      width: Style.space(44)
-                      height: Style.space(28)
-                      iconText: Model.ICON.play
-                      tooltipText: "Jump to track"
-                      fontFamily: root.fam
-                      foreground: root.fg
-                      enabled: !root.busy
-                      onClicked: root.queueJump(index)
-                    }
-                  }
-
-                  MouseArea {
-                    anchors.fill: parent
-                    acceptedButtons: Qt.RightButton
-                    onClicked: function(mouse) {
-                      var point = queueRow.mapToItem(panelFlick, mouse.x, mouse.y)
-                      root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "queue", point.x, point.y, index)
-                      mouse.accepted = true
-                    }
-                  }
-                }
-              }
-            }
-
-            Text {
-              visible: root.queueTracks.length === 0 && !queueListProc.running
-              width: parent.width
-              textFormat: Text.PlainText
-              wrapMode: Text.WordWrap
-              text: "Queue is empty. Right-click any track and choose “Add to queue”."
-              color: Qt.darker(root.fg, 1.4)
-              font.family: root.fam
-              font.pixelSize: Style.font.bodySmall
-            }
-          }
-
-            // ---- last played (local history)
+              id: tabBody
+              width: tabFlick.width
+              spacing: Style.spacing.panelGap
+            // ---- up next (queue)
             Column {
-              visible: root.activeTab === "last"
+              id: queueSection
+              visible: root.activeTab === "queue"
               width: parent.width
               spacing: Style.space(6)
 
@@ -3494,7 +3294,8 @@ Panel {
                 spacing: Style.spacing.sm
 
                 PanelSectionHeader {
-                  text: "LAST PLAYED"
+                  id: queueHeaderTitle
+                  text: "UP NEXT"
                   foreground: root.fg
                   fontFamily: root.fam
                   height: parent.height
@@ -3502,289 +3303,79 @@ Panel {
                 }
 
                 Item {
-                  width: parent.width - Style.space(150)
+                  width: Math.max(0, parent.width - queueHeaderTitle.implicitWidth
+                    - queueHeaderActions.implicitWidth - Style.spacing.sm * 2)
                   height: Style.spacing.hairline
-                  visible: root.lastPlayed.length > 0
                 }
 
-                Button {
-                  width: Style.space(52)
-                  height: Style.spacing.controlHeight
-                  text: "Clear"
-                  fontFamily: root.fam
-                  fontSize: Style.font.bodySmall
-                  foreground: root.fg
-                  enabled: root.lastPlayed.length > 0 && !root.busy
-                  onClicked: root.clearLastPlayed()
-                }
-              }
+                Row {
+                  id: queueHeaderActions
+                  spacing: Style.spacing.sm
 
-              Column {
-                width: parent.width
-                spacing: 0
-
-                Repeater {
-                  id: lastRepeater
-                  model: root.lastPlayed
-                  delegate: Item {
-                    id: lastRow
-                    width: contentColumn.width
-                    height: Style.space(32)
-
-                    RowHighlight {
-                      id: lastRowBg
-                      foreground: root.fg
-                      hasCursor: index === root.selectedIndex
-                      hovered: lastRowClick.containsMouse
-                    }
-
-                    MouseArea {
-                      id: lastRowClick
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: { root.selectIndex(index); root.playNow(modelData.videoId) }
-                    }
-
-                    Row {
-                      anchors.fill: parent
-                      spacing: Style.spacing.sm
-
-                      Text {
-                        textFormat: Text.PlainText
-                        width: Style.space(20)
-                        text: Model.ICON.play
-                        color: Qt.darker(root.fg, 1.4)
-                        font.family: root.fam
-                        font.pixelSize: Style.font.caption
-                        verticalAlignment: Text.AlignVCenter
-                      }
-
-                      Column {
-                        width: parent.width - Style.space(20) - Style.space(56)
-                          - Style.spacing.sm * 2
-                        spacing: 0
-
-                        Text {
-                          textFormat: Text.PlainText
-                          width: parent.width
-                          elide: Text.ElideRight
-                          text: modelData.title || "Unknown"
-                          color: root.fg
-                          font.family: root.fam
-                          font.pixelSize: Style.font.bodySmall
-                        }
-                        Text {
-                          textFormat: Text.PlainText
-                          width: parent.width
-                          elide: Text.ElideRight
-                          text: root.songSubtitle(modelData)
-                          color: Qt.darker(root.fg, 1.4)
-                          font.family: root.fam
-                          font.pixelSize: Style.font.caption
-                        }
-                      }
-
-                      Text {
-                        textFormat: Text.PlainText
-                        width: Style.space(56)
-                        text: modelData.duration > 0 ? Model.fmtDuration(modelData.duration) : ""
-                        horizontalAlignment: Text.AlignRight
-                        color: Qt.darker(root.fg, 1.4)
-                        font.family: root.fam
-                        font.pixelSize: Style.font.caption
-                        verticalAlignment: Text.AlignVCenter
-                      }
-                    }
-
-                    MouseArea {
-                      anchors.fill: parent
-                      acceptedButtons: Qt.RightButton
-                      onClicked: function(mouse) {
-                        var point = lastRow.mapToItem(panelFlick, mouse.x, mouse.y)
-                        root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "last",
-                          point.x, point.y)
-                        mouse.accepted = true
-                      }
-                    }
-                  }
-                }
-              }
-
-              Text {
-                visible: root.lastPlayed.length === 0
-                width: parent.width
-                topPadding: Style.space(8)
-                text: "Nothing played yet."
-                color: Qt.darker(root.fg, 1.4)
-                font.family: root.fam
-                font.pixelSize: Style.font.bodySmall
-              }
-            }
-
-            // ---- search
-            Column {
-              visible: root.activeTab === "search" && !root.detailActive
-              width: parent.width
-              spacing: Style.spacing.sm
-
-              Row {
-                width: parent.width - Style.space(40)
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: Style.spacing.sm
-
-                TextField {
-                  id: searchField
-                  width: parent.width - Style.space(132) - Style.spacing.sm * 3
-                  height: Style.spacing.controlHeight
-                  placeholderText: "Lookup tunes..."
-                  horizontalAlignment: Text.AlignHCenter
-                  foreground: root.fg
-                  hasCursor: false
-                  onTextChanged: {
-                    var query = text.trim()
-                    root.searchQuery = query
-                    root.searchResults = []
-                    root.searching = query !== ""
-                    if (query === "") {
-                      searchDebounce.stop()
-                    } else {
-                      searchDebounce.restart()
-                    }
-                  }
-                  onAccepted: root.search(text)
-                }
-                Button {
-                  width: Style.space(44)
-                  height: Style.spacing.controlHeight
-                  iconText: Model.ICON.search
-                  tooltipText: "Search"
-                  fontFamily: root.fam
-                  foreground: root.fg
-                  enabled: !root.busy
-                  onClicked: root.search(searchField.text)
-                }
-                Button {
-                  width: Style.space(44)
-                  height: Style.spacing.controlHeight
-                  iconText: Model.ICON.close
-                  tooltipText: "Clear lookup"
-                  fontFamily: root.fam
-                  foreground: root.fg
-                  visible: searchField.text !== "" || root.searchQuery !== "" || root.searching || root.searchResults.length > 0
-                  onClicked: root.clearSearch()
-                }
-                Button {
-                  width: Style.space(44)
-                  height: Style.spacing.controlHeight
-                  iconText: Model.ICON.logout
-                  tooltipText: "Log out"
-                  fontFamily: root.fam
-                  foreground: root.fg
-                  visible: root.loggedIn
-                  enabled: !root.busy
-                  onClicked: root.logout()
-                }
-              }
-
-              Row {
-                width: parent.width - Style.space(40)
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: Style.spacing.sm
-                visible: searchField.text !== "" || root.searchQuery !== "" || root.searching || root.searchResults.length > 0
-
-                Repeater {
-                  model: [
-                    { key: "songs", label: "Songs" },
-                    { key: "albums", label: "Albums" },
-                    { key: "artists", label: "Artists" },
-                    { key: "playlists", label: "Playlists" }
-                  ]
-                  delegate: Button {
-                    width: (parent.width - Style.spacing.sm * 3) / 4
+                  Button {
+                    width: Style.space(60)
                     height: Style.spacing.controlHeight
-                    text: modelData.label
+                    text: "Resume"
                     fontFamily: root.fam
                     fontSize: Style.font.bodySmall
-                    selected: root.searchFilter === modelData.key
-                    active: root.searchFilter === modelData.key
-                    bordered: true
                     foreground: root.fg
-                    enabled: !root.searching
+                    visible: root.queueSaved && root.queueTracks.length > 0 && !root.selectMode
+                    enabled: !root.busy
+                    onClicked: root.restoreSession()
+                  }
+
+                  Button {
+                    width: Style.space(52)
+                    height: Style.spacing.controlHeight
+                    text: root.selectMode ? "Done" : "Select"
+                    iconText: root.selectMode ? Model.ICON.check : ""
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    visible: root.queueTracks.length > 0
                     onClicked: {
-                      if (root.searchFilter !== modelData.key) {
-                        root.searchFilter = modelData.key
-                        if (searchField.text.trim() !== "") root.search(searchField.text)
-                      }
+                      if (root.selectMode) root.clearSelection()
+                      else root.selectMode = true
                     }
+                  }
+
+                  Button {
+                    width: Style.space(52)
+                    height: Style.spacing.controlHeight
+                    text: "Save"
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    visible: root.queueTracks.length > 0 && !root.selectMode
+                    enabled: !root.busy
+                    onClicked: root.queueSaveOpen = true
+                  }
+
+                  Button {
+                    width: Style.space(52)
+                    height: Style.spacing.controlHeight
+                    text: "Clear"
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    visible: !root.selectMode
+                    enabled: (root.queueSaved ? root.queueTracks.length > 0
+                                              : root.queueUpcomingCount() > 0) && !root.busy
+                    onClicked: root.clearQueue()
                   }
                 }
               }
-            }
-
-          // ---- search results
-          Column {
-            visible: root.activeTab === "search" && !root.detailActive
-              && (root.searchResults.length > 0 || root.searching || root.searchQuery !== "")
-            width: parent.width
-            spacing: Style.spacing.panelGap
-
-            Text {
-              width: parent.width
-              visible: !root.searching && root.searchResults.length === 0
-                && root.searchQuery !== ""
-              textFormat: Text.PlainText
-              text: "No results for \"" + root.searchQuery + "\""
-              color: Qt.darker(root.fg, 1.4)
-              font.family: root.fam
-              font.pixelSize: Style.font.bodySmall
-              horizontalAlignment: Text.AlignHCenter
-              elide: Text.ElideRight
-            }
-
-            Item {
-              width: parent.width
-              height: Style.space(28)
-              visible: root.searchResults.length > 0
 
               Row {
-                anchors.left: parent.left
-                spacing: Style.spacing.sm
-                visible: !root.selectMode
-
-                Button {
-                  width: Style.space(72)
-                  height: Style.space(28)
-                  text: "Play all"
-                  fontFamily: root.fam
-                  fontSize: Style.font.bodySmall
-                  foreground: root.fg
-                  visible: root.searchFilter === "songs" && root.songCount(root.searchResults) > 0
-                  enabled: !root.busy && root.songCount(root.searchResults) > 0
-                  onClicked: root.enqueueFiles("play")
-                }
-
-                Button {
-                  width: Style.space(72)
-                  height: Style.space(28)
-                  text: "Queue all"
-                  fontFamily: root.fam
-                  fontSize: Style.font.bodySmall
-                  foreground: root.fg
-                  visible: root.searchFilter === "songs" && root.songCount(root.searchResults) > 0
-                  enabled: !root.busy && root.songCount(root.searchResults) > 0
-                  onClicked: root.enqueueFiles("queue")
-                }
-              }
-
-              Row {
-                anchors.left: parent.left
-                spacing: Style.spacing.sm
                 visible: root.selectMode
+                width: parent.width - Style.space(40)
+                height: Style.spacing.controlHeight
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.spacing.sm
 
                 Text {
                   textFormat: Text.PlainText
-                  height: Style.space(28)
+                  height: Style.spacing.controlHeight
                   verticalAlignment: Text.AlignVCenter
                   text: root.selectedCount + " selected"
                   color: root.fg
@@ -3793,732 +3384,1316 @@ Panel {
                 }
 
                 Button {
-                  id: addSelectedButton
+                  id: queueAddSelectedButton
                   width: Style.space(120)
-                  height: Style.space(28)
+                  height: Style.spacing.controlHeight
                   text: "Add to playlist…"
                   iconText: Model.ICON.plus
                   fontFamily: root.fam
                   fontSize: Style.font.bodySmall
                   foreground: root.fg
                   enabled: root.selectedCount > 0 && root.loggedIn && !root.busy
-                  onClicked: root.openPlaylistPickerForSelection(addSelectedButton)
+                  onClicked: root.openPlaylistPickerForSelection(queueAddSelectedButton)
                 }
 
                 Button {
                   width: Style.space(72)
-                  height: Style.space(28)
-                  text: "Queue"
-                  visible: root.selectionAllSongs
+                  height: Style.spacing.controlHeight
+                  text: "Remove"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  enabled: root.selectedCount > 0 && !root.busy
+                  onClicked: root.removeSelectedFromQueue()
+                }
+              }
+
+              Row {
+                visible: root.queueSaveOpen
+                width: parent.width - Style.space(40)
+                height: Style.spacing.controlHeight
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.spacing.sm
+
+                TextField {
+                  id: queueSaveField
+                  width: parent.width - Style.space(52) - Style.space(80) - parent.spacing * 2
+                  height: Style.spacing.controlHeight
+                  placeholderText: "New playlist name"
+                  foreground: root.fg
+                  hasCursor: false
+                  onAccepted: root.saveQueueAsPlaylist()
+                }
+
+                Button {
+                  width: Style.space(52)
+                  height: Style.spacing.controlHeight
+                  text: "Save"
                   fontFamily: root.fam
                   fontSize: Style.font.bodySmall
                   foreground: root.fg
                   enabled: !root.busy
-                  onClicked: {
-                    var ids = Model.videoIds(root.selectedRows)
-                    if (ids.length > 0) root.sendCmd("enqueue-files", ["queue"].concat(ids))
-                    root.clearSelection()
-                  }
-                }
-              }
-
-              Button {
-                id: selectToggleButton
-                anchors.right: parent.right
-                width: Style.space(72)
-                height: Style.space(28)
-                text: root.selectMode ? "Done" : "Select"
-                iconText: root.selectMode ? Model.ICON.check : ""
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                bordered: true
-                onClicked: {
-                  if (root.selectMode) root.clearSelection()
-                  else root.selectMode = true
-                }
-              }
-            }
-
-            Text {
-              visible: root.selectMode
-              width: parent.width
-              wrapMode: Text.WordWrap
-              textFormat: Text.PlainText
-              text: "Click rows to select. Shift-click for a range, Ctrl-click to toggle."
-              color: Qt.darker(root.fg, 1.4)
-              font.family: root.fam
-              font.pixelSize: Style.font.caption
-            }
-
-            PanelSectionHeader {
-              text: "SEARCH RESULTS — " + root.searchQuery.toUpperCase()
-              foreground: root.fg
-              fontFamily: root.fam
-            }
-
-            Text {
-              visible: root.searching
-              textFormat: Text.PlainText
-              text: "Searching…"
-              color: Qt.darker(root.fg, 1.4)
-              font.family: root.fam
-              font.pixelSize: Style.font.bodySmall
-            }
-
-            Repeater {
-              id: searchRepeater
-              model: root.searchResults
-              delegate: Item {
-                id: searchRow
-                width: contentColumn.width
-                height: Style.space(40)
-
-                RowHighlight {
-                  id: searchRowBg
-                  foreground: root.fg
-                  multi: root.isRowSelected(modelData)
-                  hasCursor: index === root.selectedIndex
-                  hovered: searchRowClick.containsMouse
+                  onClicked: root.saveQueueAsPlaylist()
                 }
 
-                MouseArea {
-                  id: searchRowClick
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: function(mouse) {
-                    if (root.handleRowClick(index, mouse.modifiers)) return
-                    root.selectIndex(index)
-                    if (modelData.kind !== "song") root.openRow(modelData, true)
-                  }
-                }
-
-                Row {
-                  anchors.fill: parent
-                  spacing: Style.spacing.sm
-
-                  Item {
-                    width: Style.space(24)
-                    height: parent.height
-
-                    Text {
-                      visible: !root.selectMode
-                      anchors.left: parent.left
-                      anchors.verticalCenter: parent.verticalCenter
-                      textFormat: Text.PlainText
-                      width: Style.space(24)
-                      text: modelData.kind === "song" ? Model.ICON.note
-                        : (modelData.kind === "playlist" ? Model.ICON.playlist : Model.ICON.music)
-                      color: Color.accent
-                      font.family: root.fam
-                      font.pixelSize: Style.font.bodySmall
-                      verticalAlignment: Text.AlignVCenter
-                    }
-
-                    Rectangle {
-                      visible: root.selectMode && !root.isRowSelected(modelData)
-                      anchors.centerIn: parent
-                      width: Style.space(14)
-                      height: Style.space(14)
-                      radius: width / 2
-                      color: "transparent"
-                      border.width: Style.normalBorderWidth
-                      border.color: Qt.darker(root.fg, 1.3)
-                    }
-
-                    Text {
-                      visible: root.isRowSelected(modelData)
-                      anchors.centerIn: parent
-                      textFormat: Text.PlainText
-                      text: Model.ICON.check
-                      color: Color.accent
-                      font.family: root.fam
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                  }
-
-                  Column {
-                    width: modelData.kind === "song"
-                      ? parent.width - Style.space(24) - Style.space(176)
-                        - Style.spacing.sm * 4
-                      : parent.width - Style.space(24) - Style.space(44)
-                        - Style.spacing.sm * 2
-                    spacing: 0
-
-                    Text {
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      elide: Text.ElideRight
-                      text: modelData.title
-                      color: root.fg
-                      font.family: root.fam
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                    Text {
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      elide: Text.ElideRight
-                      text: root.songSubtitle(modelData)
-                      color: Qt.darker(root.fg, 1.4)
-                      font.family: root.fam
-                      font.pixelSize: Style.font.caption
-                    }
-                  }
-
-                  Text {
-                    visible: modelData.kind === "song"
-                    textFormat: Text.PlainText
-                    width: Style.space(80)
-                    text: Model.fmtDuration(modelData.duration)
-                    horizontalAlignment: Text.AlignRight
-                    color: Qt.darker(root.fg, 1.4)
-                    font.family: root.fam
-                    font.pixelSize: Style.font.caption
-                    verticalAlignment: Text.AlignVCenter
-                  }
-
-                  PanelActionButton {
-                    visible: modelData.kind === "song"
-                    width: Style.space(52)
-                    height: Style.space(28)
-                    iconText: Model.ICON.play
-                    tooltipText: "Play"
-                    fontFamily: root.fam
-                    foreground: root.fg
-                    enabled: !root.busy
-                    onClicked: root.playNow(modelData.videoId)
-                  }
-
-                  PanelActionButton {
-                    visible: modelData.kind === "song"
-                    width: Style.space(44)
-                    height: Style.space(28)
-                    iconText: Model.ICON.shuffle
-                    tooltipText: "Start mix"
-                    fontFamily: root.fam
-                    foreground: root.fg
-                    enabled: !root.busy
-                    onClicked: root.playMix(modelData.videoId)
-                  }
-
-                  Text {
-                    visible: modelData.kind !== "song"
-                    textFormat: Text.PlainText
-                    width: Style.space(44)
-                    text: "›"
-                    horizontalAlignment: Text.AlignRight
-                    color: Color.accent
-                    font.family: root.fam
-                    font.pixelSize: Style.font.body
-                    verticalAlignment: Text.AlignVCenter
-                  }
-                }
-
-                MouseArea {
-                  anchors.fill: parent
-                  acceptedButtons: Qt.RightButton
-                  onClicked: function(mouse) {
-                    var point = searchRow.mapToItem(panelFlick, mouse.x, mouse.y)
-                    root.openRowMenu(modelData, "search", point.x, point.y)
-                    mouse.accepted = true
-                  }
-                }
-              }
-            }
-          }
-
-          // ---- playlists
-          Column {
-            visible: root.loggedIn && root.activeTab === "playlists" && !root.detailActive
-            width: parent.width
-            spacing: Style.spacing.panelGap
-
-            Row {
-              width: parent.width - Style.space(40)
-              height: Style.spacing.controlHeight
-              anchors.horizontalCenter: parent.horizontalCenter
-              spacing: Style.spacing.sm
-
-              TextField {
-                id: newPlaylistField
-                width: parent.width - Style.space(116) - parent.spacing
-                height: Style.spacing.controlHeight
-                placeholderText: "New playlist name"
-                foreground: root.fg
-                hasCursor: false
-                onTextChanged: root.newPlaylistName = text
-                onAccepted: root.createPlaylist()
-              }
-
-              Button {
-                width: Style.space(116)
-                height: Style.spacing.controlHeight
-                text: "Create"
-                iconText: Model.ICON.plus
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                enabled: root.newPlaylistName.trim() !== "" && !root.busy
-                onClicked: root.createPlaylist()
-              }
-            }
-
-            Text {
-              visible: root.playlists.length === 0 && !playlistsProc.running
-              textFormat: Text.PlainText
-              text: "No playlists yet."
-              color: Qt.darker(root.fg, 1.4)
-              font.family: root.fam
-              font.pixelSize: Style.font.bodySmall
-            }
-
-            Repeater {
-              model: root.playlists
-              delegate: Item {
-                id: playlistRow
-                width: contentColumn.width
-                height: Style.space(40)
-
-                RowHighlight {
-                  id: playlistRowBg
-                  foreground: root.fg
-                  hasCursor: index === root.selectedIndex
-                  hovered: playlistRowClick.containsMouse
-                }
-
-                MouseArea {
-                  id: playlistRowClick
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.openPlaylist(modelData.id, modelData.title)
-                }
-
-                Row {
-                  anchors.fill: parent
-                  spacing: Style.spacing.sm
-
-                  Text {
-                    textFormat: Text.PlainText
-                    width: Style.space(24)
-                    text: Model.ICON.playlist
-                    color: Color.accent
-                    font.family: root.fam
-                    font.pixelSize: Style.font.bodySmall
-                    verticalAlignment: Text.AlignVCenter
-                  }
-
-                  Column {
-                    width: parent.width - Style.space(24) - Style.space(56)
-                      - Style.space(40) - Style.spacing.sm * 3
-                    spacing: 0
-
-                    Text {
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      elide: Text.ElideRight
-                      text: modelData.title
-                      color: root.fg
-                      font.family: root.fam
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                    Text {
-                      visible: modelData.description !== ""
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      elide: Text.ElideRight
-                      text: modelData.description
-                      color: Qt.darker(root.fg, 1.4)
-                      font.family: root.fam
-                      font.pixelSize: Style.font.caption
-                    }
-                  }
-
-                  Text {
-                    textFormat: Text.PlainText
-                    width: Style.space(40)
-                    text: "›"
-                    horizontalAlignment: Text.AlignRight
-                    color: Color.accent
-                    font.family: root.fam
-                    font.pixelSize: Style.font.body
-                    verticalAlignment: Text.AlignVCenter
-                  }
-                }
-              }
-            }
-           }
-
-            // ---- playlist tracks view
-          Column {
-            visible: root.playlistDetail && root.playlistTracks.length > 0
-            width: parent.width
-            spacing: Style.spacing.panelGap
-
-            Item {
-              width: parent.width
-              height: Style.space(24)
-
-              Text {
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: root.activePlaylistTitle.toUpperCase() + " (" + root.playlistTracks.length + ")"
-                color: root.fg
-                font.family: root.fam
-                font.pixelSize: Style.font.caption
-                font.bold: true
-                verticalAlignment: Text.AlignVCenter
-              }
-
-              Button {
-                id: playlistOptionsButton
-                anchors.right: playPlaylistButton.left
-                anchors.rightMargin: Style.space(4)
-                anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(32)
-                height: Style.space(24)
-                iconText: Model.ICON.more
-                tooltipText: "Playlist options"
-                fontFamily: root.fam
-                foreground: root.fg
-                onClicked: root.openPlaylistOptions(playlistOptionsButton)
-              }
-
-              Button {
-                id: playPlaylistButton
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(32)
-                height: Style.space(24)
-                iconText: Model.ICON.play
-                tooltipText: "Play playlist"
-                fontFamily: root.fam
-                foreground: Color.accent
-                onClicked: root.playSelectedPlaylist()
-              }
-
-            }
-
-            Row {
-              visible: root.renameOpen
-              width: parent.width - Style.space(40)
-              height: Style.spacing.controlHeight
-              anchors.horizontalCenter: parent.horizontalCenter
-              spacing: Style.spacing.sm
-
-              TextField {
-                id: renameField
-                width: parent.width - Style.space(52) - Style.space(80) - parent.spacing * 2
-                height: Style.spacing.controlHeight
-                placeholderText: "Playlist name"
-                foreground: root.fg
-                hasCursor: false
-                onAccepted: root.renameActivePlaylist()
-                onVisibleChanged: if (visible) {
-                  text = root.activePlaylistTitle
-                  forceActiveFocus()
-                }
-              }
-
-              Button {
-                width: Style.space(52)
-                height: Style.spacing.controlHeight
-                text: "Save"
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                enabled: !root.busy
-                onClicked: root.renameActivePlaylist()
-              }
-
-              Button {
-                width: Style.space(80)
-                height: Style.spacing.controlHeight
-                text: "Cancel"
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                onClicked: root.renameOpen = false
-              }
-            }
-
-            Repeater {
-              id: trackRepeater
-              model: root.playlistTracks
-              delegate: Item {
-                id: trackRow
-                width: contentColumn.width
-                height: Style.space(36)
-
-                RowHighlight {
-                  id: trackRowBg
-                  foreground: root.fg
-                  hasCursor: index === root.selectedIndex
-                  hovered: trackRowClick.containsMouse
-                }
-
-                MouseArea {
-                  id: trackRowClick
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.selectedIndex = index
-                }
-
-                Row {
-                  anchors.fill: parent
-                  spacing: Style.spacing.sm
-
-                  Text {
-                    textFormat: Text.PlainText
-                    width: Style.space(20)
-                    text: index + 1
-                    color: Qt.darker(root.fg, 1.4)
-                    font.family: root.fam
-                    font.pixelSize: Style.font.caption
-                    verticalAlignment: Text.AlignVCenter
-                  }
-
-                  Column {
-                    width: parent.width - Style.space(20) - Style.space(200)
-                    spacing: 0
-
-                    Text {
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      elide: Text.ElideRight
-                      text: modelData.title
-                      color: root.fg
-                      font.family: root.fam
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                    Text {
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      elide: Text.ElideRight
-                      text: root.songSubtitle(modelData)
-                      color: Qt.darker(root.fg, 1.4)
-                      font.family: root.fam
-                      font.pixelSize: Style.font.caption
-                    }
-                  }
-
-                  Text {
-                    textFormat: Text.PlainText
-                    width: Style.space(64)
-                    text: Model.fmtDuration(modelData.duration)
-                    horizontalAlignment: Text.AlignRight
-                    color: Qt.darker(root.fg, 1.4)
-                    font.family: root.fam
-                    font.pixelSize: Style.font.caption
-                    verticalAlignment: Text.AlignVCenter
-                  }
-
-                  PanelActionButton {
-                    width: Style.space(52)
-                    height: Style.space(28)
-                    iconText: Model.ICON.play
-                    tooltipText: "Play"
-                    fontFamily: root.fam
-                    foreground: root.fg
-                    enabled: !root.busy
-                    onClicked: root.playNow(modelData.videoId)
-                  }
-
-                  PanelActionButton {
-                    width: Style.space(44)
-                    height: Style.space(28)
-                    iconText: Model.ICON.shuffle
-                    tooltipText: "Start mix"
-                    fontFamily: root.fam
-                    foreground: root.fg
-                    enabled: !root.busy
-                    onClicked: root.playMix(modelData.videoId)
-                  }
-                }
-
-                MouseArea {
-                  anchors.fill: parent
-                  acceptedButtons: Qt.RightButton
-                  onClicked: function(mouse) {
-                    var point = trackRow.mapToItem(panelFlick, mouse.x, mouse.y)
-                    root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "track", point.x, point.y, index)
-                    mouse.accepted = true
-                  }
-                }
-              }
-            }
-          }
-
-          Text {
-            visible: root.playlistDetail
-              && (root.loadingText !== ""
-                || (root.playlistTracks.length === 0 && !tracksProc.running))
-            textFormat: Text.PlainText
-            text: root.loadingText !== "" ? root.loadingText : "Playlist is empty."
-            color: Qt.darker(root.fg, 1.4)
-            font.family: root.fam
-            font.pixelSize: Style.font.bodySmall
-          }
-
-          // ---- library
-          Column {
-            visible: root.loggedIn && (root.activeTab === "library" || root.libraryDetail)
-            width: parent.width
-            spacing: Style.spacing.panelGap
-
-            Row {
-              width: parent.width - Style.space(40)
-              anchors.horizontalCenter: parent.horizontalCenter
-              spacing: Style.spacing.sm
-              visible: !root.libraryDetail
-
-              Repeater {
-                model: [
-                  { key: "home", label: "Home" },
-                  { key: "history", label: "Recent" },
-                  { key: "liked", label: "Liked" },
-                  { key: "songs", label: "Songs" },
-                  { key: "albums", label: "Albums" },
-                  { key: "artists", label: "Artists" }
-                ]
-                delegate: Button {
-                  width: (parent.width - Style.spacing.sm * 5) / 6
+                Button {
+                  width: Style.space(80)
                   height: Style.spacing.controlHeight
-                  text: modelData.label
+                  text: "Cancel"
                   fontFamily: root.fam
                   fontSize: Style.font.bodySmall
-                  selected: root.libraryKind === modelData.key
-                  active: root.libraryKind === modelData.key
-                  bordered: true
                   foreground: root.fg
-                  enabled: !libraryProc.running
-                  onClicked: root.loadLibrary(modelData.key)
+                  onClicked: root.queueSaveOpen = false
                 }
               }
-            }
 
-            Row {
-              width: parent.width
-              height: Style.space(28)
-              visible: (root.activeTab === "library" || root.libraryDetail)
-                && root.libraryKind !== ""
-              spacing: Style.spacing.sm
+              // The list scrolls on its own so the panel chrome above it -
+              // now-playing card, tabs and the UP NEXT header - stays fixed.
+              Flickable {
+                id: queueListFlick
+                width: parent.width
+                // Bound the viewport to the space left under the fixed chrome.
+                // The positioner coordinates can be momentarily undefined while
+                // the section lays out, so guard against a non-finite result: a
+                // NaN here would collapse the whole panel.
+                height: {
+                  if (root.queueTracks.length === 0) return 0
+                  var top = (queueSection.y || 0) + (queueListFlick.y || 0)
+                  var avail = root.tabBodyMaxHeight - top
+                  if (!isFinite(avail) || avail < Style.space(96)) avail = Style.space(96)
+                  var wanted = queueListContent.implicitHeight
+                  if (!isFinite(wanted)) return avail
+                  return Math.max(Style.space(96), Math.min(wanted, avail))
+                }
+                contentWidth: width
+                contentHeight: queueListContent.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                interactive: contentHeight > height
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-              Button {
-                width: Style.space(72)
-                height: Style.space(28)
-                text: "Back"
-                iconText: Model.ICON.arrowLeft
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                onClicked: root.libraryBack()
-              }
+                Column {
+                  id: queueListContent
+                  width: parent.width
+                  spacing: 0
 
-              Button {
-                visible: root.libraryKind === "album" || root.libraryKind === "artist"
-                enabled: !root.busy && root.librarySongCount() > 0
-                width: Style.space(72)
-                height: Style.space(28)
-                text: "Play all"
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                onClicked: root.enqueueNav("play", root.libraryKind, root.libraryRefId)
-              }
+                  Repeater {
+                    id: queueRepeater
+                    model: root.queueTracks
+                    delegate: Item {
+                      id: queueRow
+                      width: contentColumn.width
+                      height: Style.space(32)
 
-              Button {
-                visible: root.libraryKind === "album" || root.libraryKind === "artist"
-                enabled: !root.busy && root.librarySongCount() > 0
-                width: Style.space(72)
-                height: Style.space(28)
-                text: "Queue all"
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                onClicked: root.enqueueNav("queue", root.libraryKind, root.libraryRefId)
-              }
+                      RowHighlight {
+                        id: queueRowBg
+                        foreground: root.fg
+                        multi: root.isRowSelected(modelData)
+                        hasCursor: index === root.selectedIndex
+                        hovered: queueRowClick.containsMouse
+                        current: modelData.current || index === root.queuePosition
+                      }
 
-              Button {
-                visible: root.libraryKind === "album" && root.loggedIn
-                enabled: root.libraryRefId !== ""
-                width: Style.space(72)
-                height: Style.space(28)
-                text: root.albumInLibrary ? "Remove" : "Save"
-                fontFamily: root.fam
-                fontSize: Style.font.bodySmall
-                foreground: root.fg
-                onClicked: root.queueAlbumLibrary(root.albumInLibrary ? "album-remove" : "album-save", root.libraryRefId)
+                      MouseArea {
+                        id: queueRowClick
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: function(mouse) {
+                          if (root.handleRowClick(index, mouse.modifiers)) return
+                          root.selectIndex(index)
+                        }
+                      }
+
+                      Row {
+                        anchors.fill: parent
+                        spacing: Style.spacing.sm
+
+                        Item {
+                          width: Style.space(20)
+                          height: parent.height
+
+                          Text {
+                            visible: !root.selectMode
+                            anchors.left: parent.left
+                            width: Style.space(20)
+                            textFormat: Text.PlainText
+                            text: (modelData.current || index === root.queuePosition)
+                              ? Model.ICON.play
+                              : String(index + 1)
+                            color: (modelData.current || index === root.queuePosition)
+                              ? Color.accent
+                              : Qt.darker(root.fg, 1.4)
+                            font.family: root.fam
+                            font.pixelSize: Style.font.caption
+                            verticalAlignment: Text.AlignVCenter
+                          }
+
+                          Rectangle {
+                            visible: root.selectMode && !root.isRowSelected(modelData)
+                            anchors.centerIn: parent
+                            width: Style.space(12)
+                            height: Style.space(12)
+                            radius: width / 2
+                            color: "transparent"
+                            border.width: Style.normalBorderWidth
+                            border.color: Qt.darker(root.fg, 1.3)
+                          }
+
+                          Text {
+                            visible: root.isRowSelected(modelData)
+                            anchors.centerIn: parent
+                            textFormat: Text.PlainText
+                            text: Model.ICON.check
+                            color: Color.accent
+                            font.family: root.fam
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+
+                        Column {
+                          width: parent.width - Style.space(20) - Style.space(56)
+                            - Style.space(44) - Style.spacing.sm * 3
+                          spacing: 0
+
+                          Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: modelData.title || "Unknown"
+                            color: root.fg
+                            font.family: root.fam
+                            font.pixelSize: Style.font.bodySmall
+                          }
+                          Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: root.songSubtitle(modelData)
+                            color: Qt.darker(root.fg, 1.4)
+                            font.family: root.fam
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+
+                        Text {
+                          textFormat: Text.PlainText
+                          width: Style.space(56)
+                          text: modelData.duration > 0 ? Model.fmtDuration(modelData.duration) : ""
+                          horizontalAlignment: Text.AlignRight
+                          color: Qt.darker(root.fg, 1.4)
+                          font.family: root.fam
+                          font.pixelSize: Style.font.caption
+                          verticalAlignment: Text.AlignVCenter
+                        }
+
+                        PanelActionButton {
+                          width: Style.space(44)
+                          height: Style.space(28)
+                          iconText: Model.ICON.play
+                          tooltipText: "Jump to track"
+                          fontFamily: root.fam
+                          foreground: root.fg
+                          enabled: !root.busy
+                          onClicked: root.queueJump(index)
+                        }
+                      }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.RightButton
+                        onClicked: function(mouse) {
+                          var point = queueRow.mapToItem(panelFlick, mouse.x, mouse.y)
+                          root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "queue", point.x, point.y, index)
+                          mouse.accepted = true
+                        }
+                      }
+                    }
+                  }
+                }
+
               }
 
               Text {
-                visible: !root.libraryRichHeader
-                width: parent.width - Style.space(72)
-                  - ((root.libraryKind === "album" || root.libraryKind === "artist")
-                    ? Style.space(144) + Style.spacing.sm * 2 : 0)
-                  - (root.libraryKind === "album" ? Style.space(72) + Style.spacing.sm : 0)
-                  - Style.spacing.sm
-                height: Style.space(28)
-                elide: Text.ElideRight
-                verticalAlignment: Text.AlignVCenter
+                visible: root.queueTracks.length === 0 && !queueListProc.running
+                width: parent.width
                 textFormat: Text.PlainText
-                text: root.libraryTitle
-                  + (root.librarySubtitle !== "" ? "  ·  " + root.librarySubtitle : "")
-                color: root.fg
+                wrapMode: Text.WordWrap
+                text: "Queue is empty. Right-click any track and choose “Add to queue”."
+                color: Qt.darker(root.fg, 1.4)
                 font.family: root.fam
                 font.pixelSize: Style.font.bodySmall
-                font.bold: true
               }
             }
 
-            Row {
-              width: parent.width - Style.space(40)
-              anchors.horizontalCenter: parent.horizontalCenter
-              spacing: Style.space(12)
-              visible: root.libraryRichHeader
+              // ---- last played (local history)
+              Column {
+                visible: root.activeTab === "last"
+                width: parent.width
+                spacing: Style.space(6)
 
-              Rectangle {
-                id: libraryCover
-                visible: root.libraryImageSource !== "" || root.libraryThumbUrl !== ""
-                width: Style.space(96)
-                height: Style.space(96)
-                radius: Style.cornerRadius
-                color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.1)
-                clip: true
-
-                Image {
-                  id: libraryCoverImage
-                  anchors.fill: parent
-                  source: root.libraryImageSource
-                  fillMode: Image.PreserveAspectCrop
-                  asynchronous: true
-                  cache: true
-                  sourceSize.width: 96
-                  sourceSize.height: 96
+                PanelSeparator {
+                  foreground: root.fg
                 }
 
+                Row {
+                  width: parent.width
+                  height: Style.spacing.controlHeight
+                  spacing: Style.spacing.sm
+
+                  PanelSectionHeader {
+                    text: "LAST PLAYED"
+                    foreground: root.fg
+                    fontFamily: root.fam
+                    height: parent.height
+                    verticalAlignment: Text.AlignVCenter
+                  }
+
+                  Item {
+                    width: parent.width - Style.space(150)
+                    height: Style.spacing.hairline
+                    visible: root.lastPlayed.length > 0
+                  }
+
+                  Button {
+                    width: Style.space(52)
+                    height: Style.spacing.controlHeight
+                    text: "Clear"
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    enabled: root.lastPlayed.length > 0 && !root.busy
+                    onClicked: root.clearLastPlayed()
+                  }
+                }
+
+                Flickable {
+                  id: lastList
+                  width: parent.width
+                  height: root.listViewportHeight(lastList, lastListContent.implicitHeight)
+                  contentWidth: width
+                  contentHeight: lastListContent.implicitHeight
+                  clip: true
+                  boundsBehavior: Flickable.StopAtBounds
+                  flickableDirection: Flickable.VerticalFlick
+                  interactive: contentHeight > height
+                  ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                  Column {
+                    id: lastListContent
+                    width: parent.width
+                    spacing: 0
+
+                    Column {
+                      width: parent.width
+                      spacing: 0
+
+                      Repeater {
+                        id: lastRepeater
+                        model: root.lastPlayed
+                        delegate: Item {
+                          id: lastRow
+                          width: contentColumn.width
+                          height: Style.space(32)
+
+                          RowHighlight {
+                            id: lastRowBg
+                            foreground: root.fg
+                            hasCursor: index === root.selectedIndex
+                            hovered: lastRowClick.containsMouse
+                          }
+
+                          MouseArea {
+                            id: lastRowClick
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: { root.selectIndex(index); root.playNow(modelData.videoId) }
+                          }
+
+                          Row {
+                            anchors.fill: parent
+                            spacing: Style.spacing.sm
+
+                            Text {
+                              textFormat: Text.PlainText
+                              width: Style.space(20)
+                              text: Model.ICON.play
+                              color: Qt.darker(root.fg, 1.4)
+                              font.family: root.fam
+                              font.pixelSize: Style.font.caption
+                              verticalAlignment: Text.AlignVCenter
+                            }
+
+                            Column {
+                              width: parent.width - Style.space(20) - Style.space(56)
+                                - Style.spacing.sm * 2
+                              spacing: 0
+
+                              Text {
+                                textFormat: Text.PlainText
+                                width: parent.width
+                                elide: Text.ElideRight
+                                text: modelData.title || "Unknown"
+                                color: root.fg
+                                font.family: root.fam
+                                font.pixelSize: Style.font.bodySmall
+                              }
+                              Text {
+                                textFormat: Text.PlainText
+                                width: parent.width
+                                elide: Text.ElideRight
+                                text: root.songSubtitle(modelData)
+                                color: Qt.darker(root.fg, 1.4)
+                                font.family: root.fam
+                                font.pixelSize: Style.font.caption
+                              }
+                            }
+
+                            Text {
+                              textFormat: Text.PlainText
+                              width: Style.space(56)
+                              text: modelData.duration > 0 ? Model.fmtDuration(modelData.duration) : ""
+                              horizontalAlignment: Text.AlignRight
+                              color: Qt.darker(root.fg, 1.4)
+                              font.family: root.fam
+                              font.pixelSize: Style.font.caption
+                              verticalAlignment: Text.AlignVCenter
+                            }
+                          }
+
+                          MouseArea {
+                            anchors.fill: parent
+                            acceptedButtons: Qt.RightButton
+                            onClicked: function(mouse) {
+                              var point = lastRow.mapToItem(panelFlick, mouse.x, mouse.y)
+                              root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "last",
+                                point.x, point.y)
+                              mouse.accepted = true
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+
+
                 Text {
-                  anchors.centerIn: parent
-                  visible: libraryCoverImage.status !== Image.Ready
-                  text: Model.ICON.note
-                  color: Color.accent
+                  visible: root.lastPlayed.length === 0
+                  width: parent.width
+                  topPadding: Style.space(8)
+                  text: "Nothing played yet."
+                  color: Qt.darker(root.fg, 1.4)
                   font.family: root.fam
-                  font.pixelSize: Style.font.displayLarge
+                  font.pixelSize: Style.font.bodySmall
                 }
               }
 
+              // ---- search
               Column {
+                visible: root.activeTab === "search" && !root.detailActive
                 width: parent.width
-                  - (libraryCover.visible ? libraryCover.width + Style.space(12) : 0)
-                spacing: Style.space(3)
+                spacing: Style.spacing.sm
+
+                Row {
+                  width: parent.width - Style.space(40)
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  spacing: Style.spacing.sm
+
+                  TextField {
+                    id: searchField
+                    width: parent.width - Style.space(132) - Style.spacing.sm * 3
+                    height: Style.spacing.controlHeight
+                    placeholderText: "Lookup tunes..."
+                    horizontalAlignment: Text.AlignHCenter
+                    foreground: root.fg
+                    hasCursor: false
+                    onTextChanged: {
+                      var query = text.trim()
+                      root.searchQuery = query
+                      root.searchResults = []
+                      root.searching = query !== ""
+                      if (query === "") {
+                        searchDebounce.stop()
+                      } else {
+                        searchDebounce.restart()
+                      }
+                    }
+                    onAccepted: root.search(text)
+                  }
+                  Button {
+                    width: Style.space(44)
+                    height: Style.spacing.controlHeight
+                    iconText: Model.ICON.search
+                    tooltipText: "Search"
+                    fontFamily: root.fam
+                    foreground: root.fg
+                    enabled: !root.busy
+                    onClicked: root.search(searchField.text)
+                  }
+                  Button {
+                    width: Style.space(44)
+                    height: Style.spacing.controlHeight
+                    iconText: Model.ICON.close
+                    tooltipText: "Clear lookup"
+                    fontFamily: root.fam
+                    foreground: root.fg
+                    visible: searchField.text !== "" || root.searchQuery !== "" || root.searching || root.searchResults.length > 0
+                    onClicked: root.clearSearch()
+                  }
+                  Button {
+                    width: Style.space(44)
+                    height: Style.spacing.controlHeight
+                    iconText: Model.ICON.logout
+                    tooltipText: "Log out"
+                    fontFamily: root.fam
+                    foreground: root.fg
+                    visible: root.loggedIn
+                    enabled: !root.busy
+                    onClicked: root.logout()
+                  }
+                }
+
+                Row {
+                  width: parent.width - Style.space(40)
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  spacing: Style.spacing.sm
+                  visible: searchField.text !== "" || root.searchQuery !== "" || root.searching || root.searchResults.length > 0
+
+                  Repeater {
+                    model: [
+                      { key: "songs", label: "Songs" },
+                      { key: "albums", label: "Albums" },
+                      { key: "artists", label: "Artists" },
+                      { key: "playlists", label: "Playlists" }
+                    ]
+                    delegate: Button {
+                      width: (parent.width - Style.spacing.sm * 3) / 4
+                      height: Style.spacing.controlHeight
+                      text: modelData.label
+                      fontFamily: root.fam
+                      fontSize: Style.font.bodySmall
+                      selected: root.searchFilter === modelData.key
+                      active: root.searchFilter === modelData.key
+                      bordered: true
+                      foreground: root.fg
+                      enabled: !root.searching
+                      onClicked: {
+                        if (root.searchFilter !== modelData.key) {
+                          root.searchFilter = modelData.key
+                          if (searchField.text.trim() !== "") root.search(searchField.text)
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+            // ---- search results
+            Column {
+              visible: root.activeTab === "search" && !root.detailActive
+                && (root.searchResults.length > 0 || root.searching || root.searchQuery !== "")
+              width: parent.width
+              spacing: Style.spacing.panelGap
+
+              Text {
+                width: parent.width
+                visible: !root.searching && root.searchResults.length === 0
+                  && root.searchQuery !== ""
+                textFormat: Text.PlainText
+                text: "No results for \"" + root.searchQuery + "\""
+                color: Qt.darker(root.fg, 1.4)
+                font.family: root.fam
+                font.pixelSize: Style.font.bodySmall
+                horizontalAlignment: Text.AlignHCenter
+                elide: Text.ElideRight
+              }
+
+              Item {
+                width: parent.width
+                height: Style.space(28)
+                visible: root.searchResults.length > 0
+
+                Row {
+                  anchors.left: parent.left
+                  spacing: Style.spacing.sm
+                  visible: !root.selectMode
+
+                  Button {
+                    width: Style.space(72)
+                    height: Style.space(28)
+                    text: "Play all"
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    visible: root.searchFilter === "songs" && root.songCount(root.searchResults) > 0
+                    enabled: !root.busy && root.songCount(root.searchResults) > 0
+                    onClicked: root.enqueueFiles("play")
+                  }
+
+                  Button {
+                    width: Style.space(72)
+                    height: Style.space(28)
+                    text: "Queue all"
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    visible: root.searchFilter === "songs" && root.songCount(root.searchResults) > 0
+                    enabled: !root.busy && root.songCount(root.searchResults) > 0
+                    onClicked: root.enqueueFiles("queue")
+                  }
+                }
+
+                Row {
+                  anchors.left: parent.left
+                  spacing: Style.spacing.sm
+                  visible: root.selectMode
+
+                  Text {
+                    textFormat: Text.PlainText
+                    height: Style.space(28)
+                    verticalAlignment: Text.AlignVCenter
+                    text: root.selectedCount + " selected"
+                    color: root.fg
+                    font.family: root.fam
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Button {
+                    id: addSelectedButton
+                    width: Style.space(120)
+                    height: Style.space(28)
+                    text: "Add to playlist…"
+                    iconText: Model.ICON.plus
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    enabled: root.selectedCount > 0 && root.loggedIn && !root.busy
+                    onClicked: root.openPlaylistPickerForSelection(addSelectedButton)
+                  }
+
+                  Button {
+                    width: Style.space(72)
+                    height: Style.space(28)
+                    text: "Queue"
+                    visible: root.selectionAllSongs
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    foreground: root.fg
+                    enabled: !root.busy
+                    onClicked: {
+                      var ids = Model.videoIds(root.selectedRows)
+                      if (ids.length > 0) root.sendCmd("enqueue-files", ["queue"].concat(ids))
+                      root.clearSelection()
+                    }
+                  }
+                }
+
+                Button {
+                  id: selectToggleButton
+                  anchors.right: parent.right
+                  width: Style.space(72)
+                  height: Style.space(28)
+                  text: root.selectMode ? "Done" : "Select"
+                  iconText: root.selectMode ? Model.ICON.check : ""
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  bordered: true
+                  onClicked: {
+                    if (root.selectMode) root.clearSelection()
+                    else root.selectMode = true
+                  }
+                }
+              }
+
+              Text {
+                visible: root.selectMode
+                width: parent.width
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                text: "Click rows to select. Shift-click for a range, Ctrl-click to toggle."
+                color: Qt.darker(root.fg, 1.4)
+                font.family: root.fam
+                font.pixelSize: Style.font.caption
+              }
+
+              PanelSectionHeader {
+                text: "SEARCH RESULTS — " + root.searchQuery.toUpperCase()
+                foreground: root.fg
+                fontFamily: root.fam
+              }
+
+              Text {
+                visible: root.searching
+                textFormat: Text.PlainText
+                text: "Searching…"
+                color: Qt.darker(root.fg, 1.4)
+                font.family: root.fam
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Flickable {
+                id: searchList
+                width: parent.width
+                height: root.listViewportHeight(searchList, searchListContent.implicitHeight)
+                contentWidth: width
+                contentHeight: searchListContent.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                interactive: contentHeight > height
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                Column {
+                  id: searchListContent
+                  width: parent.width
+                  spacing: 0
+
+                  Repeater {
+                    id: searchRepeater
+                    model: root.searchResults
+                    delegate: Item {
+                      id: searchRow
+                      width: contentColumn.width
+                      height: Style.space(40)
+
+                      RowHighlight {
+                        id: searchRowBg
+                        foreground: root.fg
+                        multi: root.isRowSelected(modelData)
+                        hasCursor: index === root.selectedIndex
+                        hovered: searchRowClick.containsMouse
+                      }
+
+                      MouseArea {
+                        id: searchRowClick
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: function(mouse) {
+                          if (root.handleRowClick(index, mouse.modifiers)) return
+                          root.selectIndex(index)
+                          if (modelData.kind !== "song") root.openRow(modelData, true)
+                        }
+                      }
+
+                      Row {
+                        anchors.fill: parent
+                        spacing: Style.spacing.sm
+
+                        Item {
+                          width: Style.space(24)
+                          height: parent.height
+
+                          Text {
+                            visible: !root.selectMode
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            textFormat: Text.PlainText
+                            width: Style.space(24)
+                            text: modelData.kind === "song" ? Model.ICON.note
+                              : (modelData.kind === "playlist" ? Model.ICON.playlist : Model.ICON.music)
+                            color: Color.accent
+                            font.family: root.fam
+                            font.pixelSize: Style.font.bodySmall
+                            verticalAlignment: Text.AlignVCenter
+                          }
+
+                          Rectangle {
+                            visible: root.selectMode && !root.isRowSelected(modelData)
+                            anchors.centerIn: parent
+                            width: Style.space(14)
+                            height: Style.space(14)
+                            radius: width / 2
+                            color: "transparent"
+                            border.width: Style.normalBorderWidth
+                            border.color: Qt.darker(root.fg, 1.3)
+                          }
+
+                          Text {
+                            visible: root.isRowSelected(modelData)
+                            anchors.centerIn: parent
+                            textFormat: Text.PlainText
+                            text: Model.ICON.check
+                            color: Color.accent
+                            font.family: root.fam
+                            font.pixelSize: Style.font.bodySmall
+                          }
+                        }
+
+                        Column {
+                          width: modelData.kind === "song"
+                            ? parent.width - Style.space(24) - Style.space(176)
+                              - Style.spacing.sm * 4
+                            : parent.width - Style.space(24) - Style.space(44)
+                              - Style.spacing.sm * 2
+                          spacing: 0
+
+                          Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: modelData.title
+                            color: root.fg
+                            font.family: root.fam
+                            font.pixelSize: Style.font.bodySmall
+                          }
+                          Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: root.songSubtitle(modelData)
+                            color: Qt.darker(root.fg, 1.4)
+                            font.family: root.fam
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+
+                        Text {
+                          visible: modelData.kind === "song"
+                          textFormat: Text.PlainText
+                          width: Style.space(80)
+                          text: Model.fmtDuration(modelData.duration)
+                          horizontalAlignment: Text.AlignRight
+                          color: Qt.darker(root.fg, 1.4)
+                          font.family: root.fam
+                          font.pixelSize: Style.font.caption
+                          verticalAlignment: Text.AlignVCenter
+                        }
+
+                        PanelActionButton {
+                          visible: modelData.kind === "song"
+                          width: Style.space(52)
+                          height: Style.space(28)
+                          iconText: Model.ICON.play
+                          tooltipText: "Play"
+                          fontFamily: root.fam
+                          foreground: root.fg
+                          enabled: !root.busy
+                          onClicked: root.playNow(modelData.videoId)
+                        }
+
+                        PanelActionButton {
+                          visible: modelData.kind === "song"
+                          width: Style.space(44)
+                          height: Style.space(28)
+                          iconText: Model.ICON.shuffle
+                          tooltipText: "Start mix"
+                          fontFamily: root.fam
+                          foreground: root.fg
+                          enabled: !root.busy
+                          onClicked: root.playMix(modelData.videoId)
+                        }
+
+                        Text {
+                          visible: modelData.kind !== "song"
+                          textFormat: Text.PlainText
+                          width: Style.space(44)
+                          text: "›"
+                          horizontalAlignment: Text.AlignRight
+                          color: Color.accent
+                          font.family: root.fam
+                          font.pixelSize: Style.font.body
+                          verticalAlignment: Text.AlignVCenter
+                        }
+                      }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.RightButton
+                        onClicked: function(mouse) {
+                          var point = searchRow.mapToItem(panelFlick, mouse.x, mouse.y)
+                          root.openRowMenu(modelData, "search", point.x, point.y)
+                          mouse.accepted = true
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+            }
+
+            // ---- playlists
+            Column {
+              visible: root.loggedIn && root.activeTab === "playlists" && !root.detailActive
+              width: parent.width
+              spacing: Style.spacing.panelGap
+
+              Row {
+                width: parent.width - Style.space(40)
+                height: Style.spacing.controlHeight
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.spacing.sm
+
+                TextField {
+                  id: newPlaylistField
+                  width: parent.width - Style.space(116) - parent.spacing
+                  height: Style.spacing.controlHeight
+                  placeholderText: "New playlist name"
+                  foreground: root.fg
+                  hasCursor: false
+                  onTextChanged: root.newPlaylistName = text
+                  onAccepted: root.createPlaylist()
+                }
+
+                Button {
+                  width: Style.space(116)
+                  height: Style.spacing.controlHeight
+                  text: "Create"
+                  iconText: Model.ICON.plus
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  enabled: root.newPlaylistName.trim() !== "" && !root.busy
+                  onClicked: root.createPlaylist()
+                }
+              }
+
+              Text {
+                visible: root.playlists.length === 0 && !playlistsProc.running
+                textFormat: Text.PlainText
+                text: "No playlists yet."
+                color: Qt.darker(root.fg, 1.4)
+                font.family: root.fam
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Flickable {
+                id: playlistsList
+                width: parent.width
+                height: root.listViewportHeight(playlistsList, playlistsListContent.implicitHeight)
+                contentWidth: width
+                contentHeight: playlistsListContent.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                interactive: contentHeight > height
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                Column {
+                  id: playlistsListContent
+                  width: parent.width
+                  spacing: 0
+
+                  Repeater {
+                    model: root.playlists
+                    delegate: Item {
+                      id: playlistRow
+                      width: contentColumn.width
+                      height: Style.space(40)
+
+                      RowHighlight {
+                        id: playlistRowBg
+                        foreground: root.fg
+                        hasCursor: index === root.selectedIndex
+                        hovered: playlistRowClick.containsMouse
+                      }
+
+                      MouseArea {
+                        id: playlistRowClick
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.openPlaylist(modelData.id, modelData.title)
+                      }
+
+                      Row {
+                        anchors.fill: parent
+                        spacing: Style.spacing.sm
+
+                        Text {
+                          textFormat: Text.PlainText
+                          width: Style.space(24)
+                          text: Model.ICON.playlist
+                          color: Color.accent
+                          font.family: root.fam
+                          font.pixelSize: Style.font.bodySmall
+                          verticalAlignment: Text.AlignVCenter
+                        }
+
+                        Column {
+                          width: parent.width - Style.space(24) - Style.space(56)
+                            - Style.space(40) - Style.spacing.sm * 3
+                          spacing: 0
+
+                          Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: modelData.title
+                            color: root.fg
+                            font.family: root.fam
+                            font.pixelSize: Style.font.bodySmall
+                          }
+                          Text {
+                            visible: modelData.description !== ""
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: modelData.description
+                            color: Qt.darker(root.fg, 1.4)
+                            font.family: root.fam
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+
+                        Text {
+                          textFormat: Text.PlainText
+                          width: Style.space(40)
+                          text: "›"
+                          horizontalAlignment: Text.AlignRight
+                          color: Color.accent
+                          font.family: root.fam
+                          font.pixelSize: Style.font.body
+                          verticalAlignment: Text.AlignVCenter
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+             }
+
+              // ---- playlist tracks view
+            Column {
+              visible: root.playlistDetail && root.playlistTracks.length > 0
+              width: parent.width
+              spacing: Style.spacing.panelGap
+
+              Item {
+                width: parent.width
+                height: Style.space(24)
 
                 Text {
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
                   textFormat: Text.PlainText
+                  text: root.activePlaylistTitle.toUpperCase() + " (" + root.playlistTracks.length + ")"
+                  color: root.fg
+                  font.family: root.fam
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  verticalAlignment: Text.AlignVCenter
+                }
+
+                Button {
+                  id: playlistOptionsButton
+                  anchors.right: playPlaylistButton.left
+                  anchors.rightMargin: Style.space(4)
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(32)
+                  height: Style.space(24)
+                  iconText: Model.ICON.more
+                  tooltipText: "Playlist options"
+                  fontFamily: root.fam
+                  foreground: root.fg
+                  onClicked: root.openPlaylistOptions(playlistOptionsButton)
+                }
+
+                Button {
+                  id: playPlaylistButton
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(32)
+                  height: Style.space(24)
+                  iconText: Model.ICON.play
+                  tooltipText: "Play playlist"
+                  fontFamily: root.fam
+                  foreground: Color.accent
+                  onClicked: root.playSelectedPlaylist()
+                }
+
+              }
+
+              Row {
+                visible: root.renameOpen
+                width: parent.width - Style.space(40)
+                height: Style.spacing.controlHeight
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.spacing.sm
+
+                TextField {
+                  id: renameField
+                  width: parent.width - Style.space(52) - Style.space(80) - parent.spacing * 2
+                  height: Style.spacing.controlHeight
+                  placeholderText: "Playlist name"
+                  foreground: root.fg
+                  hasCursor: false
+                  onAccepted: root.renameActivePlaylist()
+                  onVisibleChanged: if (visible) {
+                    text = root.activePlaylistTitle
+                    forceActiveFocus()
+                  }
+                }
+
+                Button {
+                  width: Style.space(52)
+                  height: Style.spacing.controlHeight
+                  text: "Save"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  enabled: !root.busy
+                  onClicked: root.renameActivePlaylist()
+                }
+
+                Button {
+                  width: Style.space(80)
+                  height: Style.spacing.controlHeight
+                  text: "Cancel"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  onClicked: root.renameOpen = false
+                }
+              }
+
+              Flickable {
+                id: trackList
+                width: parent.width
+                height: root.listViewportHeight(trackList, trackListContent.implicitHeight)
+                contentWidth: width
+                contentHeight: trackListContent.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                interactive: contentHeight > height
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                Column {
+                  id: trackListContent
                   width: parent.width
+                  spacing: 0
+
+                  Repeater {
+                    id: trackRepeater
+                    model: root.playlistTracks
+                    delegate: Item {
+                      id: trackRow
+                      width: contentColumn.width
+                      height: Style.space(36)
+
+                      RowHighlight {
+                        id: trackRowBg
+                        foreground: root.fg
+                        hasCursor: index === root.selectedIndex
+                        hovered: trackRowClick.containsMouse
+                      }
+
+                      MouseArea {
+                        id: trackRowClick
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.selectedIndex = index
+                      }
+
+                      Row {
+                        anchors.fill: parent
+                        spacing: Style.spacing.sm
+
+                        Text {
+                          textFormat: Text.PlainText
+                          width: Style.space(20)
+                          text: index + 1
+                          color: Qt.darker(root.fg, 1.4)
+                          font.family: root.fam
+                          font.pixelSize: Style.font.caption
+                          verticalAlignment: Text.AlignVCenter
+                        }
+
+                        Column {
+                          width: parent.width - Style.space(20) - Style.space(200)
+                          spacing: 0
+
+                          Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: modelData.title
+                            color: root.fg
+                            font.family: root.fam
+                            font.pixelSize: Style.font.bodySmall
+                          }
+                          Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: root.songSubtitle(modelData)
+                            color: Qt.darker(root.fg, 1.4)
+                            font.family: root.fam
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+
+                        Text {
+                          textFormat: Text.PlainText
+                          width: Style.space(64)
+                          text: Model.fmtDuration(modelData.duration)
+                          horizontalAlignment: Text.AlignRight
+                          color: Qt.darker(root.fg, 1.4)
+                          font.family: root.fam
+                          font.pixelSize: Style.font.caption
+                          verticalAlignment: Text.AlignVCenter
+                        }
+
+                        PanelActionButton {
+                          width: Style.space(52)
+                          height: Style.space(28)
+                          iconText: Model.ICON.play
+                          tooltipText: "Play"
+                          fontFamily: root.fam
+                          foreground: root.fg
+                          enabled: !root.busy
+                          onClicked: root.playNow(modelData.videoId)
+                        }
+
+                        PanelActionButton {
+                          width: Style.space(44)
+                          height: Style.space(28)
+                          iconText: Model.ICON.shuffle
+                          tooltipText: "Start mix"
+                          fontFamily: root.fam
+                          foreground: root.fg
+                          enabled: !root.busy
+                          onClicked: root.playMix(modelData.videoId)
+                        }
+                      }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.RightButton
+                        onClicked: function(mouse) {
+                          var point = trackRow.mapToItem(panelFlick, mouse.x, mouse.y)
+                          root.openContextMenu(modelData.videoId, modelData.title, modelData.artist, "track", point.x, point.y, index)
+                          mouse.accepted = true
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+            }
+
+            Text {
+              visible: root.playlistDetail
+                && (root.loadingText !== ""
+                  || (root.playlistTracks.length === 0 && !tracksProc.running))
+              textFormat: Text.PlainText
+              text: root.loadingText !== "" ? root.loadingText : "Playlist is empty."
+              color: Qt.darker(root.fg, 1.4)
+              font.family: root.fam
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            // ---- library
+            Column {
+              visible: root.loggedIn && (root.activeTab === "library" || root.libraryDetail)
+              width: parent.width
+              spacing: Style.spacing.panelGap
+
+              Row {
+                width: parent.width - Style.space(40)
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.spacing.sm
+                visible: !root.libraryDetail
+
+                Repeater {
+                  model: [
+                    { key: "home", label: "Home" },
+                    { key: "history", label: "Recent" },
+                    { key: "liked", label: "Liked" },
+                    { key: "songs", label: "Songs" },
+                    { key: "albums", label: "Albums" },
+                    { key: "artists", label: "Artists" }
+                  ]
+                  delegate: Button {
+                    width: (parent.width - Style.spacing.sm * 5) / 6
+                    height: Style.spacing.controlHeight
+                    text: modelData.label
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    selected: root.libraryKind === modelData.key
+                    active: root.libraryKind === modelData.key
+                    bordered: true
+                    foreground: root.fg
+                    enabled: !libraryProc.running
+                    onClicked: root.loadLibrary(modelData.key)
+                  }
+                }
+              }
+
+              Row {
+                width: parent.width
+                height: Style.space(28)
+                visible: (root.activeTab === "library" || root.libraryDetail)
+                  && root.libraryKind !== ""
+                spacing: Style.spacing.sm
+
+                Button {
+                  width: Style.space(72)
+                  height: Style.space(28)
+                  text: "Back"
+                  iconText: Model.ICON.arrowLeft
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  onClicked: root.libraryBack()
+                }
+
+                Button {
+                  visible: root.libraryKind === "album" || root.libraryKind === "artist"
+                  enabled: !root.busy && root.librarySongCount() > 0
+                  width: Style.space(72)
+                  height: Style.space(28)
+                  text: "Play all"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  onClicked: root.enqueueNav("play", root.libraryKind, root.libraryRefId)
+                }
+
+                Button {
+                  visible: root.libraryKind === "album" || root.libraryKind === "artist"
+                  enabled: !root.busy && root.librarySongCount() > 0
+                  width: Style.space(72)
+                  height: Style.space(28)
+                  text: "Queue all"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  onClicked: root.enqueueNav("queue", root.libraryKind, root.libraryRefId)
+                }
+
+                Button {
+                  visible: root.libraryKind === "album" && root.loggedIn
+                  enabled: root.libraryRefId !== ""
+                  width: Style.space(72)
+                  height: Style.space(28)
+                  text: root.albumInLibrary ? "Remove" : "Save"
+                  fontFamily: root.fam
+                  fontSize: Style.font.bodySmall
+                  foreground: root.fg
+                  onClicked: root.queueAlbumLibrary(root.albumInLibrary ? "album-remove" : "album-save", root.libraryRefId)
+                }
+
+                Text {
+                  visible: !root.libraryRichHeader
+                  width: parent.width - Style.space(72)
+                    - ((root.libraryKind === "album" || root.libraryKind === "artist")
+                      ? Style.space(144) + Style.spacing.sm * 2 : 0)
+                    - (root.libraryKind === "album" ? Style.space(72) + Style.spacing.sm : 0)
+                    - Style.spacing.sm
+                  height: Style.space(28)
                   elide: Text.ElideRight
+                  verticalAlignment: Text.AlignVCenter
+                  textFormat: Text.PlainText
                   text: root.libraryTitle
                     + (root.librarySubtitle !== "" ? "  ·  " + root.librarySubtitle : "")
                   color: root.fg
@@ -4526,168 +4701,244 @@ Panel {
                   font.pixelSize: Style.font.bodySmall
                   font.bold: true
                 }
-
-                Text {
-                  visible: root.libraryMeta !== ""
-                  textFormat: Text.PlainText
-                  width: parent.width
-                  elide: Text.ElideRight
-                  text: root.libraryMeta
-                  color: Qt.darker(root.fg, 1.4)
-                  font.family: root.fam
-                  font.pixelSize: Style.font.caption
-                }
-
-                Text {
-                  visible: root.libraryDescription !== ""
-                  textFormat: Text.PlainText
-                  width: parent.width
-                  text: root.libraryDescription
-                  color: Qt.darker(root.fg, 1.4)
-                  font.family: root.fam
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.Wrap
-                  elide: Text.ElideRight
-                  maximumLineCount: root.libraryInfoOpen ? 400 : 3
-
-                  MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.libraryInfoOpen = !root.libraryInfoOpen
-                  }
-                }
               }
-            }
 
-            Text {
-              visible: (root.activeTab === "library" || root.libraryDetail)
-                && root.libraryKind !== ""
-                && (root.loadingText !== ""
-                  || (root.libraryList.length === 0 && !libraryProc.running))
-              textFormat: Text.PlainText
-              text: root.loadingText !== "" ? root.loadingText : "Nothing here."
-              color: Qt.darker(root.fg, 1.4)
-              font.family: root.fam
-              font.pixelSize: Style.font.bodySmall
-            }
+              Row {
+                width: parent.width - Style.space(40)
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.space(12)
+                visible: root.libraryRichHeader
 
-            Repeater {
-              id: libraryRepeater
-              visible: root.activeTab === "library" || root.libraryDetail
-              model: root.libraryList
-              delegate: Item {
-                id: libraryRow
-                width: contentColumn.width
-                height: Style.space(40)
+                Rectangle {
+                  id: libraryCover
+                  visible: root.libraryImageSource !== "" || root.libraryThumbUrl !== ""
+                  width: Style.space(96)
+                  height: Style.space(96)
+                  radius: Style.cornerRadius
+                  color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.1)
+                  clip: true
 
-                RowHighlight {
-                  id: libraryRowBg
-                  foreground: root.fg
-                  hasCursor: index === root.selectedIndex
-                  hovered: libraryRowClick.containsMouse
-                }
-
-                MouseArea {
-                  id: libraryRowClick
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: {
-                    root.selectIndex(index)
-                    if (modelData.kind !== "song") root.openRow(modelData, false)
+                  Image {
+                    id: libraryCoverImage
+                    anchors.fill: parent
+                    source: root.libraryImageSource
+                    fillMode: Image.PreserveAspectCrop
+                    asynchronous: true
+                    cache: true
+                    sourceSize.width: 96
+                    sourceSize.height: 96
                   }
-                }
-
-                Row {
-                  anchors.fill: parent
-                  spacing: Style.spacing.sm
 
                   Text {
-                    textFormat: Text.PlainText
-                    width: Style.space(24)
-                    text: modelData.kind === "song" ? Model.ICON.note
-                      : ((modelData.kind === "album" || modelData.kind === "artist")
-                        ? Model.ICON.music : Model.ICON.playlist)
+                    anchors.centerIn: parent
+                    visible: libraryCoverImage.status !== Image.Ready
+                    text: Model.ICON.note
                     color: Color.accent
                     font.family: root.fam
-                    font.pixelSize: Style.font.bodySmall
-                    verticalAlignment: Text.AlignVCenter
+                    font.pixelSize: Style.font.displayLarge
                   }
+                }
 
-                  Column {
-                    width: parent.width - Style.space(24) - Style.space(56)
-                      - Style.space(40) - Style.spacing.sm * 3
-                    spacing: 0
+                Column {
+                  width: parent.width
+                    - (libraryCover.visible ? libraryCover.width + Style.space(12) : 0)
+                  spacing: Style.space(3)
 
-                    Text {
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      elide: Text.ElideRight
-                      text: modelData.title || "Unknown"
-                      color: root.fg
-                      font.family: root.fam
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                    Text {
-                      visible: root.songSubtitle(modelData) !== ""
-                      textFormat: Text.PlainText
-                      width: parent.width
-                      elide: Text.ElideRight
-                      text: root.songSubtitle(modelData)
-                      color: Qt.darker(root.fg, 1.4)
-                      font.family: root.fam
-                      font.pixelSize: Style.font.caption
-                    }
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    elide: Text.ElideRight
+                    text: root.libraryTitle
+                      + (root.librarySubtitle !== "" ? "  ·  " + root.librarySubtitle : "")
+                    color: root.fg
+                    font.family: root.fam
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
                   }
 
                   Text {
-                    visible: modelData.kind === "song"
+                    visible: root.libraryMeta !== ""
                     textFormat: Text.PlainText
-                    width: Style.space(56)
-                    text: modelData.duration > 0 ? Model.fmtDuration(modelData.duration) : ""
-                    horizontalAlignment: Text.AlignRight
+                    width: parent.width
+                    elide: Text.ElideRight
+                    text: root.libraryMeta
                     color: Qt.darker(root.fg, 1.4)
                     font.family: root.fam
                     font.pixelSize: Style.font.caption
-                    verticalAlignment: Text.AlignVCenter
-                  }
-
-                  PanelActionButton {
-                    width: Style.space(40)
-                    height: Style.space(28)
-                    visible: modelData.kind === "song"
-                    iconText: Model.ICON.play
-                    tooltipText: "Play"
-                    fontFamily: root.fam
-                    foreground: root.fg
-                    enabled: !root.busy
-                    onClicked: root.playNow(modelData.videoId)
                   }
 
                   Text {
-                    visible: modelData.kind !== "song"
+                    visible: root.libraryDescription !== ""
                     textFormat: Text.PlainText
-                    width: Style.space(40)
-                    text: "›"
-                    horizontalAlignment: Text.AlignRight
-                    color: Color.accent
+                    width: parent.width
+                    text: root.libraryDescription
+                    color: Qt.darker(root.fg, 1.4)
                     font.family: root.fam
-                    font.pixelSize: Style.font.body
-                    verticalAlignment: Text.AlignVCenter
-                  }
-                }
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.Wrap
+                    elide: Text.ElideRight
+                    maximumLineCount: root.libraryInfoOpen ? 400 : 3
 
-                MouseArea {
-                  anchors.fill: parent
-                  acceptedButtons: Qt.RightButton
-                  onClicked: function(mouse) {
-                    var point = libraryRow.mapToItem(panelFlick, mouse.x, mouse.y)
-                    root.openRowMenu(modelData, "library", point.x, point.y)
-                    mouse.accepted = true
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.libraryInfoOpen = !root.libraryInfoOpen
+                    }
                   }
                 }
               }
+
+              Text {
+                visible: (root.activeTab === "library" || root.libraryDetail)
+                  && root.libraryKind !== ""
+                  && (root.loadingText !== ""
+                    || (root.libraryList.length === 0 && !libraryProc.running))
+                textFormat: Text.PlainText
+                text: root.loadingText !== "" ? root.loadingText : "Nothing here."
+                color: Qt.darker(root.fg, 1.4)
+                font.family: root.fam
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Flickable {
+                id: libraryView
+                width: parent.width
+                height: root.listViewportHeight(libraryView, libraryViewContent.implicitHeight)
+                contentWidth: width
+                contentHeight: libraryViewContent.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                interactive: contentHeight > height
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                Column {
+                  id: libraryViewContent
+                  width: parent.width
+                  spacing: 0
+
+                  Repeater {
+                    id: libraryRepeater
+                    visible: root.activeTab === "library" || root.libraryDetail
+                    model: root.libraryList
+                    delegate: Item {
+                      id: libraryRow
+                      width: contentColumn.width
+                      height: Style.space(40)
+
+                      RowHighlight {
+                        id: libraryRowBg
+                        foreground: root.fg
+                        hasCursor: index === root.selectedIndex
+                        hovered: libraryRowClick.containsMouse
+                      }
+
+                      MouseArea {
+                        id: libraryRowClick
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                          root.selectIndex(index)
+                          if (modelData.kind !== "song") root.openRow(modelData, false)
+                        }
+                      }
+
+                      Row {
+                        anchors.fill: parent
+                        spacing: Style.spacing.sm
+
+                        Text {
+                          textFormat: Text.PlainText
+                          width: Style.space(24)
+                          text: modelData.kind === "song" ? Model.ICON.note
+                            : ((modelData.kind === "album" || modelData.kind === "artist")
+                              ? Model.ICON.music : Model.ICON.playlist)
+                          color: Color.accent
+                          font.family: root.fam
+                          font.pixelSize: Style.font.bodySmall
+                          verticalAlignment: Text.AlignVCenter
+                        }
+
+                        Column {
+                          width: parent.width - Style.space(24) - Style.space(56)
+                            - Style.space(40) - Style.spacing.sm * 3
+                          spacing: 0
+
+                          Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: modelData.title || "Unknown"
+                            color: root.fg
+                            font.family: root.fam
+                            font.pixelSize: Style.font.bodySmall
+                          }
+                          Text {
+                            visible: root.songSubtitle(modelData) !== ""
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: root.songSubtitle(modelData)
+                            color: Qt.darker(root.fg, 1.4)
+                            font.family: root.fam
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+
+                        Text {
+                          visible: modelData.kind === "song"
+                          textFormat: Text.PlainText
+                          width: Style.space(56)
+                          text: modelData.duration > 0 ? Model.fmtDuration(modelData.duration) : ""
+                          horizontalAlignment: Text.AlignRight
+                          color: Qt.darker(root.fg, 1.4)
+                          font.family: root.fam
+                          font.pixelSize: Style.font.caption
+                          verticalAlignment: Text.AlignVCenter
+                        }
+
+                        PanelActionButton {
+                          width: Style.space(40)
+                          height: Style.space(28)
+                          visible: modelData.kind === "song"
+                          iconText: Model.ICON.play
+                          tooltipText: "Play"
+                          fontFamily: root.fam
+                          foreground: root.fg
+                          enabled: !root.busy
+                          onClicked: root.playNow(modelData.videoId)
+                        }
+
+                        Text {
+                          visible: modelData.kind !== "song"
+                          textFormat: Text.PlainText
+                          width: Style.space(40)
+                          text: "›"
+                          horizontalAlignment: Text.AlignRight
+                          color: Color.accent
+                          font.family: root.fam
+                          font.pixelSize: Style.font.body
+                          verticalAlignment: Text.AlignVCenter
+                        }
+                      }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.RightButton
+                        onClicked: function(mouse) {
+                          var point = libraryRow.mapToItem(panelFlick, mouse.x, mouse.y)
+                          root.openRowMenu(modelData, "library", point.x, point.y)
+                          mouse.accepted = true
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
             }
+          }
           }
 
         }

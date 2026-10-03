@@ -35,6 +35,21 @@ Review-driven fixes (see `docs/review-findings.md`, `docs/phase2-decisions.md`).
   installer refuses to delete a directory that resolves to its own source tree.
 - UI: loading states for library/playlist loads, a distinct paused state in the
   bar, keyboard-navigable menus, and bounded thumbnail retries.
+- The Up Next tab scrolls to the currently-playing row when it opens or the
+  track changes, instead of always starting at the top of the queue. The list
+  still holds the whole queue, but the top rows are no longer mistaken for the
+  next track: the playing row (and the real next track below it) are in view.
+- The Up Next track list now scrolls inside its own viewport: the now-playing
+  card, the tab strip, and the UP NEXT header/action row stay fixed while the
+  rows move, instead of scrolling the whole panel.
+- That fixed-panel/scrollable-content layout now applies to every tab: the
+  now-playing card and tab strip stay put, and each tab keeps its own header or
+  action row pinned (Search field and scope pills, Last Played header, Playlists
+  field, playlist/album/artist title bar, Library source buttons) while only the
+  list scrolls in its own viewport.
+- Right-click menus use a single highlight cursor again: hovering a row and the
+  arrow keys drive the same selection, so a menu can no longer show two rows
+  highlighted at once.
 
 ## 2.2.0 — 2026-09-30
 

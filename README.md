@@ -95,7 +95,8 @@ Clicking the tab you are already on pops one level: an open playlist, album, or 
 
 ### Up Next
 
-- The current row is highlighted and shows a play glyph instead of its number; every row has a Jump-to-track button.
+- The current row is highlighted and shows a play glyph instead of its number; every row has a Jump-to-track button. The list scrolls to the current row when the tab opens or the track changes, so the playing track (and the track after it) is always in view even when it sits deep in the queue.
+- The track list scrolls on its own: the now-playing card, the tab strip, and the UP NEXT header stay fixed while the rows move under them. Every other tab works the same way — the now-playing card, tab strip, and that tab's own header or action row stay put while only its list scrolls.
 - Right-clicking a row offers Move up, Move down, and Remove from queue.
 - **Clear** removes every upcoming track (or clears the saved queue when nothing is playing). **Save** saves the queue as a new playlist. **Select** enables multi-select, and the action bar then shows `N selected`, `Add to playlist…`, and **Remove**.
 - While playback is stopped the last queue is still shown from the saved session, with a **Resume** button; opening the panel restores that queue paused.
