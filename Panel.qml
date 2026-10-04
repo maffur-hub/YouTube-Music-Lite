@@ -47,10 +47,11 @@ Panel {
   // ladder and the bouncing peak LED.
   property real visualizerLevel: 0
   property real visualizerPeak: 0
+  property var visualizerBandPeaks: []
   readonly property int visualizerBarCount: 24
   readonly property int visualizerLadderSegments: 28
   readonly property int visualizerVerticalSegments: 20
-  readonly property bool visualizerVerticalStyle: root.visualizerStyle === "vuv"
+  readonly property int visualizerSpectrumSegments: 10
   readonly property string cavaConfigPath: Qt.resolvedUrl("cava.conf").toString().replace("file://", "")
 
   readonly property string ctlPath: Quickshell.env("HOME") + "/.local/bin/yt-music-ctl"
@@ -333,7 +334,8 @@ Panel {
       : (root.visualizerStyle === "gradient" ? "meter"
       : (root.visualizerStyle === "meter" ? "vu"
       : (root.visualizerStyle === "vu" ? "vuv"
-      : (root.visualizerStyle === "vuv" ? "peak" : "bars")))))
+      : (root.visualizerStyle === "vuv" ? "vus"
+      : (root.visualizerStyle === "vus" ? "peak" : "bars"))))))
   }
 
   function visualizerStyleLabel() {
@@ -342,7 +344,8 @@ Panel {
       : (root.visualizerStyle === "gradient" ? "Gradient"
       : (root.visualizerStyle === "meter" ? "Meter"
       : (root.visualizerStyle === "vu" ? "VU"
-      : (root.visualizerStyle === "vuv" ? "VU Vertical" : "Peak")))))
+      : (root.visualizerStyle === "vuv" ? "VU Vertical"
+      : (root.visualizerStyle === "vus" ? "VU Spectrum" : "Peak"))))))
   }
 
   function visualizerBarColor(level) {
@@ -424,7 +427,7 @@ Panel {
     if (visualizerStyle === "bars" || visualizerStyle === "mirror"
         || visualizerStyle === "gradient" || visualizerStyle === "meter"
         || visualizerStyle === "vu" || visualizerStyle === "vuv"
-        || visualizerStyle === "peak")
+        || visualizerStyle === "vus" || visualizerStyle === "peak")
       root.visualizerStyle = visualizerStyle
     var kind = String(data.libraryKind || "")
     var refId = String(data.libraryRefId || "")
@@ -1650,12 +1653,14 @@ Panel {
         root.visualizerBars = bars
         root.visualizerLevel = Model.cavaLevel(bars)
         root.visualizerPeak = Math.max(root.visualizerLevel, Math.max(0, root.visualizerPeak - 2))
+        root.visualizerBandPeaks = Model.cavaBandPeaks(bars, root.visualizerBandPeaks, 4)
       }
     }
     onExited: {
       root.visualizerBars = []
       root.visualizerLevel = 0
       root.visualizerPeak = 0
+      root.visualizerBandPeaks = []
     }
   }
 
@@ -3407,7 +3412,7 @@ Panel {
             id: visualizerStrip
             visible: root.visualizerOn && Model.isActive(root.musicStatus)
             width: parent.width
-            height: root.visualizerVerticalStyle ? Style.space(64) : Style.space(22)
+            height: root.visualizerStyle === "vuv" || root.visualizerStyle === "vus" ? Style.space(64) : Style.space(22)
 
             // 1. Spectrum bars (bars / mirror / gradient / meter)
             Item {
@@ -3527,6 +3532,50 @@ Panel {
                 height: parent.height
                 x: Math.min(parent.width - width, parent.width * (root.visualizerPeak / 100))
                 color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
+              }
+            }
+
+            // 5. VU spectrum (vus): one short vertical LED ladder per frequency band.
+            Item {
+              id: vuSpectrumRenderer
+              anchors.fill: parent
+              visible: root.visualizerStyle === "vus"
+
+              Row {
+                anchors.fill: parent
+                spacing: 2
+
+                Repeater {
+                  model: root.visualizerBarCount
+
+                  delegate: Column {
+                    id: bandColumn
+                    readonly property int band: index
+                    width: (parent.width - parent.spacing * (root.visualizerBarCount - 1)) / root.visualizerBarCount
+                    height: parent.height
+                    spacing: 1
+
+                    Repeater {
+                      model: root.visualizerSpectrumSegments
+
+                      delegate: Rectangle {
+                        readonly property int segFromBottom: root.visualizerSpectrumSegments - 1 - index
+                        readonly property real fraction: segFromBottom / (root.visualizerSpectrumSegments - 1)
+                        readonly property real value: Number(root.visualizerBars[bandColumn.band]) || 0
+                        readonly property real peak: Number(root.visualizerBandPeaks[bandColumn.band]) || 0
+                        readonly property bool lit: fraction * 100 <= value
+                        readonly property bool peakLit: peak > 0 && fraction * 100 <= peak
+                          && (segFromBottom === root.visualizerSpectrumSegments - 1
+                            || (segFromBottom + 1) / (root.visualizerSpectrumSegments - 1) * 100 > peak)
+                        width: bandColumn.width
+                        height: (bandColumn.height - bandColumn.spacing * (root.visualizerSpectrumSegments - 1)) / root.visualizerSpectrumSegments
+                        color: (lit || peakLit)
+                          ? root.visualizerZoneColor(fraction * 100)
+                          : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
+                      }
+                    }
+                  }
+                }
               }
             }
           }

@@ -239,4 +239,19 @@ eq(Model.cavaZone(85), "red", "cavaZone(85) is red")
 eq(Model.cavaZone(100), "red", "cavaZone(100) is red")
 eq(Model.cavaZone("x"), "green", "cavaZone(\"x\") falls back to green")
 
+// --- cavaBandPeaks
+eq(Model.cavaBandPeaks([], [], 4), [], "cavaBandPeaks([]) is []")
+eq(Model.cavaBandPeaks([10, 80, 0], [], 4), [10, 80, 0],
+  "cavaBandPeaks starts from the first frame when there is no history")
+eq(Model.cavaBandPeaks([10, 80, 0], [50, 50, 50], 4), [46, 80, 46],
+  "cavaBandPeaks holds the peak and decays it per frame")
+eq(Model.cavaBandPeaks([10, 80, 0], undefined, 4), [10, 80, 0],
+  "cavaBandPeaks tolerates a missing previous array")
+eq(Model.cavaBandPeaks([10, 80, 0], [50], 4), [46, 80, 0],
+  "cavaBandPeaks tolerates a short previous array")
+eq(Model.cavaBandPeaks([200, -5, NaN], [], 4), [100, 0, 0],
+  "cavaBandPeaks clamps to 0..100 and zeroes NaN")
+eq(Model.cavaBandPeaks([0], [50], NaN), [46],
+  "cavaBandPeaks defaults a non-numeric decay to 4")
+
 console.log(passed + " assertions passed")

@@ -133,6 +133,23 @@ function cavaLevel(bars) {
   return Math.max(0, Math.min(100, 0.75 * p75 + 0.25 * peak))
 }
 
+// Next per-band peak-hold values: each band jumps to its level and decays.
+// `previous` is the prior array (may be missing); `decay` is per frame.
+function cavaBandPeaks(bars, previous, decay) {
+  var out = []
+  var n = Array.isArray(bars) ? bars.length : 0
+  var d = Number(decay)
+  if (isNaN(d)) d = 4
+  for (var i = 0; i < n; i++) {
+    var v = Number(bars[i])
+    if (isNaN(v)) v = 0
+    var p = Array.isArray(previous) ? Number(previous[i]) : 0
+    if (isNaN(p)) p = 0
+    out.push(Math.max(Math.max(0, Math.min(100, v)), Math.max(0, p - d)))
+  }
+  return out
+}
+
 // Classic LED zone for a 0..100 level: "green" < 60, "amber" < 85, else "red".
 function cavaZone(level) {
   var v = Number(level)
@@ -333,6 +350,7 @@ if (typeof module !== "undefined") {
     parseCavaFrame: parseCavaFrame,
     cavaPeak: cavaPeak,
     cavaLevel: cavaLevel,
+    cavaBandPeaks: cavaBandPeaks,
     cavaZone: cavaZone,
     truncate: truncate,
     rowKey: rowKey,
