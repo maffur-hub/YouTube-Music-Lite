@@ -1651,13 +1651,24 @@ Panel {
     stdout: SplitParser {
       onRead: function(line) {
         var bars = Model.parseCavaFrame(line, root.visualizerBarCount)
-        root.visualizerBars = bars
-        root.visualizerLevel = Model.cavaLevel(bars)
-        root.visualizerPeak = Math.max(root.visualizerLevel, Math.max(0, root.visualizerPeak - 2))
+        var vol = root.musicStatus ? root.musicStatus.volume : 100
+        var volScale = Model.cavaVolumeScale(vol)
+
+        // Spectrum bars (bars/mirror/gradient/meter) track the volume directly.
+        root.visualizerBars = Model.cavaScaleBars(bars, volScale)
+
+        // Single VU/Peak level: damped level, then scaled by volume.
+        var level0 = Model.cavaLevel(bars)
+        root.visualizerLevel = Math.max(0, Math.min(100, level0 * volScale))
+        root.visualizerPeak = Math.max(root.visualizerLevel,
+                                       Math.max(0, root.visualizerPeak - 2))
+
+        // VU spectrum keeps its headroom (tallest column = level0) AND tracks volume.
         var bandMax = Model.cavaPeak(bars)
-        var bandScale = bandMax > 0 ? root.visualizerLevel / bandMax : 0
-        root.visualizerSpectrumBars = Model.cavaScaleBars(bars, bandScale)
-        root.visualizerBandPeaks = Model.cavaBandPeaks(root.visualizerSpectrumBars, root.visualizerBandPeaks, 4)
+        var head = Model.cavaScaleBars(bars, bandMax > 0 ? level0 / bandMax : 0)
+        root.visualizerSpectrumBars = Model.cavaScaleBars(head, volScale)
+        root.visualizerBandPeaks = Model.cavaBandPeaks(
+          root.visualizerSpectrumBars, root.visualizerBandPeaks, 4)
       }
     }
     onExited: {

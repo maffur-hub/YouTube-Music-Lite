@@ -267,4 +267,14 @@ eq(Model.cavaScaleBars([NaN, 50, "x"], 0.5), [0, 25, 0],
   "cavaScaleBars zeroes NaN/unparseable entries")
 eq(Model.cavaScaleBars(null, 0.5), [], "cavaScaleBars(null) is []")
 
+// --- cavaVolumeScale
+eq(Model.cavaVolumeScale(100), 1, "cavaVolumeScale(100) is unity")
+eq(Model.cavaVolumeScale(50), 0.5, "cavaVolumeScale(50) is half")
+eq(Model.cavaVolumeScale(0), 0, "cavaVolumeScale(0) is silent")
+eq(Model.cavaVolumeScale(150), 1.5, "cavaVolumeScale(150) is max gain")
+eq(Model.cavaVolumeScale(300), 1.5, "cavaVolumeScale clamps above 150")
+eq(Model.cavaVolumeScale(undefined), 1, "cavaVolumeScale(undefined) defaults to unity")
+eq(Model.cavaVolumeScale(NaN), 1, "cavaVolumeScale(NaN) defaults to unity")
+eq(Model.cavaVolumeScale(-20), 0, "cavaVolumeScale clamps below 0")
+
 console.log(passed + " assertions passed")

@@ -167,6 +167,13 @@ function cavaScaleBars(bars, scale) {
   return out
 }
 
+// Display gain from the player volume (0..150 maps to 0..1.5); NaN -> 1.
+function cavaVolumeScale(volume) {
+  var v = Number(volume)
+  if (isNaN(v)) v = 100
+  return Math.max(0, Math.min(1.5, v / 100))
+}
+
 // Classic LED zone for a 0..100 level: "green" < 60, "amber" < 85, else "red".
 function cavaZone(level) {
   var v = Number(level)
@@ -369,6 +376,7 @@ if (typeof module !== "undefined") {
     cavaLevel: cavaLevel,
     cavaBandPeaks: cavaBandPeaks,
     cavaScaleBars: cavaScaleBars,
+    cavaVolumeScale: cavaVolumeScale,
     cavaZone: cavaZone,
     truncate: truncate,
     rowKey: rowKey,
