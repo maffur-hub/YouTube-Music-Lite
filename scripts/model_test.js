@@ -215,4 +215,18 @@ eq(Model.parseCavaFrame("1;2", 5), [1, 2, 0, 0, 0],
   "parseCavaFrame zero-pads a shorter line to count")
 eq(Model.parseCavaFrame(undefined, 2), [0, 0], "parseCavaFrame handles undefined input")
 
+// --- cavaPeak
+eq(Model.cavaPeak([]), 0, "cavaPeak([])")
+eq(Model.cavaPeak([0, 42, 7]), 42, "cavaPeak picks the highest bar")
+eq(Model.cavaPeak([200, -3]), 100, "cavaPeak clamps to 100")
+
+// --- cavaZone
+eq(Model.cavaZone(0), "green", "cavaZone(0) is green")
+eq(Model.cavaZone(59), "green", "cavaZone(59) is green")
+eq(Model.cavaZone(60), "amber", "cavaZone(60) is amber")
+eq(Model.cavaZone(84), "amber", "cavaZone(84) is amber")
+eq(Model.cavaZone(85), "red", "cavaZone(85) is red")
+eq(Model.cavaZone(100), "red", "cavaZone(100) is red")
+eq(Model.cavaZone("x"), "green", "cavaZone(\"x\") falls back to green")
+
 console.log(passed + " assertions passed")

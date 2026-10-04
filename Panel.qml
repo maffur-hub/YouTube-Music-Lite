@@ -43,7 +43,12 @@ Panel {
   property var visualizerBars: []
   property bool visualizerOn: true
   property string visualizerStyle: "bars"
+  // Latest frame's peak (0..100) and its decaying peak-hold, driving the VU
+  // ladder and the bouncing peak LED.
+  property real visualizerLevel: 0
+  property real visualizerPeak: 0
   readonly property int visualizerBarCount: 24
+  readonly property int visualizerLadderSegments: 28
   readonly property string cavaConfigPath: Qt.resolvedUrl("cava.conf").toString().replace("file://", "")
 
   readonly property string ctlPath: Quickshell.env("HOME") + "/.local/bin/yt-music-ctl"
@@ -322,12 +327,18 @@ Panel {
 
   function visualizerStyleNext() {
     return root.visualizerStyle === "bars" ? "mirror"
-      : (root.visualizerStyle === "mirror" ? "gradient" : "bars")
+      : (root.visualizerStyle === "mirror" ? "gradient"
+      : (root.visualizerStyle === "gradient" ? "meter"
+      : (root.visualizerStyle === "meter" ? "vu"
+      : (root.visualizerStyle === "vu" ? "peak" : "bars"))))
   }
 
   function visualizerStyleLabel() {
     return root.visualizerStyle === "bars" ? "Bars"
-      : (root.visualizerStyle === "mirror" ? "Mirror" : "Gradient")
+      : (root.visualizerStyle === "mirror" ? "Mirror"
+      : (root.visualizerStyle === "gradient" ? "Gradient"
+      : (root.visualizerStyle === "meter" ? "Meter"
+      : (root.visualizerStyle === "vu" ? "VU" : "Peak"))))
   }
 
   function visualizerBarColor(level) {
@@ -337,6 +348,11 @@ Panel {
     return Qt.rgba(start.r + (end.r - start.r) * t,
                    start.g + (end.g - start.g) * t,
                    start.b + (end.b - start.b) * t, 1)
+  }
+
+  function visualizerZoneColor(level) {
+    var z = Model.cavaZone(level)
+    return z === "red" ? "#e05555" : (z === "amber" ? "#e8c34a" : "#3bd66b")
   }
 
   function uiStateScript(mode) {
@@ -402,7 +418,8 @@ Panel {
         || data.visualizerOn === "1"
     var visualizerStyle = String(data.visualizerStyle || "")
     if (visualizerStyle === "bars" || visualizerStyle === "mirror"
-        || visualizerStyle === "gradient")
+        || visualizerStyle === "gradient" || visualizerStyle === "meter"
+        || visualizerStyle === "vu" || visualizerStyle === "peak")
       root.visualizerStyle = visualizerStyle
     var kind = String(data.libraryKind || "")
     var refId = String(data.libraryRefId || "")
@@ -1624,10 +1641,17 @@ Panel {
     running: root.opened && root.visualizerOn && Model.isPlaying(root.musicStatus)
     stdout: SplitParser {
       onRead: function(line) {
-        root.visualizerBars = Model.parseCavaFrame(line, root.visualizerBarCount)
+        var bars = Model.parseCavaFrame(line, root.visualizerBarCount)
+        root.visualizerBars = bars
+        root.visualizerLevel = Model.cavaPeak(bars)
+        root.visualizerPeak = Math.max(root.visualizerLevel, Math.max(0, root.visualizerPeak - 2))
       }
     }
-    onExited: root.visualizerBars = []
+    onExited: {
+      root.visualizerBars = []
+      root.visualizerLevel = 0
+      root.visualizerPeak = 0
+    }
   }
 
   Process {
@@ -3380,31 +3404,93 @@ Panel {
             width: parent.width
             height: Style.space(22)
 
-            Row {
-              id: visualizerRow
+            // 1. Spectrum bars (bars / mirror / gradient / meter)
+            Item {
+              id: spectrumRenderer
               anchors.fill: parent
-              spacing: Style.spacing.sm
+              visible: root.visualizerStyle === "bars" || root.visualizerStyle === "mirror"
+                || root.visualizerStyle === "gradient" || root.visualizerStyle === "meter"
 
-              Repeater {
-                model: root.visualizerBarCount
+              Row {
+                id: visualizerRow
+                anchors.fill: parent
+                spacing: Style.spacing.sm
 
-                delegate: Item {
-                  width: (visualizerRow.width - visualizerRow.spacing * (root.visualizerBarCount - 1)) / root.visualizerBarCount
-                  height: visualizerRow.height
+                Repeater {
+                  model: root.visualizerBarCount
 
-                  Rectangle {
-                    width: parent.width
-                    height: Math.max(2, parent.height * (root.visualizerBars[index] || 0) / 100)
-                    y: root.visualizerStyle === "mirror"
-                       ? (parent.height - height) / 2
-                       : parent.height - height
-                    radius: width / 2
-                    color: root.visualizerStyle === "gradient"
-                      ? root.visualizerBarColor(root.visualizerBars[index] || 0)
-                      : Color.accent
-                    Behavior on height { NumberAnimation { duration: 55; easing.type: Easing.OutQuad } }
+                  delegate: Item {
+                    width: (visualizerRow.width - visualizerRow.spacing * (root.visualizerBarCount - 1)) / root.visualizerBarCount
+                    height: visualizerRow.height
+
+                    Rectangle {
+                      width: parent.width
+                      height: Math.max(2, parent.height * (root.visualizerBars[index] || 0) / 100)
+                      y: root.visualizerStyle === "mirror"
+                         ? (parent.height - height) / 2
+                         : parent.height - height
+                      radius: width / 2
+                      color: root.visualizerStyle === "gradient"
+                        ? root.visualizerBarColor(root.visualizerBars[index] || 0)
+                        : (root.visualizerStyle === "meter"
+                          ? root.visualizerZoneColor(root.visualizerBars[index] || 0)
+                          : Color.accent)
+                      Behavior on height { NumberAnimation { duration: 55; easing.type: Easing.OutQuad } }
+                    }
                   }
                 }
+              }
+            }
+
+            // 2. VU ladder (vu): equal-width LED segments filling to
+            // visualizerLevel, with the peak-hold segment drawn so it bounces
+            // and sags as its value decays.
+            Row {
+              id: vuRenderer
+              anchors.fill: parent
+              visible: root.visualizerStyle === "vu"
+              spacing: 1
+
+              Repeater {
+                model: root.visualizerLadderSegments
+
+                delegate: Rectangle {
+                  readonly property real fraction: index / (root.visualizerLadderSegments - 1)
+                  readonly property bool lit: fraction * 100 <= root.visualizerLevel
+                  readonly property bool peakLit: root.visualizerPeak > 0
+                    && (fraction * 100 <= root.visualizerPeak
+                      && (index === root.visualizerLadderSegments - 1
+                        || (index + 1) / (root.visualizerLadderSegments - 1) * 100 > root.visualizerPeak))
+                  width: (vuRenderer.width - vuRenderer.spacing * (root.visualizerLadderSegments - 1)) / root.visualizerLadderSegments
+                  height: vuRenderer.height
+                  color: (lit || peakLit)
+                    ? root.visualizerZoneColor(fraction * 100)
+                    : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
+                }
+              }
+            }
+
+            // 3. Peak LED (peak): one block bouncing with the level, plus a
+            // thin dim peak-hold marker.
+            Item {
+              id: peakRenderer
+              anchors.fill: parent
+              visible: root.visualizerStyle === "peak"
+
+              Rectangle {
+                width: Style.space(14)
+                height: parent.height
+                radius: height / 2
+                x: (parent.width - width) * (root.visualizerLevel / 100)
+                color: root.visualizerZoneColor(root.visualizerLevel)
+                Behavior on x { NumberAnimation { duration: 55; easing.type: Easing.OutQuad } }
+              }
+
+              Rectangle {
+                width: 2
+                height: parent.height
+                x: Math.min(parent.width - width, parent.width * (root.visualizerPeak / 100))
+                color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
               }
             }
           }

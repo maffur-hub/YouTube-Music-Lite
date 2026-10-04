@@ -106,6 +106,26 @@ function parseCavaFrame(line, count) {
   return out
 }
 
+// Highest value in a cava frame (0 when empty), for VU/peak meters.
+function cavaPeak(bars) {
+  if (!Array.isArray(bars) || bars.length === 0) return 0
+  var m = 0
+  for (var i = 0; i < bars.length; i++) {
+    var v = Number(bars[i])
+    if (!isNaN(v) && v > m) m = v
+  }
+  return Math.max(0, Math.min(100, m))
+}
+
+// Classic LED zone for a 0..100 level: "green" < 60, "amber" < 85, else "red".
+function cavaZone(level) {
+  var v = Number(level)
+  if (isNaN(v)) v = 0
+  if (v < 60) return "green"
+  if (v < 85) return "amber"
+  return "red"
+}
+
 function truncate(text, maxLen) {
   var t = String(text || "")
   if (t.length <= maxLen) return t
@@ -295,6 +315,8 @@ if (typeof module !== "undefined") {
     isActive: isActive,
     isPlaying: isPlaying,
     parseCavaFrame: parseCavaFrame,
+    cavaPeak: cavaPeak,
+    cavaZone: cavaZone,
     truncate: truncate,
     rowKey: rowKey,
     selectedCount: selectedCount,
