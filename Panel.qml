@@ -3475,25 +3475,28 @@ Panel {
               }
             }
 
-            // 4. Vertical VU ladder (vuv): bottom-to-top LED segments with the
-            // same green/amber/red zones and peak-hold as the horizontal VU.
+            // 4. Vertical VU ladder (vuv): the LED ladder reversed so segment 0 is the
+            // bottom, with the same green/amber/red zones and peak-hold as the
+            // horizontal VU.
             Column {
               id: vuVerticalRenderer
               anchors.fill: parent
               visible: root.visualizerStyle === "vuv"
               spacing: 1
-              verticalLayoutDirection: Column.BottomToTop
 
               Repeater {
                 model: root.visualizerVerticalSegments
 
                 delegate: Rectangle {
-                  readonly property real fraction: index / (root.visualizerVerticalSegments - 1)
+                  // The Column lays out top-to-bottom; flip the index so fraction 0 is
+                  // the bottom segment.
+                  readonly property int seg: root.visualizerVerticalSegments - 1 - index
+                  readonly property real fraction: seg / (root.visualizerVerticalSegments - 1)
                   readonly property bool lit: fraction * 100 <= root.visualizerLevel
                   readonly property bool peakLit: root.visualizerPeak > 0
                     && (fraction * 100 <= root.visualizerPeak
-                      && (index === root.visualizerVerticalSegments - 1
-                        || (index + 1) / (root.visualizerVerticalSegments - 1) * 100 > root.visualizerPeak))
+                      && (seg === root.visualizerVerticalSegments - 1
+                        || (seg + 1) / (root.visualizerVerticalSegments - 1) * 100 > root.visualizerPeak))
                   width: vuVerticalRenderer.width
                   height: (vuVerticalRenderer.height - vuVerticalRenderer.spacing * (root.visualizerVerticalSegments - 1)) / root.visualizerVerticalSegments
                   color: (lit || peakLit)
