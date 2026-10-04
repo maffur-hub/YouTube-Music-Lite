@@ -93,6 +93,7 @@ METADATA_CACHE_TTL = {
     "artist": 3600,    # 1 h
     "mix": 300,        # 5 min
     "radio": 300,      # 5 min
+    "stations": 600,   # 10 min
     "lyrics": 86400,   # 24 h — lyrics essentially never change
 }
 
@@ -1143,6 +1144,7 @@ def spawn_precache_next():
 
 
 def mpv_play(video_id):
+    clear_radio_current()
     ensure_daemon()
     mpv_kill()
     clear_session()
@@ -1254,24 +1256,28 @@ def wait_for_metadata(timeout=6):
 
 
 def video_id_from_url(url):
-    """Pull the video id out of a watch/youtu.be URL (or a bare id)."""
+    """Pull the video id out of a YouTube watch/youtu.be URL.
+
+    Only YouTube hosts are parsed. A non-YouTube stream URL that happens to
+    carry a `v=` (or `device=`) query parameter must not masquerade as a
+    video id. A precached queue entry plays as a local file rather than a
+    URL, so it still resolves by its file name first.
+    """
     if not isinstance(url, str) or not url:
         return None
     # A precached queue entry plays as a local file rather than a URL.
     local = cache_audio_video_id(url)
     if local:
         return local
-    if "v=" in url:
-        for part in url.split("?"):
-            if "v=" in part:
-                return part.split("v=")[1].split("&")[0]
-    if "youtu.be/" in url:
-        return url.split("youtu.be/")[1].split("?")[0]
-    if "youtube.com/watch" in url:
-        import urllib.parse
-        parsed = urllib.parse.urlparse(url)
-        qs = urllib.parse.parse_qs(parsed.query)
-        return qs.get("v", [None])[0]
+    parsed = urllib.parse.urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    if host == "youtu.be":
+        segment = parsed.path.lstrip("/").split("/")[0].split("?")[0]
+        return segment or None
+    if (host in ("youtube.com", "www.youtube.com", "m.youtube.com",
+                 "music.youtube.com")
+            or host.endswith(".youtube.com")):
+        return urllib.parse.parse_qs(parsed.query).get("v", [None])[0]
     return None
 
 
@@ -1287,6 +1293,7 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
         status = {"ok": True, "playing": False}
         write_status(status)
         return status
+    radio = load_radio_current()
     paused = props.get("pause", True)
     title = props.get("media-title", "")
     if _looks_like_url_title(title):
@@ -1323,7 +1330,23 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
         "playlistPos": props.get("playlist-pos"),
         "playlistCount": props.get("playlist-count"),
     }
-    if status["playing"] and video_id and video_id != str(previous.get("videoId") or ""):
+    if radio:
+        # A live station plays through the shared mpv pipeline, but must
+        # stay out of history, session, sidecar and precache: stamp the
+        # station on the status and let the ICY track ride along.
+        now_playing = _radio_now_playing(props.get("media-title", ""),
+                                         radio.get("url", ""))
+        station_name = str(radio.get("name", ""))
+        status["live"] = True
+        status["source"] = "radio"
+        status["stationId"] = radio.get("id", "")
+        status["stationName"] = station_name
+        status["nowPlaying"] = now_playing
+        status["title"] = station_name
+        status["artist"] = now_playing
+        status["album"] = ""
+    if (not radio and status["playing"] and video_id
+            and video_id != str(previous.get("videoId") or "")):
         sidecar = load_track_meta().get(video_id) or {}
         remember_play({
             "videoId": video_id,
@@ -1332,16 +1355,372 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
             "album": status.get("album") or sidecar.get("album") or "",
             "duration": status.get("duration") or sidecar.get("duration") or 0,
         })
-    maybe_save_session(status)
-    if notify:
+    if not radio:
+        maybe_save_session(status)
+    if notify and not radio:
         notify_track_change(previous, status)
     write_status(status)
     # A one-shot CLI playback start schedules the next-track precache in a
     # detached child, so the first warm does not depend on when the daemon
     # happens to attach to the new mpv. The daemon never sets this flag.
-    if spawn_precache and status.get("playing") and video_id:
+    if spawn_precache and status.get("playing") and video_id and not radio:
         spawn_precache_next()
     return status
+
+
+# ------------------------------------------------- internet radio (Radio Browser)
+
+# Directory lookups go to the community Radio Browser API. Its servers are
+# volunteer-run mirrors behind a round-robin name, so a request tries the
+# stable entry point first and then each mirror directly. The directory asks
+# clients to identify themselves with a descriptive User-Agent.
+RADIO_BROWSER_UA = ("yt-music-bar/2.2.0 "
+                    "(+https://github.com/maffur-hub/youtube-music-bar)")
+RADIO_BROWSER_SERVERS = [
+    "all.api.radio-browser.info",
+    "de1.api.radio-browser.info",
+    "de2.api.radio-browser.info",
+    "nl1.api.radio-browser.info",
+    "fi1.api.radio-browser.info",
+]
+RADIO_BROWSER_TIMEOUT = 12  # seconds per mirror
+MAX_RADIO_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MiB cap per response
+
+# Hand-picked stations that ship with the plugin. Embedded rather than kept as
+# a separate JSON file because install.sh copies backend/yt_music.py into
+# ~/.local/share/yt-music/ as a lone file, so a sibling data file would never
+# be installed. The raw field names below are adapted at read time by
+# normalize_station, the same normalizer used for live directory rows.
+RADIO_CATALOG = [
+    {"uuid": "06faec0e-52eb-11e8-a4d1-52543be04c81", "name": "Triple J", "url": "http://abc.streamguys1.com/live/triplejnsw/icecast.audio", "favicon": "http://www.abc.net.au/core-assets/triplej/favicon-32x32.png", "homepage": "http://www.abc.net.au/triplej/", "tags": "", "country": "AU", "codec": "AAC+", "bitrate": 56, "votes": 916},
+    {"uuid": "5547b37d-c1fb-40a5-af58-2f504bc0a6c9", "name": "Double J QLD", "url": "https://mediaserviceslive.akamaized.net/hls/live/2038342/doublejqld/index.m3u8", "favicon": "", "homepage": "https://www.abc.net.au/listen/doublej", "tags": "", "country": "AU", "codec": "AAC", "bitrate": 252, "votes": 30},
+    {"uuid": "1c6dcd6f-88c6-4fd4-8191-078435168e85", "name": "BBC Radio 6 Music", "url": "http://as-hls-ww-live.akamaized.net/pool_81827798/live/ww/bbc_6music/bbc_6music.isml/bbc_6music-audio%3d320000.norewind.m3u8", "favicon": "https://de8as167a043l.cloudfront.net/styles/images/logosplus/120x120xBBCR6.png", "homepage": "https://www.bbc.co.uk/sounds/play/live:bbc_6music", "tags": "alternative,blues,dance,eclectic,electronic,experimental,funk,grime,hip hop,house,indie,jazz,metal,pop,punk,r&b,reggae,rock,ska,soul,techno,world", "country": "GB", "codec": "UNKNOWN", "bitrate": 0, "votes": 3326},
+    {"uuid": "98adecf7-2683-4408-9be7-02d3f9098eb8", "name": "BBC World Service", "url": "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service", "favicon": "http://cdn-profiles.tunein.com/s24948/images/logoq.jpg?t=1", "homepage": "https://www.bbc.co.uk/programmes/w172xzjgf6lxp7y", "tags": "news,talk", "country": "GB", "codec": "MP3", "bitrate": 56, "votes": 164407},
+    {"uuid": "445cbb3a-1c4e-49aa-a268-f5b6acfa8f2e", "name": "KEXP 90.3 Seattle, WA (AAC 160K)", "url": "https://kexp.streamguys1.com/kexp160.aac", "favicon": "http://www.kexp.org/static/assets/img/favicon-32x32.png", "homepage": "https://www.kexp.org/", "tags": "", "country": "US", "codec": "AAC", "bitrate": 162, "votes": 634},
+    {"uuid": "6238f5e8-a9ee-4c88-9713-2d1ab4112ac9", "name": "KCRW Eclectic 24 (AAC)", "url": "https://streams.kcrw.com/e24_aac", "favicon": "https://www.kcrw.com/++theme++kcrw.theme/icons/apple-touch-icon.png", "homepage": "https://www.kcrw.com/music/shows/eclectic24", "tags": "music", "country": "US", "codec": "AAC", "bitrate": 256, "votes": 82},
+    {"uuid": "932eb148-e6f6-11e9-a96c-52543be04c81", "name": "FIP", "url": "http://icecast.radiofrance.fr/fip-hifi.aac", "favicon": "https://upload.wikimedia.org/wikipedia/fr/thumb/d/d5/FIP_logo_2005.svg/1024px-FIP_logo_2005.svg.png", "homepage": "https://www.fip.fr/", "tags": "aac,music,public radio,radio france", "country": "FR", "codec": "AAC", "bitrate": 192, "votes": 43531},
+    {"uuid": "9617a958-0601-11e8-ae97-52543be04c81", "name": "Radio Paradise Main Mix (EU) 320k AAC", "url": "http://stream-uk1.radioparadise.com/aac-320", "favicon": "https://radioparadise.com/apple-touch-icon.png", "homepage": "https://radioparadise.com/", "tags": "california,eclectic,free,internet,non-commercial,paradise,radio", "country": "US", "codec": "AAC", "bitrate": 320, "votes": 318329},
+    {"uuid": "e6fa9a8a-02a8-11e9-a1be-52543be04c81", "name": "SomaFM Groove Salad Classic (128k MP3)", "url": "https://ice2.somafm.com/gsclassic-128-mp3", "favicon": "https://somafm.com/img3/gsclassic400.jpg", "homepage": "https://somafm.com/groovesalad/", "tags": "ambient,downtempo,early 2000s", "country": "US", "codec": "MP3", "bitrate": 160, "votes": 1362},
+    {"uuid": "9067dc39-4bf4-4364-bd6b-8020cff3e15d", "name": "Nightride FM - Chillsynth", "url": "https://stream.nightride.fm/chillsynth.mp3", "favicon": "https://nightride.fm/thumbnail.png", "homepage": "https://nightride.fm/", "tags": "chillsynth,chillwave,instrumental", "country": "DE", "codec": "MP3", "bitrate": 320, "votes": 1665},
+    {"uuid": "1d730b8a-49e2-403d-870c-07b1e27be7fd", "name": "Jazz24", "url": "https://knkx-live-a.edge.audiocdn.com/6285_256k", "favicon": "", "homepage": "https://www.jazz24.org/", "tags": "", "country": "US", "codec": "AAC", "bitrate": 256, "votes": 302},
+    {"uuid": "3487079b-91b1-4fb8-b315-c4150e705b7a", "name": "WBGO Jazz 88.3 FM", "url": "https://ais-sa8.cdnstream1.com/3629_128.mp3", "favicon": "", "homepage": "https://www.wbgo.org/", "tags": "jazz", "country": "US", "codec": "MP3", "bitrate": 128, "votes": 828},
+    {"uuid": "96077079-0601-11e8-ae97-52543be04c81", "name": "Radio Swiss Classic German", "url": "http://stream.srg-ssr.ch/m/rsc_de/mp3_128", "favicon": "", "homepage": "http://www.radioswissclassic.ch/", "tags": "classical,public radio,srg ssr", "country": "CH", "codec": "MP3", "bitrate": 128, "votes": 9373},
+    {"uuid": "961ac56b-0601-11e8-ae97-52543be04c81", "name": "Radio Swiss Jazz", "url": "http://stream.srg-ssr.ch/m/rsj/mp3_128", "favicon": "", "homepage": "http://www.radioswissjazz.ch/", "tags": "jazz,public radio,srg ssr", "country": "CH", "codec": "MP3", "bitrate": 128, "votes": 27317},
+    {"uuid": "9c2115ee-1bfe-4ca6-981e-2104d7636aee", "name": "Frisky Radio", "url": "https://stream.frisky.friskyradio.com/mp3_low", "favicon": "https://s3.amazonaws.com/media.friskyradio.com/favicon.png", "homepage": "https://www.friskyradio.com/", "tags": "", "country": "US", "codec": "MP3", "bitrate": 96, "votes": 1085},
+    {"uuid": "961e6cac-0601-11e8-ae97-52543be04c81", "name": "NTS Radio 1", "url": "http://stream-relay-geo.ntslive.net/stream", "favicon": "http://www.nts.live/favicon.ico", "homepage": "http://www.nts.live/", "tags": "community radio,dj sets,eclectic,freeform", "country": "GB", "codec": "MP3", "bitrate": 256, "votes": 1845},
+    {"uuid": "b8634a5a-6a46-432c-bc01-f1e3a3c4b2bf", "name": "Rinse FM", "url": "https://admin.stream.rinse.fm/proxy/rinse_uk/stream", "favicon": "", "homepage": "https://www.rinse.fm/", "tags": "", "country": "GB", "codec": "AAC+", "bitrate": 128, "votes": 20},
+]
+
+
+def _int_or_zero(value):
+    """Coerce a directory field to int, defaulting to 0."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _radio_browser_request(path, params):
+    """GET one Radio Browser endpoint, trying each mirror in turn.
+
+    Returns the parsed JSON body from the first mirror that answers. Raises the
+    last error once every mirror has failed; the command layer decides whether
+    to fall back to a stale cache or report the failure.
+    """
+    query = urllib.parse.urlencode(params or {})
+    last_error = None
+    for server in RADIO_BROWSER_SERVERS:
+        url = f"https://{server}{path}"
+        if query:
+            url = f"{url}?{query}"
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": RADIO_BROWSER_UA})
+            with urllib.request.urlopen(
+                    request, timeout=RADIO_BROWSER_TIMEOUT) as response:
+                body = response.read(MAX_RADIO_RESPONSE_BYTES)
+            return json.loads(body.decode("utf-8"))
+        except Exception as e:  # try the next mirror
+            last_error = e
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("no Radio Browser servers configured")
+
+
+def _radio_now_playing(media_title, stream_url):
+    """ICY title for a stream, or "" when mpv only reports a URL fragment.
+
+    mpv reports the URL's last path segment (e.g. "icecast.audio") as
+    media-title until the stream supplies ICY metadata, so such a value must
+    not be shown as if it were a song title.
+    """
+    t = str(media_title or "").strip()
+    if not t or _looks_like_url_title(t):
+        return ""
+    raw = str(stream_url or "")
+    parsed = urllib.parse.urlsplit(raw)
+    tail = raw.rsplit("/", 1)[-1]
+    candidates = {raw, parsed.hostname or "",
+                  parsed.path.rstrip("/").rsplit("/", 1)[-1],
+                  tail, tail.split("?")[0]}
+    candidates = {c.lower() for c in candidates if c}
+    return "" if t.lower() in candidates else t
+
+
+def _radio_browser_report_click(station_id):
+    """Best-effort click report so the directory's stats count this play.
+
+    Silent by design: a failed report must never affect playback, and user
+    stations have no directory id to report.
+    """
+    try:
+        station_id = str(station_id or "")
+        if not station_id or station_id.startswith("user:"):
+            return
+        path = "/json/url/" + urllib.parse.quote(station_id)
+        for server in RADIO_BROWSER_SERVERS:
+            try:
+                request = urllib.request.Request(
+                    f"https://{server}{path}",
+                    headers={"User-Agent": RADIO_BROWSER_UA})
+                with urllib.request.urlopen(
+                        request, timeout=RADIO_BROWSER_TIMEOUT):
+                    return
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def normalize_station(raw, source):
+    """Map one directory or catalog row to the widget's station shape.
+
+    Accepts both live Radio Browser keys (stationuuid, url_resolved,
+    countrycode) and the embedded catalog keys (uuid, url, country), so a
+    single normalizer serves both. Returns None for a row without a playable
+    http(s) stream URL.
+    """
+    if not isinstance(raw, dict):
+        return None
+    url = raw.get("url_resolved") or raw.get("url") or ""
+    scheme = urllib.parse.urlsplit(str(url)).scheme.lower()
+    if scheme not in ("http", "https") or not str(url).strip():
+        return None
+    raw_tags = raw.get("tags")
+    if isinstance(raw_tags, list):
+        tags = [str(t).strip() for t in raw_tags]
+    else:
+        tags = [t.strip() for t in str(raw_tags or "").split(",")]
+    tags = [t for t in tags if t]
+    return {
+        "kind": "station",
+        "id": str(raw.get("stationuuid") or raw.get("uuid")
+                  or raw.get("id") or ""),
+        "name": str(raw.get("name") or ""),
+        "url": str(url),
+        "favicon": str(raw.get("favicon") or ""),
+        "homepage": str(raw.get("homepage") or ""),
+        "tags": tags,
+        "country": str(raw.get("countrycode") or raw.get("country") or ""),
+        "codec": str(raw.get("codec") or ""),
+        "bitrate": _int_or_zero(raw.get("bitrate")),
+        "votes": _int_or_zero(raw.get("votes")),
+        "source": source,
+    }
+
+
+# -------------------------------------------------------- radio favorites
+
+# Saved stations live in one private JSON file. The read path refuses links
+# and FIFOs and refuses oversized files, so a planted file cannot turn into an
+# unbounded read; the write path clamps every string and tag length so a
+# hostile directory row cannot inflate the file without bound.
+RADIO_STATIONS_PATH = os.path.join(STATE_DIR, "radio-stations.json")
+RADIO_STATIONS_MAX = 500
+RADIO_FIELD_MAX = 512
+
+
+def _read_private_json(path, cap_bytes=1024 * 1024, default=None):
+    """Read a small user-owned JSON file, never following a symlink or FIFO.
+
+    Opens O_NOFOLLOW|O_NONBLOCK and validates the already-open fd, so a link
+    swapped in after the check cannot redirect the read. The size cap is
+    enforced before a byte is loaded. Any failure yields `default`.
+    """
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return default
+        if st.st_uid != os.getuid():
+            return default
+        if not 0 <= st.st_size <= cap_bytes:
+            return default
+        chunks = []
+        remaining = cap_bytes
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return json.loads(b"".join(chunks).decode("utf-8"))
+    except Exception:
+        return default
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def load_radio_stations():
+    """Saved radio stations, deduped by id, capped, and normalized.
+
+    Tolerates either the versioned {"stations": [...]} wrapper or a bare list,
+    so a partially written or hand-edited file still loads. Never raises.
+    """
+    try:
+        data = _read_private_json(RADIO_STATIONS_PATH, default={})
+        if isinstance(data, dict):
+            entries = data.get("stations")
+        else:
+            entries = data
+        if not isinstance(entries, list):
+            return []
+        by_id = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            row = normalize_station(entry, entry.get("source") or "favorite")
+            if row:
+                by_id[row["id"]] = row
+        return list(by_id.values())[:RADIO_STATIONS_MAX]
+    except Exception:
+        return []
+
+
+def save_radio_stations(items):
+    """Normalize, dedupe, clamp and write saved stations atomically.
+
+    Field and tag lengths are clamped to keep the on-disk file bounded. Never
+    raises.
+    """
+    try:
+        by_id = {}
+        for entry in items or []:
+            if not isinstance(entry, dict):
+                continue
+            row = normalize_station(entry, entry.get("source") or "favorite")
+            if not row:
+                continue
+            for key in ("id", "name", "url", "favicon", "homepage", "country",
+                        "codec", "source"):
+                row[key] = str(row.get(key) or "")[:RADIO_FIELD_MAX]
+            row["tags"] = [str(t)[:64] for t in row.get("tags") or []][:32]
+            by_id[row["id"]] = row
+        cleaned = list(by_id.values())[:RADIO_STATIONS_MAX]
+        json_dump(RADIO_STATIONS_PATH, {"version": 1, "stations": cleaned},
+                  mode=0o600)
+    except Exception:
+        pass
+
+
+# --------------------------------------------------- radio marker + history
+
+# The live marker is the one thing that tells write_status_from_mpv a stream
+# is playing, so the shared status pipeline (bar pill, Hero) can show it while
+# it stays out of the YouTube history/session/sidecar/precache. The play
+# history is a small, separate, capped list of the stations themselves.
+RADIO_CURRENT_PATH = os.path.join(STATE_DIR, "radio-current.json")
+RADIO_HISTORY_PATH = os.path.join(STATE_DIR, "radio-history.json")
+RADIO_HISTORY_MAX = 50
+
+
+def load_radio_current():
+    """The live radio marker, or None when no stream is marked playing."""
+    data = _read_private_json(RADIO_CURRENT_PATH, default={})
+    if (isinstance(data, dict) and data.get("live") is True
+            and data.get("url")):
+        return data
+    return None
+
+
+def set_radio_current(record):
+    """Stamp the live marker so status writes describe the station."""
+    json_dump(RADIO_CURRENT_PATH, {**record, "live": True}, mode=0o600)
+
+
+def clear_radio_current():
+    """Drop the live radio marker (regular file owned by us). Never raises."""
+    try:
+        st = os.lstat(RADIO_CURRENT_PATH)
+        if stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid():
+            os.unlink(RADIO_CURRENT_PATH)
+    except Exception:
+        pass
+
+
+def record_radio_play(station):
+    """Prepend a station to the radio history (dedup by id, capped)."""
+    try:
+        if not isinstance(station, dict):
+            return
+        station_id = str(station.get("id") or "")
+        if not station_id:
+            return
+        store = [e for e in load_radio_history()
+                 if isinstance(e, dict) and e.get("id") != station_id]
+        tags = station.get("tags")
+        record = {
+            "id": station_id,
+            "name": str(station.get("name") or ""),
+            "url": str(station.get("url") or ""),
+            "favicon": str(station.get("favicon") or ""),
+            "tags": tags if isinstance(tags, list) else [],
+            "country": str(station.get("country") or ""),
+            "codec": str(station.get("codec") or ""),
+            "bitrate": _int_or_zero(station.get("bitrate")),
+            "playedAt": round(time.time()),
+        }
+        store.insert(0, record)
+        del store[RADIO_HISTORY_MAX:]
+        json_dump(RADIO_HISTORY_PATH, store, mode=0o600)
+    except Exception:
+        pass
+
+
+def load_radio_history():
+    """Recently played radio stations, newest first. Never raises."""
+    try:
+        data = _read_private_json(RADIO_HISTORY_PATH, default=[])
+        if isinstance(data, dict):
+            entries = data.get("stations")
+        else:
+            entries = data
+        if not isinstance(entries, list):
+            return []
+        items = []
+        for entry in entries[:RADIO_HISTORY_MAX]:
+            if not isinstance(entry, dict):
+                continue
+            tags = entry.get("tags")
+            items.append({
+                "id": str(entry.get("id") or ""),
+                "name": str(entry.get("name") or ""),
+                "url": str(entry.get("url") or ""),
+                "favicon": str(entry.get("favicon") or ""),
+                "tags": tags if isinstance(tags, list) else [],
+                "country": str(entry.get("country") or ""),
+                "codec": str(entry.get("codec") or ""),
+                "bitrate": _int_or_zero(entry.get("bitrate")),
+                "playedAt": _int_or_zero(entry.get("playedAt")),
+            })
+        return items
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------- commands
@@ -2583,6 +2962,215 @@ def cmd_home(args):
             print(json.dumps({"ok": False, "error": str(e)}))
 
 
+def cmd_station_catalog(args):
+    """List the embedded curated radio stations. Offline; -r is ignored."""
+    _args, _refresh = _strip_refresh(args)
+    items = []
+    for raw in RADIO_CATALOG:
+        row = normalize_station(raw, "catalog")
+        if row:
+            items.append(row)
+    print(json.dumps({"ok": True, "items": items}))
+
+
+def cmd_station_search(args):
+    args, refresh = _strip_refresh(args)
+    limit = 30
+    query_parts = []
+    index = 0
+    while index < len(args):
+        if args[index] == "--limit" and index + 1 < len(args):
+            limit = _int_or_zero(args[index + 1]) or 30
+            limit = max(1, min(100, limit))
+            index += 2
+            continue
+        query_parts.append(args[index])
+        index += 1
+    query = " ".join(query_parts).strip()
+    if not query:
+        print(json.dumps({"ok": False, "error":
+                          "Usage: yt-music-ctl station-search <query> [--limit N]"}))
+        return
+    key = ["search", query.lower(), limit]
+    ttl = METADATA_CACHE_TTL["stations"]
+    if not refresh:
+        payload, fresh = cache_read("stations", key, ttl)
+        if fresh and payload is not None:
+            print(json.dumps(_cache_served(payload)))
+            return
+    try:
+        rows = _radio_browser_request("/json/stations/search", {
+            "name": query,
+            "hidebroken": "true",
+            "order": "clickcount",
+            "reverse": "true",
+            "limit": str(limit),
+        })
+        items = []
+        for raw in rows or []:
+            row = normalize_station(raw, "radio-browser")
+            if row:
+                items.append(row)
+            if len(items) >= limit:
+                break
+        payload = {"ok": True, "items": items, "cached": False}
+        cache_write("stations", key, payload)
+        print(json.dumps(payload))
+    except Exception as e:
+        if not _serve_stale("stations", key, ttl):
+            print(json.dumps({"ok": False, "error": str(e)}))
+
+
+def cmd_station_favorites(args):
+    """List locally saved radio stations. Offline; -r is ignored."""
+    _args, _refresh = _strip_refresh(args)
+    print(json.dumps({"ok": True, "items": load_radio_stations()}))
+
+
+def cmd_station_fav_add(args):
+    """Save one station, from a JSON record or a bare stream URL plus name."""
+    if not args:
+        print(json.dumps({"ok": False, "error":
+                          "Usage: yt-music-ctl station-fav-add "
+                          "'<json>|<url> [name]'"}))
+        return
+    if args[0].lstrip().startswith("{"):
+        try:
+            raw = json.loads(args[0])
+        except (TypeError, ValueError):
+            print(json.dumps({"ok": False, "error": "Invalid station JSON"}))
+            return
+        source = "favorite"
+    else:
+        raw = {"url": args[0], "name": " ".join(args[1:]).strip()}
+        source = "user"
+    row = normalize_station(raw, source)
+    if not row:
+        print(json.dumps({"ok": False, "error": "Invalid station URL"}))
+        return
+    if not row["id"]:
+        digest = hashlib.sha1(row["url"].encode("utf-8")).hexdigest()
+        row["id"] = "user:" + digest
+    updated = []
+    replaced = False
+    for entry in load_radio_stations():
+        if entry.get("id") == row["id"]:
+            updated.append(row)
+            replaced = True
+        else:
+            updated.append(entry)
+    if not replaced:
+        updated.append(row)
+    save_radio_stations(updated)
+    print(json.dumps({"ok": True, "added": True, "id": row["id"],
+                      "count": len(load_radio_stations())}))
+
+
+def cmd_station_fav_remove(args):
+    """Drop one saved station by id. Offline."""
+    args, _refresh = _strip_refresh(args)
+    if not args:
+        print(json.dumps({"ok": False, "error":
+                          "Usage: yt-music-ctl station-fav-remove <id>"}))
+        return
+    target = args[0]
+    items = load_radio_stations()
+    remaining = [e for e in items if e.get("id") != target]
+    removed = len(remaining) != len(items)
+    save_radio_stations(remaining)
+    print(json.dumps({"ok": True, "removed": removed,
+                      "count": len(load_radio_stations())}))
+
+
+def _radio_mpv_argv(url):
+    """mpv argv for one live stream. Pure, so the smoke test can inspect it."""
+    return ["mpv", "--no-video", "--really-quiet",
+            f"--input-ipc-server={MPV_SOCKET}", "--keep-open=no",
+            "--network-timeout=30",
+            "--stream-lavf-o=reconnect=1,reconnect_streamed=1", url]
+
+
+def cmd_station_play(args):
+    """Play one internet radio station through the shared mpv pipeline.
+
+    The station is marked live first, so the status daemon stamps it into the
+    shared status file without recording YouTube history, session, sidecar or
+    precache. Accepts a JSON record, a bare stream URL plus name, or a saved
+    station id.
+    """
+    args, _refresh = _strip_refresh(args)
+    if not args:
+        print(json.dumps({"ok": False, "error":
+                          "Usage: yt-music-ctl station-play "
+                          "'<json>|<url>|<id>' [name]"}))
+        return
+    if args[0].lstrip().startswith("{"):
+        try:
+            raw = json.loads(args[0])
+        except (TypeError, ValueError):
+            print(json.dumps({"ok": False, "error": "Invalid station JSON"}))
+            return
+        source = "favorite"
+    elif args[0].startswith("http://") or args[0].startswith("https://"):
+        raw = {"url": args[0], "name": " ".join(args[1:]).strip()}
+        source = "user"
+    else:
+        raw = None
+        for entry in load_radio_stations():
+            if entry.get("id") == args[0]:
+                raw = entry
+                break
+        if raw is None:
+            print(json.dumps({"ok": False, "error": "Unknown station"}))
+            return
+        source = "favorite"
+    row = normalize_station(raw, source)
+    if not row:
+        print(json.dumps({"ok": False, "error": "Invalid station URL"}))
+        return
+    if not row["id"]:
+        digest = hashlib.sha1(row["url"].encode("utf-8")).hexdigest()
+        row["id"] = "user:" + digest
+    ensure_daemon()
+    mpv_kill()
+    clear_session()
+    ensure_private_runtime_dir()
+    set_radio_current(row)
+    proc = subprocess.Popen(_radio_mpv_argv(row["url"]),
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    json_dump(MPV_PID_PATH, mpv_pid_record(proc))
+    wait_for_mpv()
+    props = wait_for_metadata()
+    if not mpv_is_running():
+        clear_radio_current()
+        write_status({"ok": False, "playing": False})
+        print(json.dumps({"ok": False, "error": "Stream failed to play"}))
+        return
+    write_status_from_mpv(props)
+    record_radio_play(row)
+    _radio_browser_report_click(row["id"])
+    print(json.dumps({"ok": True, "id": row["id"], "name": row["name"],
+                      "live": True}))
+
+
+def cmd_station_history(args):
+    """List or clear the local radio play history. Offline."""
+    args, _refresh = _strip_refresh(args)
+    if args and args[0] == "clear":
+        json_dump(RADIO_HISTORY_PATH, [], mode=0o600)
+        print(json.dumps({"ok": True, "cleared": True}))
+        return
+    if not args:
+        print(json.dumps({"ok": True, "items": load_radio_history()}))
+        return
+    try:
+        limit = max(1, min(RADIO_HISTORY_MAX, int(args[0])))
+    except ValueError:
+        fail("Usage: yt-music-ctl station-history [limit|clear]")
+    print(json.dumps({"ok": True, "items": load_radio_history()[:limit]}))
+
+
 def cmd_history(args):
     args, refresh = _strip_refresh(args)
     limit = 100
@@ -3450,6 +4038,7 @@ def _mix_launch(track_list):
     that serves a mix, cache hit included.
     """
     remember_tracks(track_list)
+    clear_radio_current()
     mpv_kill()
     clear_session()
     urls = [watch_url(t['videoId']) for t in track_list]
@@ -3561,6 +4150,7 @@ def cmd_queue_playlist(args):
             return
         remember_tracks(meta)
         mpv_kill()
+        clear_radio_current()
         clear_session()
         ensure_private_runtime_dir()
         proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
@@ -3627,6 +4217,7 @@ def cmd_enqueue(args):
         urls = [watch_url(t['videoId']) for t in meta]
         if mode == "play" or not mpv_is_running():
             mpv_kill()
+            clear_radio_current()
             clear_session()
             ensure_private_runtime_dir()
             proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
@@ -3701,6 +4292,7 @@ def cmd_enqueue_files(args):
         urls = [watch_url(t['videoId']) for t in meta]
         if mode == "play" or not mpv_is_running():
             mpv_kill()
+            clear_radio_current()
             clear_session()
             ensure_private_runtime_dir()
             proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
@@ -4033,6 +4625,7 @@ def cmd_queue_move(args):
 
 def cmd_stop(args):
     mpv_kill()
+    clear_radio_current()
     write_status({"ok": True, "playing": False})
     print(json.dumps({"ok": True}))
 
@@ -4726,6 +5319,13 @@ COMMANDS = {
     "artist": cmd_artist,
     "radio": cmd_artist_radio,
     "home": cmd_home,
+    "station-catalog": cmd_station_catalog,
+    "station-search": cmd_station_search,
+    "station-favorites": cmd_station_favorites,
+    "station-fav-add": cmd_station_fav_add,
+    "station-fav-remove": cmd_station_fav_remove,
+    "station-play": cmd_station_play,
+    "station-history": cmd_station_history,
     "history": cmd_history,
     "last-played": cmd_last_played,
     "restore": cmd_restore,
@@ -4788,6 +5388,13 @@ def main():
         print("  liked [limit]            List liked songs")
         print("  library <kind> [limit]   List library songs|albums|artists|playlists")
         print("  home [sections]          Fetch the home feed (default 3 sections)")
+        print("  station-catalog           List the bundled curated radio stations (JSON)")
+        print("  station-search <query>    Search the Radio Browser directory [--limit N]")
+        print("  station-favorites         List saved radio stations (JSON)")
+        print("  station-fav-add '<json>|<url> [name]'   Save a radio station to favorites")
+        print("  station-fav-remove <id>   Remove a saved radio station")
+        print("  station-play '<json>|<url>|<id>' [name]  Play an internet radio station")
+        print("  station-history [limit|clear]   Recently played radio stations")
         print("  history [limit]          List recently played tracks")
         print("  last-played [limit|clear] Local play history")
         print("  restore                  Rebuild the last queue, paused")

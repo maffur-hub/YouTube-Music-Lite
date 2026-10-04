@@ -9,6 +9,8 @@ const ICON = {
   prev: String.fromCharCode(0xf048),        // nf-fa-backward
   like: String.fromCharCode(0xf004),        // nf-fa-heart
   dislike: String.fromCharCode(0xf165),     // nf-fa-thumbs_down
+  star: String.fromCharCode(0xf005),        // nf-fa-star
+  starOutline: String.fromCharCode(0xf006), // nf-fa-star_o
   search: String.fromCharCode(0xf002),      // nf-fa-search
   playlist: String.fromCharCode(0xf00b),    // nf-fa-list
   stop: String.fromCharCode(0xf04d),        // nf-fa-stop
@@ -51,6 +53,12 @@ function fmtDuration(secs) {
 
 function barLabel(status) {
   if (!status || !status.playing) return ""
+  if (status.live === true) {
+    // A live radio station has no track to name: show the station cleanly
+    // instead of appending the ICY now-playing string as if it were an artist.
+    var station = status.stationName || status.title || ""
+    return truncate(station, 40)
+  }
   var title = status.title || ""
   var artist = status.artist || ""
   var text = artist ? (title + " · " + artist) : title
@@ -64,6 +72,12 @@ function isPlaying(status) {
 function tooltipText(status) {
   if (!status) return "YouTube Music — not logged in"
   if (!status.playing && !status.paused) return "YouTube Music — idle"
+  if (status.live === true) {
+    var live = ["LIVE", status.stationName || status.title || "Radio"]
+    if (status.nowPlaying) live.push(status.nowPlaying)
+    if (status.paused) live.push("paused")
+    return live.join(" — ")
+  }
   var parts = [status.title || "Unknown"]
   if (status.artist) parts.push(status.artist)
   if (status.album) parts.push(status.album)
@@ -88,6 +102,7 @@ function truncate(text, maxLen) {
 function rowKey(row) {
   if (!row) return ""
   if (row.key) return String(row.key)
+  if (row.kind === "station") return "st:" + String(row.id || "")
   if (row.kind === "song") return "v:" + row.videoId
   return String(row.kind) + ":" + String(row.browseId)
 }

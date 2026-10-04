@@ -28,6 +28,9 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
   property var musicStatus: hostWidget ? hostWidget.musicStatus : null
+  // True while the shared mpv pipeline is playing an internet radio stream
+  // (status.source === "radio"). The Hero and transport branch on it.
+  readonly property bool radioLive: !!(root.musicStatus && root.musicStatus.live)
 
   property bool openedFromHotkey: false
   property bool busy: false
@@ -95,6 +98,20 @@ Panel {
   property var queueTracks: []
   // Local play history (newest first) from `yt-music-ctl last-played`.
   property var lastPlayed: []
+  // Internet radio: a bundled curated catalog, a locally saved favorites list
+  // and a directory search, all filled from the backend's `station-*`
+  // commands. `stationRows` is the list the Stations tab renders for the
+  // current section.
+  property string stationSection: "featured"
+  property string stationQuery: ""
+  property var stationResults: []
+  property var stationFavorites: []
+  property var stationCatalog: []
+  readonly property var stationRows: root.stationSection === "search"
+    ? root.stationResults
+    : (root.stationSection === "featured" ? root.stationCatalog : root.stationFavorites)
+  property bool stationBusy: false
+  property string pendingStationSearch: ""
   property int queuePosition: -1
   property string contextQueueKey: ""
   property string queueKey: ""
@@ -159,13 +176,15 @@ Panel {
   readonly property var tabItems: {
     var items = []
     var qn = root.queueTracks.length
-    items.push({ key: "queue", label: qn > 0 ? "Up Next (" + qn + ")" : "Up Next" })
+    items.push({ key: "queue", label: qn > 0 ? "Next (" + qn + ")" : "Next" })
     items.push({ key: "search", label: "Search" })
-    items.push({ key: "last", label: "Last Played" })
+    items.push({ key: "last", label: "History" })
     if (root.loggedIn) {
       items.push({ key: "playlists", label: "Playlists" })
       items.push({ key: "library", label: "Library" })
     }
+    // Radio needs no YouTube login, so Stations is always visible and last.
+    items.push({ key: "stations", label: "Stations" })
     return items
   }
   readonly property string activeListKind: root.libraryDetail
@@ -177,6 +196,7 @@ Panel {
     : root.activeTab === "search" ? (root.searchResults.length > 0 ? "search" : "")
     : root.activeTab === "last" ? (root.lastPlayed.length > 0 ? "last" : "")
     : root.activeTab === "playlists" ? (root.playlistTracks.length > 0 ? "playlist" : "")
+    : root.activeTab === "stations" ? ""
     : (root.libraryList.length > 0 ? "library" : "")
   readonly property var activeList: root.activeListKind === "search" ? root.searchResults
     : (root.activeListKind === "last" ? root.lastPlayed
@@ -216,6 +236,12 @@ Panel {
     if (root.detailActive && root.activeTab !== root.detailTab) root.closeDetail()
     // Opening Up Next should land on the playing row, not the top of the queue.
     if (root.activeTab === "queue") queueScrollTimer.restart()
+    if (root.activeTab === "stations") {
+      root.refreshStationFavorites()
+      root.refreshStationCatalog()
+      if (root.stationSection === "search" && root.stationQuery !== "")
+        root.searchStations(root.stationQuery)
+    }
   }
   onActiveListKindChanged: root.selectedIndex = -1
   function hasTab(key) {
@@ -268,6 +294,8 @@ Panel {
     root.refresh()
     root.refreshQueue()
     root.refreshLastPlayed()
+    root.refreshStationFavorites()
+    root.refreshStationCatalog()
     root.restoreSession()
   }
 
@@ -289,7 +317,8 @@ Panel {
         " p=os.path.expanduser('~/.local/state/yt-music/ui-state.json')\n" +
         " os.makedirs(os.path.dirname(p),exist_ok=True)\n" +
         " d={'libraryKind':sys.argv[1],'libraryRefId':sys.argv[2],"
-        + "'activeTab':sys.argv[3],'searchFilter':sys.argv[4]}\n" +
+        + "'activeTab':sys.argv[3],'searchFilter':sys.argv[4],"
+        + "'stationSection':sys.argv[5]}\n" +
         " t=p+'.tmp'\n" +
         " f=open(t,'w')\n" +
         " f.write(json.dumps(d))\n" +
@@ -314,7 +343,7 @@ Panel {
     uiSaveProc.command = ["python3", "-c", root.uiStateScript("save"),
       root.libraryKind, root.libraryRefId,
       (root.activeTab === "") ? "search" : root.activeTab,
-      root.searchFilter]
+      root.searchFilter, root.stationSection]
     root.startProcess(uiSaveProc, "uiSave")
   }
 
@@ -333,6 +362,10 @@ Panel {
     if (filter === "songs" || filter === "albums" || filter === "artists"
         || filter === "playlists")
       root.searchFilter = filter
+    var stationSection = String(data.stationSection || "")
+    if (stationSection === "featured" || stationSection === "favorites"
+        || stationSection === "search")
+      root.stationSection = stationSection
     var kind = String(data.libraryKind || "")
     var refId = String(data.libraryRefId || "")
     var restored = false
@@ -350,7 +383,7 @@ Panel {
     var tab = String(data.activeTab || "")
     // Back-compat: pre-tab state files only stored a libraryExpanded boolean.
     if (tab !== "search" && tab !== "last" && tab !== "playlists"
-        && tab !== "library" && tab !== "queue")
+        && tab !== "library" && tab !== "queue" && tab !== "stations")
       tab = (data.libraryExpanded === true && restored) ? "library" : "search"
     // A restored detail must be hosted by the restored tab, otherwise
     // onActiveTabChanged would close it right away.
@@ -464,6 +497,11 @@ Panel {
     if (key === "likedSet") return likedSetDeadline
     if (key === "queueClear") return queueClearDeadline
     if (key === "restore") return restoreDeadline
+    if (key === "stationFavorites") return stationFavoritesDeadline
+    if (key === "stationCatalog") return stationCatalogDeadline
+    if (key === "stationSearch") return stationSearchDeadline
+    if (key === "stationPlay") return stationPlayDeadline
+    if (key === "stationFav") return stationFavDeadline
     return null
   }
 
@@ -474,6 +512,7 @@ Panel {
     else if (key === "play" || key === "mix" || key === "queue" || key === "logout" || key === "create" || key === "cmd") root.busy = false
     else if (key === "albumCmd") { root.albumCmdRunning = false; root.pumpAlbumCmdQueue() }
     else if (key === "lyrics") root.lyricsLoading = false
+    else if (key === "stationPlay") root.stationBusy = false
   }
 
   function appendProcessOutput(key, chunk) {
@@ -741,13 +780,115 @@ Panel {
     root.startProcess(mixProc, "mix")
   }
 
+  // ---- internet radio (Stations tab): favorites + directory search
+  function normalizeStations(items) {
+    var out = []
+    var count = Math.min(Array.isArray(items) ? items.length : 0, 100)
+    for (var i = 0; i < count; i++) {
+      var item = items[i] || {}
+      var tags = []
+      if (Array.isArray(item.tags)) {
+        for (var t = 0; t < item.tags.length && tags.length < 32; t++) {
+          var tag = root.boundedString(item.tags[t], 64).trim()
+          if (tag !== "") tags.push(tag)
+        }
+      }
+      out.push({
+        kind: "station",
+        id: root.boundedString(item.id, 256),
+        name: root.boundedString(item.name, 256),
+        url: root.boundedString(item.url, 1024),
+        favicon: root.boundedString(item.favicon, 1024),
+        homepage: root.boundedString(item.homepage, 1024),
+        tags: tags,
+        country: root.boundedString(item.country, 16),
+        codec: root.boundedString(item.codec, 32),
+        bitrate: Math.max(0, Number(item.bitrate) || 0),
+        source: root.boundedString(item.source, 32)
+      })
+    }
+    return out
+  }
+
+  function stationSubtitle(row) {
+    if (!row) return ""
+    var parts = []
+    var country = root.boundedString(row.country, 16).trim()
+    if (country !== "") parts.push(country)
+    var tags = []
+    if (Array.isArray(row.tags)) {
+      for (var i = 0; i < row.tags.length && tags.length < 4; i++) {
+        var tag = String(row.tags[i] || "").trim()
+        if (tag !== "") tags.push(tag)
+      }
+    }
+    if (tags.length > 0) parts.push(tags.join(", "))
+    var codec = root.boundedString(row.codec, 32).trim()
+    var bitrate = Math.max(0, Number(row.bitrate) || 0)
+    if (codec !== "" && bitrate > 0) parts.push(codec + " " + Math.round(bitrate) + "k")
+    else if (codec !== "") parts.push(codec)
+    else if (bitrate > 0) parts.push(Math.round(bitrate) + "k")
+    return parts.join(" · ")
+  }
+
+  function refreshStationFavorites() {
+    if (stationFavoritesProc.running) return
+    root.startProcess(stationFavoritesProc, "stationFavorites")
+  }
+
+  function refreshStationCatalog() {
+    if (stationCatalogProc.running) return
+    root.startProcess(stationCatalogProc, "stationCatalog")
+  }
+
+  function searchStations(query) {
+    var q = root.boundedString(query, 256).trim()
+    if (q === "") {
+      root.stationResults = []
+      return
+    }
+    if (stationSearchProc.running) {
+      // Let the in-flight lookup finish; the newest query runs on exit.
+      root.pendingStationSearch = q
+      return
+    }
+    stationSearchProc.command = [root.ctlPath, "station-search", q]
+    root.startProcess(stationSearchProc, "stationSearch")
+  }
+
+  function isStationFavorite(id) {
+    var target = String(id || "")
+    for (var i = 0; i < root.stationFavorites.length; i++) {
+      if (String(root.stationFavorites[i].id) === target) return true
+    }
+    return false
+  }
+
+  function toggleStationFavorite(row) {
+    if (!row || !row.url || stationFavProc.running) return
+    if (root.isStationFavorite(row.id))
+      stationFavProc.command = [root.ctlPath, "station-fav-remove", String(row.id)]
+    else
+      stationFavProc.command = [root.ctlPath, "station-fav-add", JSON.stringify(row)]
+    root.startProcess(stationFavProc, "stationFav")
+  }
+
+  function playStation(row) {
+    if (!row || !row.url || root.stationBusy || root.busy) return
+    root.stationBusy = true
+    stationPlayProc.command = [root.ctlPath, "station-play", JSON.stringify(row)]
+    root.startProcess(stationPlayProc, "stationPlay")
+  }
+
   // Commands whose effect is already visible in the UI (transport, queue
   // shuffling); their generic "<Command> ✓" acknowledgment would only flash a
   // pointless toast.
   readonly property var quietCommands: ["toggle", "pause", "resume", "next", "prev",
     "seek", "seek-pct", "volume", "stop", "loop", "shuffle", "queue-jump",
     "queue-remove", "queue-remove-keys", "queue-move", "queue-clear", "enqueue", "enqueue-files",
-    "precache", "thumbnail", "image", "status"]
+    "precache", "thumbnail", "image", "status",
+    "station-play", "station-search", "station-favorites", "station-catalog",
+    "station-fav-add", "station-fav-remove"]
   function isQuietCommand(name) { return root.quietCommands.indexOf(name) !== -1 }
 
   function sendCmd(command, args) {
@@ -1698,6 +1839,131 @@ Panel {
     }
   }
 
+  Process {
+    id: stationFavoritesProc
+    command: [root.ctlPath, "station-favorites"]
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationFavorites", data) }
+    }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationFavoritesErr", data) }
+    }
+    onStarted: stationFavoritesDeadline.start()
+    onExited: function(exitCode) {
+      stationFavoritesDeadline.stop()
+      var data = root.parseProcessJson(root.processText("stationFavorites"))
+      if (data && data.ok && Array.isArray(data.items))
+        root.stationFavorites = root.normalizeStations(data.items)
+    }
+  }
+
+  Process {
+    id: stationCatalogProc
+    command: [root.ctlPath, "station-catalog"]
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationCatalog", data) }
+    }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationCatalogErr", data) }
+    }
+    onStarted: stationCatalogDeadline.start()
+    onExited: function(exitCode) {
+      stationCatalogDeadline.stop()
+      var data = root.parseProcessJson(root.processText("stationCatalog"))
+      if (data && data.ok && Array.isArray(data.items))
+        root.stationCatalog = root.normalizeStations(data.items)
+    }
+  }
+
+  Process {
+    id: stationSearchProc
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationSearch", data) }
+    }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationSearchErr", data) }
+    }
+    onStarted: stationSearchDeadline.start()
+    onExited: function(exitCode) {
+      stationSearchDeadline.stop()
+      var data = root.parseProcessJson(root.processText("stationSearch"))
+      // `station-search` does not echo the query, so compare the one we sent:
+      // a late response for a replaced query must not overwrite newer results.
+      var sent = String((stationSearchProc.command || [])[2] || "")
+      if (data && data.ok && sent === root.stationQuery)
+        root.stationResults = root.normalizeStations(data.items)
+      if (root.pendingStationSearch !== "") {
+        var pending = root.pendingStationSearch
+        root.pendingStationSearch = ""
+        root.searchStations(pending)
+      }
+    }
+  }
+
+  Process {
+    id: stationPlayProc
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationPlay", data) }
+    }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationPlayErr", data) }
+    }
+    onStarted: stationPlayDeadline.start()
+    onExited: function(exitCode) {
+      stationPlayDeadline.stop()
+      root.stationBusy = false
+      var data = root.parseProcessJson(root.processText("stationPlay"))
+      if (exitCode === 0 && (!data || data.ok !== false)) {
+        root.statusText = "Playing station ✓"
+        root.refresh()
+      } else {
+        root.statusText = root.boundedString((data && data.error) || "Station failed", 256)
+      }
+    }
+  }
+
+  Process {
+    id: stationFavProc
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationFav", data) }
+    }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationFavErr", data) }
+    }
+    onStarted: stationFavDeadline.start()
+    onExited: function(exitCode) {
+      stationFavDeadline.stop()
+      var data = root.parseProcessJson(root.processText("stationFav"))
+      if (data && data.ok === false)
+        root.statusText = root.boundedString(data.error || "Station update failed", 256)
+      root.refreshStationFavorites()
+    }
+  }
+
+  Timer { id: stationFavoritesDeadline; interval: root.commandTimeout; onTriggered: { if (stationFavoritesProc.running) stationFavoritesProc.running = false } }
+  Timer { id: stationCatalogDeadline; interval: root.commandTimeout; onTriggered: { if (stationCatalogProc.running) stationCatalogProc.running = false } }
+  Timer { id: stationSearchDeadline; interval: root.commandTimeout; onTriggered: { if (stationSearchProc.running) stationSearchProc.running = false } }
+  Timer { id: stationPlayDeadline; interval: root.commandTimeout; onTriggered: { if (stationPlayProc.running) { stationPlayProc.running = false; root.stationBusy = false } } }
+  Timer { id: stationFavDeadline; interval: root.commandTimeout; onTriggered: { if (stationFavProc.running) { stationFavProc.running = false; root.refreshStationFavorites() } } }
+
+  Timer {
+    id: stationSearchDebounce
+    interval: 350
+    repeat: false
+    onTriggered: root.searchStations(root.stationQuery)
+  }
+
+  // Only search when the user actually asks for it; empty queries reset.
+  onStationQueryChanged: {
+    if (String(root.stationQuery || "").trim() === "") {
+      stationSearchDebounce.stop()
+      root.stationResults = []
+      root.pendingStationSearch = ""
+      return
+    }
+    stationSearchDebounce.restart()
+  }
+
   Timer {
     id: lastPlayedDeadline
     interval: root.commandTimeout
@@ -2587,6 +2853,7 @@ Panel {
       blocked: searchField.activeFocus || newPlaylistField.activeFocus
         || contextMenu.opened || playlistPickerMenu.opened
         || renameField.activeFocus || queueSaveField.activeFocus
+        || stationField.activeFocus
       onCloseRequested: {
         if (root.deleteConfirmOpen) { root.deleteConfirmOpen = false; return }
         root.close()
@@ -2683,9 +2950,9 @@ Panel {
           x: Math.max(0, (panelFlick.width - width) / 2)
           spacing: Style.spacing.panelGap
 
-          // ---- not logged in
+          // ---- not logged in (radio needs no login, so hide this while live)
           Rectangle {
-            visible: !root.loggedIn
+            visible: !root.loggedIn && !root.radioLive
             width: parent.width
             height: Style.space(120)
             radius: Style.cornerRadius
@@ -2832,7 +3099,7 @@ Panel {
                 }
 
                 Item {
-                  visible: Model.isActive(root.musicStatus)
+                  visible: Model.isActive(root.musicStatus) && !root.radioLive
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -2868,7 +3135,7 @@ Panel {
                 }
 
                 Item {
-                  visible: Model.isActive(root.musicStatus)
+                  visible: Model.isActive(root.musicStatus) && !root.radioLive
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -2886,7 +3153,7 @@ Panel {
                 }
 
                 Item {
-                  visible: Model.isActive(root.musicStatus)
+                  visible: Model.isActive(root.musicStatus) && !root.radioLive
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -2904,7 +3171,7 @@ Panel {
                 }
 
                 Item {
-                  visible: Model.isActive(root.musicStatus)
+                  visible: Model.isActive(root.musicStatus) && !root.radioLive
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -2922,7 +3189,7 @@ Panel {
                 }
 
                 Item {
-                  visible: Model.isActive(root.musicStatus)
+                  visible: Model.isActive(root.musicStatus) && !root.radioLive
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -2958,7 +3225,7 @@ Panel {
                 }
 
                 Item {
-                  visible: Model.isActive(root.musicStatus)
+                  visible: Model.isActive(root.musicStatus) && !root.radioLive
                   width: Style.space(28)
                   height: Style.space(32)
                   Text {
@@ -3007,7 +3274,8 @@ Panel {
 
                 Text {
                   textFormat: Text.PlainText
-                  text: Model.isActive(root.musicStatus) ? "NOW PLAYING" : "LAST PLAYED"
+                  text: root.radioLive ? "LIVE RADIO"
+                    : (Model.isActive(root.musicStatus) ? "NOW PLAYING" : "HISTORY")
                   color: Color.accent
                   font.family: root.fam
                   font.pixelSize: Style.font.caption
@@ -3018,7 +3286,9 @@ Panel {
                   textFormat: Text.PlainText
                   width: parent.width
                   elide: Text.ElideRight
-                  text: root.heroTrack ? (root.heroTrack.title || "") : ""
+                  text: root.radioLive
+                    ? (root.musicStatus.stationName || root.musicStatus.title || "")
+                    : (root.heroTrack ? (root.heroTrack.title || "") : "")
                   color: root.fg
                   font.family: root.fam
                   font.pixelSize: Style.font.heading
@@ -3028,7 +3298,10 @@ Panel {
                   textFormat: Text.PlainText
                   width: parent.width
                   elide: Text.ElideRight
-                  text: root.heroTrack ? (root.heroTrack.artist || "") : ""
+                  // Live radio has no album line: "LIVE" plus the ICY track.
+                  text: root.radioLive
+                    ? ("LIVE" + (root.musicStatus.nowPlaying ? " · " + root.musicStatus.nowPlaying : ""))
+                    : (root.heroTrack ? (root.heroTrack.artist || "") : "")
                   color: Qt.darker(root.fg, 1.4)
                   font.family: root.fam
                   font.pixelSize: Style.font.bodySmall
@@ -3038,9 +3311,9 @@ Panel {
             }
           }
 
-          // ---- seek
+          // ---- seek (song position only; a live stream has no seek/duration)
           Row {
-            visible: Model.isActive(root.musicStatus)
+            visible: Model.isActive(root.musicStatus) && !root.radioLive
             width: parent.width
             height: Style.spacing.controlHeight
             spacing: Style.spacing.lg
@@ -3143,9 +3416,9 @@ Panel {
             }
           }
 
-          // ---- lyrics toggle
+          // ---- lyrics toggle (a live stream has no track lyrics)
           Row {
-            visible: Model.isActive(root.musicStatus)
+            visible: Model.isActive(root.musicStatus) && !root.radioLive
             width: parent.width
             height: Style.spacing.controlHeight
             spacing: Style.spacing.sm
@@ -3648,7 +3921,7 @@ Panel {
                   spacing: Style.spacing.sm
 
                   PanelSectionHeader {
-                    text: "LAST PLAYED"
+                    text: "HISTORY"
                     foreground: root.fg
                     fontFamily: root.fam
                     height: parent.height
@@ -3946,7 +4219,7 @@ Panel {
                     fontSize: Style.font.bodySmall
                     foreground: root.fg
                     visible: root.searchFilter === "songs" && root.songCount(root.searchResults) > 0
-                    enabled: !root.busy && root.songCount(root.searchResults) > 0
+                    enabled: !root.busy && root.songCount(root.searchResults) > 0 && !root.radioLive
                     onClicked: root.enqueueFiles("queue")
                   }
                 }
@@ -3987,7 +4260,7 @@ Panel {
                     fontFamily: root.fam
                     fontSize: Style.font.bodySmall
                     foreground: root.fg
-                    enabled: !root.busy
+                    enabled: !root.busy && !root.radioLive
                     onClicked: {
                       var ids = Model.videoIds(root.selectedRows)
                       if (ids.length > 0) root.sendCmd("enqueue-files", ["queue"].concat(ids))
@@ -4597,6 +4870,278 @@ Panel {
               font.pixelSize: Style.font.bodySmall
             }
 
+            // ---- stations (internet radio; no YouTube login required)
+            Column {
+              id: stationsSection
+              visible: root.activeTab === "stations"
+              width: parent.width
+              spacing: Style.space(6)
+
+              PanelSeparator {
+                foreground: root.fg
+              }
+
+              Row {
+                width: parent.width
+                height: Style.spacing.controlHeight
+                spacing: Style.spacing.sm
+
+                PanelSectionHeader {
+                  text: "STATIONS"
+                  foreground: root.fg
+                  fontFamily: root.fam
+                  height: parent.height
+                  verticalAlignment: Text.AlignVCenter
+                }
+              }
+
+              Row {
+                width: parent.width - Style.space(40)
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.spacing.sm
+
+                Repeater {
+                  model: [
+                    { key: "featured", label: "Featured" },
+                    { key: "favorites", label: "Favorites" },
+                    { key: "search", label: "Search" }
+                  ]
+                  delegate: Button {
+                    width: (parent.width - Style.spacing.sm * 2) / 3
+                    height: Style.spacing.controlHeight
+                    text: modelData.label
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    selected: root.stationSection === modelData.key
+                    active: root.stationSection === modelData.key
+                    bordered: true
+                    foreground: root.fg
+                    onClicked: root.stationSection = modelData.key
+                  }
+                }
+              }
+
+              Row {
+                visible: root.stationSection === "search"
+                width: parent.width - Style.space(40)
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.spacing.sm
+
+                TextField {
+                  id: stationField
+                  width: parent.width - Style.space(44) - Style.spacing.sm
+                  height: Style.spacing.controlHeight
+                  placeholderText: "Search radio stations..."
+                  horizontalAlignment: Text.AlignHCenter
+                  foreground: root.fg
+                  hasCursor: false
+                  onTextChanged: root.stationQuery = text.trim()
+                  onAccepted: root.searchStations(text)
+                }
+
+                Button {
+                  width: Style.space(44)
+                  height: Style.spacing.controlHeight
+                  iconText: Model.ICON.close
+                  tooltipText: "Clear station search"
+                  fontFamily: root.fam
+                  foreground: root.fg
+                  visible: stationField.text !== "" || root.stationResults.length > 0
+                  onClicked: {
+                    stationField.text = ""
+                    root.stationQuery = ""
+                    root.stationResults = []
+                  }
+                }
+              }
+
+              Flickable {
+                id: stationList
+                width: parent.width
+                height: root.listViewportHeight(stationList, stationListContent.implicitHeight)
+                contentWidth: width
+                contentHeight: stationListContent.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                flickableDirection: Flickable.VerticalFlick
+                interactive: contentHeight > height
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                Column {
+                  id: stationListContent
+                  width: parent.width
+                  spacing: 0
+
+                  Repeater {
+                    id: stationRepeater
+                    model: root.stationRows
+                    delegate: Item {
+                      id: stationRow
+                      width: contentColumn.width
+                      height: Style.space(40)
+
+                      RowHighlight {
+                        id: stationRowBg
+                        foreground: root.fg
+                        hasCursor: index === root.selectedIndex
+                        hovered: stationRowClick.containsMouse
+                        current: root.radioLive
+                          && String(modelData.id) === String(root.musicStatus.stationId)
+                      }
+
+                      MouseArea {
+                        id: stationRowClick
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.playStation(modelData)
+                      }
+
+                      Row {
+                        anchors.fill: parent
+                        spacing: Style.spacing.sm
+
+                        Rectangle {
+                          width: Style.space(24)
+                          height: Style.space(24)
+                          anchors.verticalCenter: parent.verticalCenter
+                          radius: Style.space(3)
+                          color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.1)
+                          clip: true
+
+                          Image {
+                            id: stationLogo
+                            anchors.fill: parent
+                            source: modelData.favicon ? modelData.favicon : ""
+                            asynchronous: true
+                            cache: true
+                            fillMode: Image.PreserveAspectFit
+                            onStatusChanged: if (status === Image.Error) visible = false
+                          }
+
+                          Text {
+                            anchors.centerIn: parent
+                            visible: stationLogo.status !== Image.Ready
+                            text: Model.ICON.globe
+                            color: Color.accent
+                            font.family: root.fam
+                            font.pixelSize: Style.font.bodySmall
+                          }
+                        }
+
+                        Column {
+                          width: parent.width - Style.space(128) - Style.spacing.sm * 4
+                          spacing: 0
+
+                          Text {
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: modelData.name || modelData.url || "Unknown"
+                            color: root.fg
+                            font.family: root.fam
+                            font.pixelSize: Style.font.bodySmall
+                          }
+                          Text {
+                            visible: root.stationSubtitle(modelData) !== ""
+                            textFormat: Text.PlainText
+                            width: parent.width
+                            elide: Text.ElideRight
+                            text: root.stationSubtitle(modelData)
+                            color: Qt.darker(root.fg, 1.4)
+                            font.family: root.fam
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+
+                        Text {
+                          visible: root.radioLive
+                            && String(modelData.id) === String(root.musicStatus.stationId)
+                          textFormat: Text.PlainText
+                          width: Style.space(36)
+                          text: "LIVE"
+                          color: Color.accent
+                          font.family: root.fam
+                          font.pixelSize: Style.font.caption
+                          font.bold: true
+                          verticalAlignment: Text.AlignVCenter
+                        }
+
+                        PanelActionButton {
+                          width: Style.space(32)
+                          height: Style.space(28)
+                          iconText: root.isStationFavorite(modelData.id)
+                            ? Model.ICON.star : Model.ICON.starOutline
+                          tooltipText: root.isStationFavorite(modelData.id)
+                            ? "Remove from favorites" : "Add to favorites"
+                          fontFamily: root.fam
+                          foreground: root.isStationFavorite(modelData.id) ? Color.accent : root.fg
+                          enabled: !stationFavProc.running
+                          onClicked: root.toggleStationFavorite(modelData)
+                        }
+
+                        PanelActionButton {
+                          width: Style.space(36)
+                          height: Style.space(28)
+                          iconText: Model.ICON.play
+                          tooltipText: "Play station"
+                          fontFamily: root.fam
+                          foreground: root.fg
+                          enabled: !root.stationBusy
+                          onClicked: root.playStation(modelData)
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              Text {
+                visible: root.stationSection === "search" && stationSearchProc.running
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "Searching…"
+                color: Qt.darker(root.fg, 1.4)
+                font.family: root.fam
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Text {
+                visible: root.stationSection === "search" && !stationSearchProc.running
+                  && root.stationQuery !== "" && root.stationResults.length === 0
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "No stations found."
+                color: Qt.darker(root.fg, 1.4)
+                font.family: root.fam
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Text {
+                visible: root.stationSection === "featured"
+                  && !stationCatalogProc.running && root.stationCatalog.length === 0
+                width: parent.width
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                text: "No featured stations available."
+                color: Qt.darker(root.fg, 1.4)
+                font.family: root.fam
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Text {
+                visible: root.stationSection === "favorites"
+                  && !stationFavoritesProc.running && root.stationFavorites.length === 0
+                width: parent.width
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                text: "No favorite stations yet. Search the directory and tap the star."
+                color: Qt.darker(root.fg, 1.4)
+                font.family: root.fam
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
             // ---- library
             Column {
               visible: root.loggedIn && (root.activeTab === "library" || root.libraryDetail)
@@ -4666,7 +5211,7 @@ Panel {
 
                 Button {
                   visible: root.libraryKind === "album" || root.libraryKind === "artist"
-                  enabled: !root.busy && root.librarySongCount() > 0
+                  enabled: !root.busy && root.librarySongCount() > 0 && !root.radioLive
                   width: Style.space(72)
                   height: Style.space(28)
                   text: "Queue all"

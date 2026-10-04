@@ -1619,6 +1619,291 @@ else
     fail "offline hardening (cookie parser, non-mutating auth, lstat image cache)" "$(cat "$ERR_FILE")"
 fi
 
+# ------------------------------------------------- stations (offline)
+# The embedded station catalog and the Radio Browser client. Fully offline:
+# the network helper is monkeypatched and the metadata cache is redirected to
+# a temp directory, so no real cache entry is read or written.
+section "stations (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import contextlib, importlib.util, io, json, os, sys, tempfile
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_stations_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# Keep every cache read/write inside a throwaway directory.
+mod.METADATA_CACHE_DIR = tempfile.mkdtemp(prefix="yt-music-stations-")
+mod.STATUS_PATH = os.path.join(mod.METADATA_CACHE_DIR, "status.json")
+mod.TRACK_META_PATH = os.path.join(mod.METADATA_CACHE_DIR, "track-meta.json")
+mod.SESSION_PATH = os.path.join(mod.METADATA_CACHE_DIR, "session.json")
+mod.RADIO_CURRENT_PATH = os.path.join(mod.METADATA_CACHE_DIR, "radio-current.json")
+mod.RADIO_HISTORY_PATH = os.path.join(mod.METADATA_CACHE_DIR, "radio-history.json")
+mod.RADIO_STATIONS_PATH = os.path.join(mod.METADATA_CACHE_DIR, "radio-stations.json")
+
+# 1. normalize_station maps a live Radio Browser row, splits tags, and rejects
+#    a missing / non-http(s) stream URL.
+bbc = {
+    "stationuuid": "abc-123",
+    "name": "BBC Radio 6 Music",
+    "url_resolved": "http://example.com/bbc",
+    "favicon": "http://example.com/f.png",
+    "homepage": "http://example.com",
+    "tags": "alternative, electronic,",
+    "countrycode": "GB",
+    "codec": "MP3",
+    "bitrate": "128",
+    "votes": "42",
+}
+row = mod.normalize_station(bbc, "radio-browser")
+assert row["kind"] == "station", row
+assert row["id"] == "abc-123", row
+assert row["url"] == "http://example.com/bbc", row
+assert row["tags"] == ["alternative", "electronic"], row
+assert row["country"] == "GB", row
+assert row["bitrate"] == 128 and row["votes"] == 42, row
+assert row["source"] == "radio-browser", row
+assert mod.normalize_station({"url": "javascript:alert(1)"}, "x") is None
+assert mod.normalize_station({"url": ""}, "x") is None
+
+# 1b. normalize_station accepts its own output (the favorites round-trip) and
+#     preserves the id, url and already-split tags.
+again = mod.normalize_station(mod.normalize_station(bbc, "radio-browser"),
+                              "favorite")
+assert again["id"] == "abc-123", again
+assert again["url"] == "http://example.com/bbc", again
+assert again["tags"] == ["alternative", "electronic"], again
+
+# 2. Every catalog entry normalizes to a playable URL, Triple J is present and
+#    the station ids are unique.
+assert any(e.get("name") == "Triple J" for e in mod.RADIO_CATALOG)
+ids = []
+for entry in mod.RADIO_CATALOG:
+    normalized = mod.normalize_station(entry, "catalog")
+    assert isinstance(normalized, dict), entry
+    assert normalized["url"], entry
+    ids.append(normalized["id"])
+assert len(ids) == len(set(ids)), ids
+
+# 3. station-search parses --limit, writes a cache record, and still answers
+#    from that record once the network starts failing.
+limit_seen = []
+def fake_request(request_path, params):
+    limit_seen.append((request_path, params))
+    return [{"stationuuid": "u1", "name": "Triple J",
+             "url_resolved": "https://example.com/triplej",
+             "tags": "alt", "countrycode": "AU"}]
+
+mod._radio_browser_request = fake_request
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_station_search(["triple", "j"])
+first = json.loads(out.getvalue())
+assert first["ok"] is True, first
+assert first["items"] and first["items"][0]["name"] == "Triple J", first
+assert first["items"][0]["kind"] == "station", first
+assert limit_seen[0][0] == "/json/stations/search", limit_seen
+assert limit_seen[0][1]["limit"] == "30", limit_seen
+payload, fresh = mod.cache_read("stations", ["search", "triple j", 30],
+                                mod.METADATA_CACHE_TTL["stations"])
+assert payload is not None and fresh, (payload, fresh)
+
+def dead_request(request_path, params):
+    raise RuntimeError("offline")
+
+mod._radio_browser_request = dead_request
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_station_search(["triple", "j"])
+second = json.loads(out.getvalue())
+assert second["ok"] is True and second["items"], second
+
+# 4. All station commands are registered.
+assert "station-search" in mod.COMMANDS
+assert "station-catalog" in mod.COMMANDS
+assert "station-favorites" in mod.COMMANDS
+assert "station-fav-add" in mod.COMMANDS
+assert "station-fav-remove" in mod.COMMANDS
+
+# The favorites file is redirected into the throwaway cache dir so no real
+# state is ever read or written.
+mod.RADIO_STATIONS_PATH = os.path.join(mod.METADATA_CACHE_DIR,
+                                       "radio-stations.json")
+
+
+def call(func, argv):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        func(argv)
+    return json.loads(out.getvalue())
+
+
+# 5. Add a station from a JSON record, then read it back.
+added = call(mod.cmd_station_fav_add,
+             [json.dumps({"stationuuid": "fav-1", "name": "Saved One",
+                          "url": "https://example.com/one", "tags": "a, b",
+                          "countrycode": "GB"})])
+assert added["ok"] is True and added["id"] == "fav-1", added
+assert added["count"] == 1, added
+favs = call(mod.cmd_station_favorites, [])
+assert favs["ok"] is True and len(favs["items"]) == 1, favs
+assert favs["items"][0]["name"] == "Saved One", favs
+assert favs["items"][0]["tags"] == ["a", "b"], favs
+
+# 6. Re-adding the same id upserts rather than duplicates.
+dup = call(mod.cmd_station_fav_add,
+           [json.dumps({"stationuuid": "fav-1", "name": "Renamed",
+                        "url": "https://example.com/one"})])
+assert dup["count"] == 1, dup
+favs = call(mod.cmd_station_favorites, [])
+assert len(favs["items"]) == 1, favs
+assert favs["items"][0]["name"] == "Renamed", favs
+
+# 7. Add via the URL path: the id is derived and the name is preserved.
+url_add = call(mod.cmd_station_fav_add,
+               ["https://example.com/stream", "My", "Station"])
+assert url_add["ok"] is True, url_add
+assert url_add["id"].startswith("user:"), url_add
+assert url_add["count"] == 2, url_add
+favs = call(mod.cmd_station_favorites, [])
+saved = [e for e in favs["items"] if e["id"] == url_add["id"]]
+assert saved and saved[0]["name"] == "My Station", favs
+
+# 8. Remove by id drops only that entry.
+removed = call(mod.cmd_station_fav_remove, [url_add["id"]])
+assert removed["ok"] is True and removed["removed"] is True, removed
+assert removed["count"] == 1, removed
+favs = call(mod.cmd_station_favorites, [])
+assert all(e["id"] != url_add["id"] for e in favs["items"]), favs
+
+# 9. A symlinked stations file is refused, not followed.
+target = os.path.join(mod.METADATA_CACHE_DIR, "link-target.json")
+with open(target, "w") as fh:
+    json.dump({"stations": [{"stationuuid": "x", "name": "Evil",
+                             "url": "https://example.com/evil"}]}, fh)
+if os.path.exists(mod.RADIO_STATIONS_PATH):
+    os.unlink(mod.RADIO_STATIONS_PATH)
+os.symlink(target, mod.RADIO_STATIONS_PATH)
+assert mod.load_radio_stations() == [], "followed symlink"
+os.unlink(mod.RADIO_STATIONS_PATH)
+
+# 10. Corrupt and oversized files both load as empty.
+with open(mod.RADIO_STATIONS_PATH, "w") as fh:
+    fh.write("{ not valid json")
+assert mod.load_radio_stations() == [], "corrupt file loaded"
+with open(mod.RADIO_STATIONS_PATH, "wb") as fh:
+    fh.write(b"[" + b" " * (2 * 1024 * 1024) + b"]")
+assert mod.load_radio_stations() == [], "oversized file loaded"
+os.unlink(mod.RADIO_STATIONS_PATH)
+
+# 11. The stored list is capped at RADIO_STATIONS_MAX.
+original_max = mod.RADIO_STATIONS_MAX
+mod.RADIO_STATIONS_MAX = 2
+for i in range(3):
+    call(mod.cmd_station_fav_add,
+         [json.dumps({"stationuuid": "cap-%d" % i, "name": "Cap %d" % i,
+                      "url": "https://example.com/cap%d" % i})])
+assert len(mod.load_radio_stations()) == 2, mod.load_radio_stations()
+mod.RADIO_STATIONS_MAX = original_max
+
+# 12. video_id_from_url only parses YouTube hosts, so a stream URL carrying a
+#     v=/device= parameter can no longer masquerade as a video id.
+assert mod.video_id_from_url(
+    "https://www.youtube.com/watch?v=abcdefghijk") == "abcdefghijk"
+assert mod.video_id_from_url("https://youtu.be/abcdefghijk") == "abcdefghijk"
+assert mod.video_id_from_url(
+    "https://music.youtube.com/watch?v=abcdefghijk") == "abcdefghijk"
+assert mod.video_id_from_url(
+    "https://evil.example/stream?v=abcdefghijk") is None
+assert mod.video_id_from_url("https://host/live?device=abcdefghijk") is None
+
+# 13. Marker lifecycle: set, load, clear.
+mod.set_radio_current({"id": "u1", "name": "Triple J",
+                       "url": "https://x/s"})
+assert mod.load_radio_current(), "marker not set"
+mod.clear_radio_current()
+assert mod.load_radio_current() is None, "marker not cleared"
+
+# 14. A live marker makes write_status_from_mpv stamp the station and skip the
+#     recording side effects (history, session, notifications, precache).
+calls = []
+mod.remember_play = lambda *a, **k: calls.append("remember_play")
+mod.maybe_save_session = lambda *a, **k: calls.append("maybe_save_session")
+mod.notify_track_change = lambda *a, **k: calls.append("notify_track_change")
+mod.spawn_precache_next = lambda *a, **k: calls.append("spawn_precache_next")
+mod.set_radio_current({"id": "u1", "name": "Triple J", "url": "https://x/s"})
+status = mod.write_status_from_mpv({"pause": False,
+                                    "media-title": "Some Song",
+                                    "duration": 0, "time-pos": 3,
+                                    "path": "https://x/s"})
+assert status["live"] is True, status
+assert status["source"] == "radio", status
+assert status["stationName"] == "Triple J", status
+assert status["nowPlaying"] == "Some Song", status
+assert status["title"] == "Triple J", status
+assert status["artist"] == "Some Song", status
+assert "remember_play" not in calls, calls
+assert "maybe_save_session" not in calls, calls
+assert "notify_track_change" not in calls, calls
+assert "spawn_precache_next" not in calls, calls
+
+# 15. A URL-like media-title leaves nowPlaying empty (it is not real ICY data).
+mod.set_radio_current({"id": "u1", "name": "Triple J", "url": "https://x/s"})
+status_url = mod.write_status_from_mpv({"pause": False,
+                                         "media-title": "https://x/s",
+                                         "duration": 0, "time-pos": 3,
+                                         "path": "https://x/s"})
+assert status_url["nowPlaying"] == "", status_url
+
+# 15b. _radio_now_playing drops URL fragments mpv reports before ICY metadata
+#      arrives, but keeps a real song title.
+triplej_url = "http://abc.streamguys1.com/live/triplejnsw/icecast.audio"
+assert mod._radio_now_playing("icecast.audio", triplej_url) == ""
+assert mod._radio_now_playing("", triplej_url) == ""
+assert mod._radio_now_playing("http://x/y", triplej_url) == ""
+assert mod._radio_now_playing("abc.streamguys1.com", triplej_url) == ""
+assert mod._radio_now_playing("Fleetwood Mac - Dreams",
+                              triplej_url) == "Fleetwood Mac - Dreams"
+
+# 16. With no marker the YouTube path is unchanged: no live keys, and the
+#     track is recorded exactly once.
+mod.clear_radio_current()
+calls[:] = []
+status2 = mod.write_status_from_mpv({"pause": False, "media-title": "T",
+                                      "path": "https://www.youtube.com/watch?v=abcdefghijk",
+                                      "duration": 10, "time-pos": 1})
+assert "live" not in status2, status2
+assert calls.count("remember_play") == 1, calls
+
+# 17. The pure mpv argv builder carries the stream flags and the URL.
+argv = mod._radio_mpv_argv("https://x/s")
+assert "--no-video" in argv, argv
+assert any(a.startswith("--input-ipc-server=") for a in argv), argv
+assert "--network-timeout=30" in argv, argv
+assert argv[-1] == "https://x/s", argv
+
+# 18. record_radio_play dedupes by id (newest first); station-history clear
+#     empties the file.
+mod.record_radio_play({"id": "r1", "name": "A", "url": "https://x/a"})
+mod.record_radio_play({"id": "r1", "name": "A2", "url": "https://x/a"})
+hist = mod.load_radio_history()
+assert len(hist) == 1 and hist[0]["name"] == "A2", hist
+cleared = call(mod.cmd_station_history, ["clear"])
+assert cleared["ok"] is True and cleared["cleared"] is True, cleared
+assert mod.load_radio_history() == [], mod.load_radio_history()
+
+# 19. Both new commands are registered.
+assert "station-play" in mod.COMMANDS
+assert "station-history" in mod.COMMANDS
+PY
+if [[ $? -eq 0 ]]; then
+    pass "stations (catalog, search, favorites persistence + hardening)"
+else
+    fail "stations (catalog, search, favorites persistence + hardening)" "$(cat "$ERR_FILE")"
+fi
+
 printf '\nPASS %d / FAIL %d\n' "$PASS" "$FAIL"
 if [[ $FAIL -gt 0 ]]; then
     exit 1
