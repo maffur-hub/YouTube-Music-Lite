@@ -49,6 +49,8 @@ Panel {
   property real visualizerPeak: 0
   readonly property int visualizerBarCount: 24
   readonly property int visualizerLadderSegments: 28
+  readonly property int visualizerVerticalSegments: 20
+  readonly property bool visualizerVerticalStyle: root.visualizerStyle === "vuv"
   readonly property string cavaConfigPath: Qt.resolvedUrl("cava.conf").toString().replace("file://", "")
 
   readonly property string ctlPath: Quickshell.env("HOME") + "/.local/bin/yt-music-ctl"
@@ -330,7 +332,8 @@ Panel {
       : (root.visualizerStyle === "mirror" ? "gradient"
       : (root.visualizerStyle === "gradient" ? "meter"
       : (root.visualizerStyle === "meter" ? "vu"
-      : (root.visualizerStyle === "vu" ? "peak" : "bars"))))
+      : (root.visualizerStyle === "vu" ? "vuv"
+      : (root.visualizerStyle === "vuv" ? "peak" : "bars")))))
   }
 
   function visualizerStyleLabel() {
@@ -338,7 +341,8 @@ Panel {
       : (root.visualizerStyle === "mirror" ? "Mirror"
       : (root.visualizerStyle === "gradient" ? "Gradient"
       : (root.visualizerStyle === "meter" ? "Meter"
-      : (root.visualizerStyle === "vu" ? "VU" : "Peak"))))
+      : (root.visualizerStyle === "vu" ? "VU"
+      : (root.visualizerStyle === "vuv" ? "VU Vertical" : "Peak")))))
   }
 
   function visualizerBarColor(level) {
@@ -419,7 +423,8 @@ Panel {
     var visualizerStyle = String(data.visualizerStyle || "")
     if (visualizerStyle === "bars" || visualizerStyle === "mirror"
         || visualizerStyle === "gradient" || visualizerStyle === "meter"
-        || visualizerStyle === "vu" || visualizerStyle === "peak")
+        || visualizerStyle === "vu" || visualizerStyle === "vuv"
+        || visualizerStyle === "peak")
       root.visualizerStyle = visualizerStyle
     var kind = String(data.libraryKind || "")
     var refId = String(data.libraryRefId || "")
@@ -3402,7 +3407,7 @@ Panel {
             id: visualizerStrip
             visible: root.visualizerOn && Model.isActive(root.musicStatus)
             width: parent.width
-            height: Style.space(22)
+            height: root.visualizerVerticalStyle ? Style.space(64) : Style.space(22)
 
             // 1. Spectrum bars (bars / mirror / gradient / meter)
             Item {
@@ -3463,6 +3468,34 @@ Panel {
                         || (index + 1) / (root.visualizerLadderSegments - 1) * 100 > root.visualizerPeak))
                   width: (vuRenderer.width - vuRenderer.spacing * (root.visualizerLadderSegments - 1)) / root.visualizerLadderSegments
                   height: vuRenderer.height
+                  color: (lit || peakLit)
+                    ? root.visualizerZoneColor(fraction * 100)
+                    : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
+                }
+              }
+            }
+
+            // 4. Vertical VU ladder (vuv): bottom-to-top LED segments with the
+            // same green/amber/red zones and peak-hold as the horizontal VU.
+            Column {
+              id: vuVerticalRenderer
+              anchors.fill: parent
+              visible: root.visualizerStyle === "vuv"
+              spacing: 1
+              verticalLayoutDirection: Column.BottomToTop
+
+              Repeater {
+                model: root.visualizerVerticalSegments
+
+                delegate: Rectangle {
+                  readonly property real fraction: index / (root.visualizerVerticalSegments - 1)
+                  readonly property bool lit: fraction * 100 <= root.visualizerLevel
+                  readonly property bool peakLit: root.visualizerPeak > 0
+                    && (fraction * 100 <= root.visualizerPeak
+                      && (index === root.visualizerVerticalSegments - 1
+                        || (index + 1) / (root.visualizerVerticalSegments - 1) * 100 > root.visualizerPeak))
+                  width: vuVerticalRenderer.width
+                  height: (vuVerticalRenderer.height - vuVerticalRenderer.spacing * (root.visualizerVerticalSegments - 1)) / root.visualizerVerticalSegments
                   color: (lit || peakLit)
                     ? root.visualizerZoneColor(fraction * 100)
                     : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
