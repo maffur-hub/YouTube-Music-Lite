@@ -183,6 +183,35 @@ function cavaZone(level) {
   return "red"
 }
 
+// Complete cava config written to the runtime path. Display-only: changing
+// channels/scaling never affects audio playback.
+function cavaConfig(channels, scaling) {
+  var ch = channels === "mono" ? "mono" : "stereo"
+  var sc = scaling === "decibel" ? "decibel" : "linear"
+  return "[general]\n"
+    + "bars = 24\n"
+    + "framerate = 30\n"
+    + "autosens = 1\n"
+    + "sensitivity = 100\n"
+    + "scaling = " + sc + "\n"
+    + "live-config = 1\n"
+    + "\n[input]\n"
+    + "method = pulse\n"
+    + "source = auto\n"
+    + "\n[output]\n"
+    + "method = raw\n"
+    + "raw_target = /dev/stdout\n"
+    + "data_format = ascii\n"
+    + "ascii_max_range = 100\n"
+    + "bar_delimiter = 59\n"
+    + "frame_delimiter = 10\n"
+    + "channels = " + ch + "\n"
+    + "mono_option = average\n"
+    + "\n[smoothing]\n"
+    + "noise_reduction = 65\n"
+    + "monstercat = 1.2\n"
+}
+
 function truncate(text, maxLen) {
   var t = String(text || "")
   if (t.length <= maxLen) return t
@@ -378,6 +407,7 @@ if (typeof module !== "undefined") {
     cavaScaleBars: cavaScaleBars,
     cavaVolumeScale: cavaVolumeScale,
     cavaZone: cavaZone,
+    cavaConfig: cavaConfig,
     truncate: truncate,
     rowKey: rowKey,
     selectedCount: selectedCount,

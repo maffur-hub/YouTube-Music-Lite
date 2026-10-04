@@ -230,6 +230,26 @@ eq(Model.cavaLevel(new Array(24).fill(100)), 100, "cavaLevel of an all-loud fram
 var messy = Model.cavaLevel([NaN, 200, -5])
 ok(messy >= 0 && messy <= 100, "cavaLevel bounds NaN/out-of-range input")
 
+// --- cavaConfig
+ok(Model.cavaConfig("stereo", "linear").indexOf("channels = stereo") !== -1,
+  "cavaConfig keeps stereo")
+ok(Model.cavaConfig(undefined, undefined).indexOf("channels = stereo") !== -1,
+  "cavaConfig defaults unknown channels to stereo")
+ok(Model.cavaConfig("bogus", "linear").indexOf("channels = stereo") !== -1,
+  "cavaConfig falls back to stereo for an invalid channel")
+ok(Model.cavaConfig("mono", "linear").indexOf("channels = mono") !== -1,
+  "cavaConfig maps mono")
+ok(Model.cavaConfig("stereo", "decibel").indexOf("scaling = decibel") !== -1,
+  "cavaConfig maps decibel")
+ok(Model.cavaConfig("stereo", "bogus").indexOf("scaling = linear") !== -1,
+  "cavaConfig falls back to linear for invalid scaling")
+ok(Model.cavaConfig("mono", "decibel").indexOf("live-config = 1") !== -1,
+  "cavaConfig enables live-config")
+ok(Model.cavaConfig("mono", "decibel").indexOf("mono_option = average") !== -1,
+  "cavaConfig sets mono_option to average")
+ok(Model.cavaConfig("mono", "decibel").indexOf("[general]") === 0,
+  "cavaConfig starts with [general]")
+
 // --- cavaZone
 eq(Model.cavaZone(0), "green", "cavaZone(0) is green")
 eq(Model.cavaZone(59), "green", "cavaZone(59) is green")

@@ -43,6 +43,14 @@ Panel {
   property var visualizerBars: []
   property bool visualizerOn: true
   property string visualizerStyle: "bars"
+  // Display-only cava settings for every visualizer style: mirrored stereo vs
+  // left-to-right mono, and linear vs decibel scaling.
+  property string visualizerChannels: "stereo"
+  property string visualizerScaling: "linear"
+  // True once the runtime cava config has been written, so cavaProc does not
+  // start against a missing file.
+  property bool cavaReady: false
+  property bool cavaWritePending: false
   // Latest frame's peak (0..100) and its decaying peak-hold, driving the VU
   // ladders.
   property real visualizerLevel: 0
@@ -53,7 +61,9 @@ Panel {
   readonly property int visualizerLadderSegments: 28
   readonly property int visualizerVerticalSegments: 20
   readonly property int visualizerSpectrumSegments: 10
-  readonly property string cavaConfigPath: Qt.resolvedUrl("cava.conf").toString().replace("file://", "")
+  readonly property string cavaRuntimePath: Quickshell.env("HOME") + "/.local/state/yt-music/cava-runtime.conf"
+  onVisualizerChannelsChanged: root.writeCavaConfig()
+  onVisualizerScalingChanged: root.writeCavaConfig()
 
   readonly property string ctlPath: Quickshell.env("HOME") + "/.local/bin/yt-music-ctl"
   readonly property color fg: root.barForeground
@@ -364,6 +374,14 @@ Panel {
     return z === "red" ? "#e05555" : (z === "amber" ? "#e8c34a" : "#3bd66b")
   }
 
+  function writeCavaConfig() {
+    if (cavaWriteProc.running) {
+      root.cavaWritePending = true
+      return
+    }
+    cavaWriteProc.running = true
+  }
+
   function uiStateScript(mode) {
     if (mode === "save") {
       return "import json,sys,os\n" +
@@ -373,7 +391,8 @@ Panel {
         " d={'libraryKind':sys.argv[1],'libraryRefId':sys.argv[2],"
         + "'activeTab':sys.argv[3],'searchFilter':sys.argv[4],"
         + "'stationSection':sys.argv[5],'visualizerOn':sys.argv[6],"
-        + "'visualizerStyle':sys.argv[7]}\n" +
+        + "'visualizerStyle':sys.argv[7],'visualizerChannels':sys.argv[8],"
+        + "'visualizerScaling':sys.argv[9]}\n" +
         " t=p+'.tmp'\n" +
         " f=open(t,'w')\n" +
         " f.write(json.dumps(d))\n" +
@@ -399,7 +418,8 @@ Panel {
       root.libraryKind, root.libraryRefId,
       (root.activeTab === "") ? "search" : root.activeTab,
       root.searchFilter, root.stationSection,
-      root.visualizerOn ? "1" : "0", root.visualizerStyle]
+      root.visualizerOn ? "1" : "0", root.visualizerStyle,
+      root.visualizerChannels, root.visualizerScaling]
     root.startProcess(uiSaveProc, "uiSave")
   }
 
@@ -431,6 +451,12 @@ Panel {
         || visualizerStyle === "vu" || visualizerStyle === "vuv"
         || visualizerStyle === "vus" || visualizerStyle === "dots")
       root.visualizerStyle = visualizerStyle
+    var visualizerChannels = String(data.visualizerChannels || "")
+    if (visualizerChannels === "mono" || visualizerChannels === "stereo")
+      root.visualizerChannels = visualizerChannels
+    var visualizerScaling = String(data.visualizerScaling || "")
+    if (visualizerScaling === "linear" || visualizerScaling === "decibel")
+      root.visualizerScaling = visualizerScaling
     var kind = String(data.libraryKind || "")
     var refId = String(data.libraryRefId || "")
     var restored = false
@@ -1642,13 +1668,34 @@ Panel {
     }
   }
 
+  // Writes the full cava config into the runtime path cava reads. cava's
+  // `live-config` reloads it in place when the file is rewritten, so changing
+  // an option never restarts the process.
+  Process {
+    id: cavaWriteProc
+    command: ["python3", "-c",
+      "import os,sys\n"
+      + "p=sys.argv[1]\n"
+      + "os.makedirs(os.path.dirname(p),exist_ok=True)\n"
+      + "open(p,'w').write(sys.argv[2])\n",
+      root.cavaRuntimePath,
+      Model.cavaConfig(root.visualizerChannels, root.visualizerScaling)]
+    onExited: function(exitCode) {
+      root.cavaReady = true
+      if (root.cavaWritePending) {
+        root.cavaWritePending = false
+        root.writeCavaConfig()
+      }
+    }
+  }
+
   // Audio visualizer source: cava prints one raw ASCII bar frame per line.
   // It runs only while the panel is open, the toggle is on, and audio is
   // actually playing (radio or YouTube). A missing cava just exits quietly.
   Process {
     id: cavaProc
-    command: ["cava", "-p", root.cavaConfigPath]
-    running: root.opened && root.visualizerOn && Model.isPlaying(root.musicStatus)
+    command: ["cava", "-p", root.cavaRuntimePath]
+    running: root.cavaReady && root.opened && root.visualizerOn && Model.isPlaying(root.musicStatus)
     stdout: SplitParser {
       onRead: function(line) {
         var bars = Model.parseCavaFrame(line, root.visualizerBarCount)
@@ -2943,7 +2990,7 @@ Panel {
 
   MenuPopup { id: playlistOptionsMenu }
 
-  Component.onCompleted: { root.loadThumbnail(); root.loadPlaylists(); root.restoreUiState(); root.refreshLikedSet() }
+  Component.onCompleted: { root.loadThumbnail(); root.loadPlaylists(); root.restoreUiState(); root.refreshLikedSet(); root.writeCavaConfig() }
 
   // ---------------------------------------------------------------- surface
 
@@ -3766,6 +3813,32 @@ Panel {
               fontSize: Style.font.bodySmall
               foreground: root.fg
               onClicked: root.visualizerStyle = root.visualizerStyleNext()
+            }
+
+            Button {
+              visible: root.visualizerOn
+              width: Style.space(56)
+              height: Style.spacing.controlHeight
+              text: root.visualizerChannels === "mono" ? "Mono" : "Stereo"
+              tooltipText: "Visualiser channels (display only)"
+              fontFamily: root.fam
+              fontSize: Style.font.bodySmall
+              foreground: root.fg
+              onClicked: root.visualizerChannels = root.visualizerChannels === "mono"
+                ? "stereo" : "mono"
+            }
+
+            Button {
+              visible: root.visualizerOn
+              width: Style.space(40)
+              height: Style.spacing.controlHeight
+              text: root.visualizerScaling === "decibel" ? "dB" : "LIN"
+              tooltipText: "Visualiser scaling (linear / decibel)"
+              fontFamily: root.fam
+              fontSize: Style.font.bodySmall
+              foreground: root.fg
+              onClicked: root.visualizerScaling = root.visualizerScaling === "decibel"
+                ? "linear" : "decibel"
             }
           }
 
