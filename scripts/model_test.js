@@ -254,4 +254,17 @@ eq(Model.cavaBandPeaks([200, -5, NaN], [], 4), [100, 0, 0],
 eq(Model.cavaBandPeaks([0], [50], NaN), [46],
   "cavaBandPeaks defaults a non-numeric decay to 4")
 
+// --- cavaScaleBars
+eq(Model.cavaScaleBars([], 0.5), [], "cavaScaleBars([]) is []")
+eq(Model.cavaScaleBars([10, 50, 100], 0.5), [5, 25, 50],
+  "cavaScaleBars scales every band by the factor")
+eq(Model.cavaScaleBars([10, 50, 100], 1), [10, 50, 100], "cavaScaleBars(1) is unchanged")
+eq(Model.cavaScaleBars([10, 50, 100], 0), [0, 0, 0], "cavaScaleBars(0) zeroes every band")
+eq(Model.cavaScaleBars([10, 50, 100], 5), [10, 50, 100], "cavaScaleBars clamps a >1 scale to 1")
+eq(Model.cavaScaleBars([10, 50, 100], -2), [0, 0, 0], "cavaScaleBars clamps a <0 scale to 0")
+eq(Model.cavaScaleBars([10, 50, 100], NaN), [10, 50, 100], "cavaScaleBars defaults NaN scale to 1")
+eq(Model.cavaScaleBars([NaN, 50, "x"], 0.5), [0, 25, 0],
+  "cavaScaleBars zeroes NaN/unparseable entries")
+eq(Model.cavaScaleBars(null, 0.5), [], "cavaScaleBars(null) is []")
+
 console.log(passed + " assertions passed")

@@ -48,6 +48,7 @@ Panel {
   property real visualizerLevel: 0
   property real visualizerPeak: 0
   property var visualizerBandPeaks: []
+  property var visualizerSpectrumBars: []
   readonly property int visualizerBarCount: 24
   readonly property int visualizerLadderSegments: 28
   readonly property int visualizerVerticalSegments: 20
@@ -1653,7 +1654,10 @@ Panel {
         root.visualizerBars = bars
         root.visualizerLevel = Model.cavaLevel(bars)
         root.visualizerPeak = Math.max(root.visualizerLevel, Math.max(0, root.visualizerPeak - 2))
-        root.visualizerBandPeaks = Model.cavaBandPeaks(bars, root.visualizerBandPeaks, 4)
+        var bandMax = Model.cavaPeak(bars)
+        var bandScale = bandMax > 0 ? root.visualizerLevel / bandMax : 0
+        root.visualizerSpectrumBars = Model.cavaScaleBars(bars, bandScale)
+        root.visualizerBandPeaks = Model.cavaBandPeaks(root.visualizerSpectrumBars, root.visualizerBandPeaks, 4)
       }
     }
     onExited: {
@@ -1661,6 +1665,7 @@ Panel {
       root.visualizerLevel = 0
       root.visualizerPeak = 0
       root.visualizerBandPeaks = []
+      root.visualizerSpectrumBars = []
     }
   }
 
@@ -3561,7 +3566,7 @@ Panel {
                       delegate: Rectangle {
                         readonly property int segFromBottom: root.visualizerSpectrumSegments - 1 - index
                         readonly property real fraction: segFromBottom / (root.visualizerSpectrumSegments - 1)
-                        readonly property real value: Number(root.visualizerBars[bandColumn.band]) || 0
+                        readonly property real value: Number(root.visualizerSpectrumBars[bandColumn.band]) || 0
                         readonly property real peak: Number(root.visualizerBandPeaks[bandColumn.band]) || 0
                         readonly property bool lit: fraction * 100 <= value
                         readonly property bool peakLit: peak > 0 && fraction * 100 <= peak

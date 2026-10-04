@@ -150,6 +150,23 @@ function cavaBandPeaks(bars, previous, decay) {
   return out
 }
 
+// Scale every band by `scale` (0..1), clamping to 0..100. Used to give the
+// spectrum headroom: the tallest column is mapped to the damped VU level.
+function cavaScaleBars(bars, scale) {
+  var out = []
+  var s = Number(scale)
+  if (isNaN(s)) s = 1
+  s = Math.max(0, Math.min(1, s))
+  if (Array.isArray(bars)) {
+    for (var i = 0; i < bars.length; i++) {
+      var v = Number(bars[i])
+      if (isNaN(v)) v = 0
+      out.push(Math.max(0, Math.min(100, v * s)))
+    }
+  }
+  return out
+}
+
 // Classic LED zone for a 0..100 level: "green" < 60, "amber" < 85, else "red".
 function cavaZone(level) {
   var v = Number(level)
@@ -351,6 +368,7 @@ if (typeof module !== "undefined") {
     cavaPeak: cavaPeak,
     cavaLevel: cavaLevel,
     cavaBandPeaks: cavaBandPeaks,
+    cavaScaleBars: cavaScaleBars,
     cavaZone: cavaZone,
     truncate: truncate,
     rowKey: rowKey,
