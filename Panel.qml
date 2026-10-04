@@ -176,8 +176,8 @@ Panel {
     : (root.lastPlayed.length > 0 ? root.lastPlayed[0] : null)
   readonly property var tabItems: {
     var items = []
-    var qn = root.queueVisibleCount()
-    items.push({ key: "queue", label: qn > 0 ? "Next (" + qn + ")" : "Next" })
+    items.push({ key: "queue", label: root.queueTracks.length > 0
+        ? "Next (" + root.queueTracks.length + ")" : "Next" })
     items.push({ key: "search", label: "Search" })
     items.push({ key: "last", label: "History" })
     if (root.loggedIn) {
@@ -424,17 +424,6 @@ Panel {
     root.startProcess(queueClearProc, "queueClear")
   }
 
-  // Number of queue rows the user can actually see. A live stream is kept in
-  // the array (so indices stay aligned with mpv) but hidden in place.
-  function queueVisibleCount() {
-    var count = 0
-    for (var i = 0; i < root.queueTracks.length; i++) {
-      var row = root.queueTracks[i]
-      if (row && !row.stream) count++
-    }
-    return count
-  }
-
   function queueUpcomingCount() {
     var remaining = root.queueTracks.length - 1
     var pos = (typeof root.queuePosition === "number") ? root.queuePosition : 0
@@ -449,28 +438,11 @@ Panel {
     for (var i = 0; i < root.queueTracks.length; i++) {
       var row = root.queueTracks[i]
       if ((row && row.current) || i === root.queuePosition) {
-        return (row && row.stream) ? -1 : i
+        return i
       }
     }
     return (root.queuePosition >= 0 && root.queuePosition < root.queueTracks.length)
       ? root.queuePosition : -1
-  }
-
-  // Move the queue cursor by `dy`, stepping over hidden stream rows so the
-  // cursor never lands where there is no visible row.
-  function moveQueueSelection(dy) {
-    var rows = root.queueTracks
-    if (rows.length === 0 || dy === 0) return
-    var step = dy > 0 ? 1 : -1
-    var i = root.selectedIndex + step
-    while (i >= 0 && i < rows.length) {
-      var row = rows[i]
-      if (row && !row.stream) {
-        root.selectIndex(i)
-        return
-      }
-      i += step
-    }
   }
 
   // Bring the current queue row into view so the top of the Up Next tab is not
@@ -1783,6 +1755,8 @@ Panel {
             artist: root.boundedString(t.artist, 256),
             album: root.boundedString(t.album, 256),
             duration: Math.max(0, Number(t.duration) || 0),
+            number: Math.max(0, Number(t.number) || 0),
+            stream: !!t.stream,
             current: !!t.current
           })
         }
@@ -2897,10 +2871,6 @@ Panel {
           return
         }
         if (dy !== 0) {
-          if (root.activeListKind === "queue") {
-            root.moveQueueSelection(dy)
-            return
-          }
           var list = root.activeList
           if (list.length > 0) root.selectIndex(Math.max(-1, Math.min(list.length - 1, root.selectedIndex + dy)))
         } else if (dx !== 0) {
@@ -3802,8 +3772,7 @@ Panel {
                     delegate: Item {
                       id: queueRow
                       width: contentColumn.width
-                      height: modelData.stream ? 0 : Style.space(32)
-                      visible: !modelData.stream
+                      height: Style.space(32)
 
                       RowHighlight {
                         id: queueRowBg
@@ -3838,12 +3807,14 @@ Panel {
                             anchors.left: parent.left
                             width: Style.space(20)
                             textFormat: Text.PlainText
-                            text: modelData.stream ? ""
+                            text: modelData.stream
+                              ? Model.ICON.globe
                               : (modelData.current
                                  || index === root.queuePosition)
                                 ? Model.ICON.play
                                 : String(modelData.number || (index + 1))
-                            color: (modelData.current || index === root.queuePosition)
+                            color: (modelData.stream || modelData.current
+                                    || index === root.queuePosition)
                               ? Color.accent
                               : Qt.darker(root.fg, 1.4)
                             font.family: root.fam

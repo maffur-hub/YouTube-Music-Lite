@@ -825,13 +825,15 @@ def maybe_save_session(status):
             if not valid_video_id(vid):
                 vid = cache_audio_video_id(path) if path else ""
             if not valid_video_id(vid):
-                # An entry we cannot resolve would make the resumed queue lossy.
-                return
+                # A stream entry cannot be resumed: skip it and keep the songs
+                # rather than abandoning the whole queue.
+                continue
             ids.append(vid)
         if not ids:
             return
-        if pos < 0 or pos >= len(ids):
-            pos = ids.index(video_id) if video_id in ids else 0
+        # Skipping stream entries shifts the playing index, so map the current
+        # video id into the resolved list instead of trusting mpv's position.
+        pos = ids.index(video_id) if video_id in ids else 0
         save_session(ids, pos, status.get("position") or 0)
         _session_save_state["videoId"] = video_id
         _session_save_state["savedAt"] = now
@@ -2192,6 +2194,7 @@ def cmd_next(args):
         time.sleep(0.3)
         props = get_mpv_props()
     write_status_from_mpv(props)
+    prune_radio_if_moved_on()
     print(json.dumps({"ok": True}))
 
 
@@ -2206,6 +2209,7 @@ def cmd_prev(args):
         time.sleep(0.3)
         props = get_mpv_props()
     write_status_from_mpv(props)
+    prune_radio_if_moved_on()
     print(json.dumps({"ok": True}))
 
 
@@ -3144,21 +3148,18 @@ def cmd_station_play(args):
         digest = hashlib.sha1(row["url"].encode("utf-8")).hexdigest()
         row["id"] = "user:" + digest
     ensure_daemon()
-    set_radio_current(row)
     if mpv_is_running():
-        # Preserve the running queue: insert the stream after the current
-        # entry (plain insert-next), then jump to it and unpause. The
-        # `-play` variant only starts when nothing else is playing.
+        # Pin the station at the TOP of the queue and play it. A stream left
+        # over from a previous station is dropped first; drop_radio_streams
+        # clears the old marker, so stamp the new one afterwards.
+        drop_radio_streams()
+        set_radio_current(row)
         before = mpv_query(["path", "playlist-pos", "playlist-count"]) or {}
-        try:
-            prev_pos = int(before.get("playlist-pos") or 0)
-        except (TypeError, ValueError):
-            prev_pos = 0
         try:
             prev_count = int(before.get("playlist-count") or 0)
         except (TypeError, ValueError):
             prev_count = 0
-        mpv_send("loadfile", [row["url"], "insert-next"])
+        mpv_send("loadfile", [row["url"], "insert-at", "0"])
         # The loadfile is async: wait briefly until the entry exists.
         deadline = time.time() + 2.0
         while time.time() < deadline:
@@ -3169,10 +3170,12 @@ def cmd_station_play(args):
             except (TypeError, ValueError):
                 pass
             time.sleep(0.05)
-        mpv_send("playlist-play-index", [str(prev_pos + 1)])
+        mpv_send("playlist-play-index", ["0"])
         mpv_send("set_property", ["pause", False])
-        props = wait_for_track_change(before.get("path") or "", prev_pos)
+        props = wait_for_track_change(before.get("path") or "",
+                                      before.get("playlist-pos"))
     else:
+        set_radio_current(row)
         mpv_kill()
         ensure_private_runtime_dir()
         proc = subprocess.Popen(_radio_mpv_argv(row["url"]),
@@ -3829,6 +3832,69 @@ def _playlist_state():
     return playlist, pos
 
 
+def _is_stream_entry(entry):
+    """True when a playlist entry is a stream: http(s) and no video id."""
+    if not isinstance(entry, dict):
+        return False
+    filename = entry.get("filename") or ""
+    if valid_video_id(video_id_from_url(filename)):
+        return False
+    return filename.startswith(("http://", "https://"))
+
+
+def drop_radio_streams():
+    """Remove queued stream rows, keeping the one currently playing.
+
+    Stream entries older than the playing index are stale once another track
+    is selected, so they leave the queue. Removal goes in descending index
+    order so earlier removals do not shift later ones. The live marker is
+    dropped afterwards. Never raises.
+    """
+    try:
+        if mpv_is_running():
+            props = mpv_query(["playlist", "playlist-pos"])
+            playlist = props.get("playlist") if isinstance(props, dict) else None
+            if isinstance(playlist, list):
+                try:
+                    pos = int(props.get("playlist-pos"))
+                except (TypeError, ValueError):
+                    pos = -1
+                drop = [index for index, entry in enumerate(playlist)
+                        if index != pos and _is_stream_entry(entry)]
+                for index in sorted(drop, reverse=True):
+                    mpv_send("playlist-remove", [str(index)])
+    except Exception:
+        pass
+    clear_radio_current()
+
+
+def prune_radio_if_moved_on():
+    """Drop a lingering station row once a song is playing.
+
+    A station row is current only while the stream entry plays; after a
+    jump/next/prev lands on a song the station is stale and leaves the queue.
+    Never raises.
+    """
+    try:
+        if not load_radio_current():
+            return
+        # Inspect the entry at the current position, not mpv's `path`: right
+        # after a jump `playlist-pos` is already the song while `path` still
+        # names the stream, so a path-based check would wrongly skip the drop.
+        props = mpv_query(["playlist", "playlist-pos"])
+        playlist = props.get("playlist") if isinstance(props, dict) else None
+        if not isinstance(playlist, list):
+            return
+        try:
+            pos = int(props.get("playlist-pos"))
+        except (TypeError, ValueError):
+            return
+        if 0 <= pos < len(playlist) and not _is_stream_entry(playlist[pos]):
+            drop_radio_streams()
+    except Exception:
+        pass
+
+
 def next_queue_video_id():
     """videoId of the queue entry after the current one, or ""."""
     try:
@@ -4390,14 +4456,16 @@ def _queue_index(args, usage):
         fail("Index must be an integer")
 
 
-def build_queue_rows(playlist, meta):
+def build_queue_rows(playlist, meta, radio=None):
     """Normalize an mpv playlist into queue rows.
 
     A row with an http(s) filename and no resolvable video id is a live
-    stream: it is marked `stream` so the panel can hide it (the stream is
-    now-playing, not an upcoming queue item). `number` is the visible
-    (non-stream) ordinal, kept so hidden rows do not create number gaps.
+    stream: it is marked `stream`, pinned at the top of the queue, and labelled
+    with the station name. `number` is the visible song ordinal; stream rows
+    carry 0 so they show a LIVE badge instead.
     """
+    radio = radio if isinstance(radio, dict) else {}
+    station_name = str(radio.get("name") or "Radio")
     rows = []
     number = 0
     for index, entry in enumerate(playlist or []):
@@ -4416,7 +4484,8 @@ def build_queue_rows(playlist, meta):
         rows.append({
             "index": index,
             "videoId": video_id,
-            "title": str(info.get("title") or entry.get("title") or ""),
+            "title": station_name if is_stream
+                     else str(info.get("title") or entry.get("title") or ""),
             "artist": str(info.get("artist") or ""),
             "album": str(info.get("album") or ""),
             "duration": info.get("duration") or 0,
@@ -4452,7 +4521,7 @@ def cmd_queue_list(args):
     except (TypeError, ValueError):
         position = -1
     meta = load_track_meta()
-    tracks = build_queue_rows(playlist, meta)
+    tracks = build_queue_rows(playlist, meta, radio=load_radio_current())
     print(json.dumps({"ok": True, "playing": True, "saved": False,
                       "position": position,
                       "count": len(tracks), "tracks": tracks}))
@@ -4492,6 +4561,7 @@ def cmd_queue_jump(args):
         time.sleep(0.3)
         props = get_mpv_props()
     write_status_from_mpv(props)
+    prune_radio_if_moved_on()
     print(json.dumps({"ok": True, "position": index}))
 
 

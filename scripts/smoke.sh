@@ -1944,17 +1944,19 @@ assert "station-play" in mod.COMMANDS
 assert "station-history" in mod.COMMANDS
 
 # 20. build_queue_rows marks a live stream row in place (kept so indices stay
-#     aligned with mpv), hides it from the visible ordinal, and leaves YouTube
-#     rows untouched.
+#     aligned with mpv), labels it with the station name, and leaves YouTube
+#     rows untouched. Stream rows carry number 0; songs keep their ordinal.
 mixed = mod.build_queue_rows([
     {"filename": "http://abc.example/live/icecast.audio"},
     {"filename": "https://www.youtube.com/watch?v=abcdefghijk"},
-], {"abcdefghijk": {"title": "T"}})
+], {"abcdefghijk": {"title": "T"}},
+    radio={"name": "Triple J", "url": "http://abc.example/live/icecast.audio"})
 assert len(mixed) == 2, mixed
 assert mixed[0]["stream"] is True, mixed
 assert mixed[0]["index"] == 0, mixed
 assert mixed[0]["videoId"] == "", mixed
 assert mixed[0]["number"] == 0, mixed
+assert mixed[0]["title"] == "Triple J", mixed
 assert mixed[1]["stream"] is False, mixed
 assert mixed[1]["index"] == 1, mixed
 assert mixed[1]["videoId"] == "abcdefghijk", mixed
@@ -1967,14 +1969,75 @@ plain = mod.build_queue_rows([
 assert [row["stream"] for row in plain] == [False, False], plain
 assert [row["number"] for row in plain] == [1, 2], plain
 
-# 21. station-play must not destroy a running queue: with mpv up it inserts the
-#     stream with plain insert-next, jumps to it and unpauses; no kill.
+# 20b. drop_radio_streams removes stale stream rows (not the playing one) in
+#      descending index order and clears the live marker.
+mod.set_radio_current({"id": "u1", "name": "Triple J", "url": "https://x/s"})
+assert mod.load_radio_current(), "marker not set before drop"
+mod.mpv_is_running = lambda: True
+mod.mpv_query = lambda names: {
+    "playlist": [
+        {"filename": "http://abc.example/live/icecast.audio"},
+        {"filename": "https://www.youtube.com/watch?v=abcdefghijk"},
+        {"filename": "https://other.example/live/stream"},
+    ],
+    "playlist-pos": 1,
+}
+drops = []
+mod.mpv_send = lambda *a: drops.append(a)
+mod.drop_radio_streams()
+assert ("playlist-remove", ["2"]) in drops, drops
+assert ("playlist-remove", ["0"]) in drops, drops
+assert drops.index(("playlist-remove", ["2"])) < drops.index(
+    ("playlist-remove", ["0"])), drops
+assert not any(isinstance(c, tuple) and c[0] == "playlist-remove"
+               and c[1] == ["1"] for c in drops), drops
+assert mod.load_radio_current() is None, "marker not cleared after drop"
+
+# 20c. prune_radio_if_moved_on decides from the entry at the CURRENT position
+#      (mpv's `path` lags a jump): a song at the current index drops the stale
+#      stream row; a stream at the current index leaves it and the marker.
+mod.mpv_is_running = lambda: True
+mod.mpv_query = lambda names: {
+    "playlist": [
+        {"filename": "http://x/live"},
+        {"filename": "https://www.youtube.com/watch?v=abcdefghijk"},
+    ],
+    "playlist-pos": 1,
+}
+moves = []
+mod.mpv_send = lambda *a: moves.append(a)
+mod.set_radio_current({"id": "u1", "name": "Triple J", "url": "https://x/s"})
+mod.prune_radio_if_moved_on()
+assert ("playlist-remove", ["0"]) in moves, moves
+assert mod.load_radio_current() is None, "marker not cleared after prune"
+# The stream is current (index 0): nothing is removed and the marker stays.
+mod.set_radio_current({"id": "u1", "name": "Triple J", "url": "https://x/s"})
+mod.mpv_query = lambda names: {
+    "playlist": [
+        {"filename": "http://x/live"},
+        {"filename": "https://www.youtube.com/watch?v=abcdefghijk"},
+    ],
+    "playlist-pos": 0,
+}
+moves = []
+mod.prune_radio_if_moved_on()
+assert moves == [], moves
+assert mod.load_radio_current(), "marker dropped while the stream was current"
+mod.clear_radio_current()
+
+# 21. station-play must not destroy a running queue: with mpv up it drops any
+#     stale stream, inserts the station at the TOP, plays index 0 and unpauses;
+#     no kill.
 calls = []
 q_calls = []
 
 def _fake_query(names):
     q_calls.append(names)
-    if len(q_calls) == 1:
+    if names == ["playlist", "playlist-pos"]:
+        return {"playlist": [
+            {"filename": "https://www.youtube.com/watch?v=oldoldoldol"},
+        ], "playlist-pos": 0}
+    if "playlist" in names:
         return {"path": "/old", "playlist-pos": 0, "playlist-count": 1}
     return {"playlist-count": 2}
 
@@ -1992,14 +2055,12 @@ mod.record_radio_play = lambda *a, **k: None
 mod._radio_browser_report_click = lambda *a, **k: None
 out = call(mod.cmd_station_play, ["https://example.com/live", "Test Station"])
 assert out["ok"] is True, out
-assert ("loadfile", ["https://example.com/live",
-                     "insert-next"]) in calls, calls
-assert ("playlist-play-index", ["1"]) in calls, calls
+assert ("loadfile", ["https://example.com/live", "insert-at", "0"]) in calls, calls
+assert ("playlist-play-index", ["0"]) in calls, calls
 assert ("set_property", ["pause", False]) in calls, calls
-used_next_play = any(
-    isinstance(c, tuple) and len(c) > 1 and "insert-next-play" in c[1]
-    for c in calls)
-assert not used_next_play, calls
+assert not any(
+    isinstance(c, tuple) and len(c) > 1 and isinstance(c[1], list)
+    and "insert-next" in c[1] for c in calls), calls
 assert "kill" not in calls, calls
 assert mod.load_radio_current(), "marker not set after success"
 mod.clear_radio_current()
