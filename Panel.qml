@@ -44,7 +44,7 @@ Panel {
   property bool visualizerOn: true
   property string visualizerStyle: "bars"
   // Latest frame's peak (0..100) and its decaying peak-hold, driving the VU
-  // ladder and the bouncing peak LED.
+  // ladders.
   property real visualizerLevel: 0
   property real visualizerPeak: 0
   property var visualizerBandPeaks: []
@@ -335,8 +335,7 @@ Panel {
       : (root.visualizerStyle === "gradient" ? "meter"
       : (root.visualizerStyle === "meter" ? "vu"
       : (root.visualizerStyle === "vu" ? "vuv"
-      : (root.visualizerStyle === "vuv" ? "vus"
-      : (root.visualizerStyle === "vus" ? "peak" : "bars"))))))
+      : (root.visualizerStyle === "vuv" ? "vus" : "bars")))))
   }
 
   function visualizerStyleLabel() {
@@ -346,7 +345,7 @@ Panel {
       : (root.visualizerStyle === "meter" ? "Meter"
       : (root.visualizerStyle === "vu" ? "VU"
       : (root.visualizerStyle === "vuv" ? "VU Vertical"
-      : (root.visualizerStyle === "vus" ? "VU Spectrum" : "Peak"))))))
+      : (root.visualizerStyle === "vus" ? "VU Spectrum" : "Bars"))))))
   }
 
   function visualizerBarColor(level) {
@@ -428,7 +427,7 @@ Panel {
     if (visualizerStyle === "bars" || visualizerStyle === "mirror"
         || visualizerStyle === "gradient" || visualizerStyle === "meter"
         || visualizerStyle === "vu" || visualizerStyle === "vuv"
-        || visualizerStyle === "vus" || visualizerStyle === "peak")
+        || visualizerStyle === "vus")
       root.visualizerStyle = visualizerStyle
     var kind = String(data.libraryKind || "")
     var refId = String(data.libraryRefId || "")
@@ -3524,30 +3523,6 @@ Panel {
                     ? root.visualizerZoneColor(fraction * 100)
                     : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
                 }
-              }
-            }
-
-            // 3. Peak LED (peak): one block bouncing with the level, plus a
-            // thin dim peak-hold marker.
-            Item {
-              id: peakRenderer
-              anchors.fill: parent
-              visible: root.visualizerStyle === "peak"
-
-              Rectangle {
-                width: Style.space(14)
-                height: parent.height
-                radius: height / 2
-                x: (parent.width - width) * (root.visualizerLevel / 100)
-                color: root.visualizerZoneColor(root.visualizerLevel)
-                Behavior on x { NumberAnimation { duration: 55; easing.type: Easing.OutQuad } }
-              }
-
-              Rectangle {
-                width: 2
-                height: parent.height
-                x: Math.min(parent.width - width, parent.width * (root.visualizerPeak / 100))
-                color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
               }
             }
 
