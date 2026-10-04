@@ -117,6 +117,22 @@ function cavaPeak(bars) {
   return Math.max(0, Math.min(100, m))
 }
 
+// VU level for a cava frame: a blend of the 75th percentile and the peak, so
+// one loud band cannot peg the meter (autosens drives the max to ~100).
+function cavaLevel(bars) {
+  if (!Array.isArray(bars) || bars.length === 0) return 0
+  var sorted = []
+  for (var i = 0; i < bars.length; i++) {
+    var v = Number(bars[i])
+    if (!isNaN(v)) sorted.push(Math.max(0, Math.min(100, v)))
+  }
+  if (sorted.length === 0) return 0
+  sorted.sort(function(a, b) { return a - b })
+  var p75 = sorted[Math.min(sorted.length - 1, Math.floor(0.75 * sorted.length))]
+  var peak = sorted[sorted.length - 1]
+  return Math.max(0, Math.min(100, 0.75 * p75 + 0.25 * peak))
+}
+
 // Classic LED zone for a 0..100 level: "green" < 60, "amber" < 85, else "red".
 function cavaZone(level) {
   var v = Number(level)
@@ -316,6 +332,7 @@ if (typeof module !== "undefined") {
     isPlaying: isPlaying,
     parseCavaFrame: parseCavaFrame,
     cavaPeak: cavaPeak,
+    cavaLevel: cavaLevel,
     cavaZone: cavaZone,
     truncate: truncate,
     rowKey: rowKey,

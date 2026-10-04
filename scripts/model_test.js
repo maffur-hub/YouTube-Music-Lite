@@ -220,6 +220,16 @@ eq(Model.cavaPeak([]), 0, "cavaPeak([])")
 eq(Model.cavaPeak([0, 42, 7]), 42, "cavaPeak picks the highest bar")
 eq(Model.cavaPeak([200, -3]), 100, "cavaPeak clamps to 100")
 
+// --- cavaLevel
+eq(Model.cavaLevel([]), 0, "cavaLevel([])")
+eq(Model.cavaLevel([50, 50, 50, 50]), 50, "cavaLevel of a flat frame is its value")
+var many = new Array(23).fill(0)
+many.push(100)
+ok(Model.cavaLevel(many) < 60, "cavaLevel keeps one loud band from pegging the meter")
+eq(Model.cavaLevel(new Array(24).fill(100)), 100, "cavaLevel of an all-loud frame is 100")
+var messy = Model.cavaLevel([NaN, 200, -5])
+ok(messy >= 0 && messy <= 100, "cavaLevel bounds NaN/out-of-range input")
+
 // --- cavaZone
 eq(Model.cavaZone(0), "green", "cavaZone(0) is green")
 eq(Model.cavaZone(59), "green", "cavaZone(59) is green")

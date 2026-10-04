@@ -1648,7 +1648,7 @@ Panel {
       onRead: function(line) {
         var bars = Model.parseCavaFrame(line, root.visualizerBarCount)
         root.visualizerBars = bars
-        root.visualizerLevel = Model.cavaPeak(bars)
+        root.visualizerLevel = Model.cavaLevel(bars)
         root.visualizerPeak = Math.max(root.visualizerLevel, Math.max(0, root.visualizerPeak - 2))
       }
     }
