@@ -1313,6 +1313,11 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
     position = props.get("time-pos", 0) or 0
     volume = props.get("volume", 100)
     video_id = extract_video_id(props)
+    # The marker reads "a stream is queued", not "a stream is playing": mpv can
+    # have YouTube tracks appended after the stream, and only the entry with no
+    # video id (the stream URL) is live. A per-track mismatch leaves the marker
+    # in place so jumping back to the stream entry goes live again.
+    live = bool(radio) and not video_id
     previous = read_status()
     status = {
         "ok": True,
@@ -1330,7 +1335,7 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
         "playlistPos": props.get("playlist-pos"),
         "playlistCount": props.get("playlist-count"),
     }
-    if radio:
+    if live:
         # A live station plays through the shared mpv pipeline, but must
         # stay out of history, session, sidecar and precache: stamp the
         # station on the status and let the ICY track ride along.
@@ -1341,11 +1346,12 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
         status["source"] = "radio"
         status["stationId"] = radio.get("id", "")
         status["stationName"] = station_name
+        status["stationFavicon"] = str(radio.get("favicon") or "")
         status["nowPlaying"] = now_playing
         status["title"] = station_name
         status["artist"] = now_playing
         status["album"] = ""
-    if (not radio and status["playing"] and video_id
+    if (not live and status["playing"] and video_id
             and video_id != str(previous.get("videoId") or "")):
         sidecar = load_track_meta().get(video_id) or {}
         remember_play({
@@ -1355,15 +1361,15 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
             "album": status.get("album") or sidecar.get("album") or "",
             "duration": status.get("duration") or sidecar.get("duration") or 0,
         })
-    if not radio:
+    if not live:
         maybe_save_session(status)
-    if notify and not radio:
+    if notify and not live:
         notify_track_change(previous, status)
     write_status(status)
     # A one-shot CLI playback start schedules the next-track precache in a
     # detached child, so the first warm does not depend on when the daemon
     # happens to attach to the new mpv. The daemon never sets this flag.
-    if spawn_precache and status.get("playing") and video_id and not radio:
+    if spawn_precache and status.get("playing") and video_id and not live:
         spawn_precache_next()
     return status
 
@@ -2975,10 +2981,15 @@ def cmd_station_catalog(args):
 
 def cmd_station_search(args):
     args, refresh = _strip_refresh(args)
+    tag_mode = False
     limit = 30
     query_parts = []
     index = 0
     while index < len(args):
+        if args[index] == "--tag":
+            tag_mode = True
+            index += 1
+            continue
         if args[index] == "--limit" and index + 1 < len(args):
             limit = _int_or_zero(args[index + 1]) or 30
             limit = max(1, min(100, limit))
@@ -2989,9 +3000,10 @@ def cmd_station_search(args):
     query = " ".join(query_parts).strip()
     if not query:
         print(json.dumps({"ok": False, "error":
-                          "Usage: yt-music-ctl station-search <query> [--limit N]"}))
+                          "Usage: yt-music-ctl station-search [--tag] "
+                          "<query> [--limit N]"}))
         return
-    key = ["search", query.lower(), limit]
+    key = ["search", "tag" if tag_mode else "name", query.lower(), limit]
     ttl = METADATA_CACHE_TTL["stations"]
     if not refresh:
         payload, fresh = cache_read("stations", key, ttl)
@@ -3000,7 +3012,7 @@ def cmd_station_search(args):
             return
     try:
         rows = _radio_browser_request("/json/stations/search", {
-            "name": query,
+            "tag" if tag_mode else "name": query,
             "hidebroken": "true",
             "order": "clickcount",
             "reverse": "true",
@@ -4351,6 +4363,43 @@ def _queue_index(args, usage):
         fail("Index must be an integer")
 
 
+def build_queue_rows(playlist, meta):
+    """Normalize an mpv playlist into queue rows.
+
+    A row with an http(s) filename and no resolvable video id is a live
+    stream: it is marked `stream` so the panel can hide it (the stream is
+    now-playing, not an upcoming queue item). `number` is the visible
+    (non-stream) ordinal, kept so hidden rows do not create number gaps.
+    """
+    rows = []
+    number = 0
+    for index, entry in enumerate(playlist or []):
+        if not isinstance(entry, dict):
+            continue
+        filename = entry.get("filename") or ""
+        video_id = video_id_from_url(filename)
+        if not valid_video_id(video_id):
+            video_id = ""
+        info = meta.get(video_id) if video_id else None
+        info = info if isinstance(info, dict) else {}
+        is_stream = (not video_id) and filename.startswith(
+            ("http://", "https://"))
+        if not is_stream:
+            number += 1
+        rows.append({
+            "index": index,
+            "videoId": video_id,
+            "title": str(info.get("title") or entry.get("title") or ""),
+            "artist": str(info.get("artist") or ""),
+            "album": str(info.get("album") or ""),
+            "duration": info.get("duration") or 0,
+            "current": bool(entry.get("current")),
+            "stream": bool(is_stream),
+            "number": number if not is_stream else 0,
+        })
+    return rows
+
+
 def cmd_queue_list(args):
     empty = {"ok": True, "playing": False, "saved": False, "position": -1,
              "count": 0, "tracks": []}
@@ -4376,24 +4425,7 @@ def cmd_queue_list(args):
     except (TypeError, ValueError):
         position = -1
     meta = load_track_meta()
-    tracks = []
-    for index, entry in enumerate(playlist):
-        if not isinstance(entry, dict):
-            continue
-        video_id = video_id_from_url(entry.get("filename") or "")
-        if not valid_video_id(video_id):
-            video_id = ""
-        info = meta.get(video_id) if video_id else None
-        info = info if isinstance(info, dict) else {}
-        tracks.append({
-            "index": index,
-            "videoId": video_id,
-            "title": str(info.get("title") or entry.get("title") or ""),
-            "artist": str(info.get("artist") or ""),
-            "album": str(info.get("album") or ""),
-            "duration": info.get("duration") or 0,
-            "current": bool(entry.get("current")),
-        })
+    tracks = build_queue_rows(playlist, meta)
     print(json.dumps({"ok": True, "playing": True, "saved": False,
                       "position": position,
                       "count": len(tracks), "tracks": tracks}))
@@ -5389,7 +5421,8 @@ def main():
         print("  library <kind> [limit]   List library songs|albums|artists|playlists")
         print("  home [sections]          Fetch the home feed (default 3 sections)")
         print("  station-catalog           List the bundled curated radio stations (JSON)")
-        print("  station-search <query>    Search the Radio Browser directory [--limit N]")
+        print("  station-search [--tag] <query>  Search Radio Browser "
+              "by name or genre [--limit N]")
         print("  station-favorites         List saved radio stations (JSON)")
         print("  station-fav-add '<json>|<url> [name]'   Save a radio station to favorites")
         print("  station-fav-remove <id>   Remove a saved radio station")

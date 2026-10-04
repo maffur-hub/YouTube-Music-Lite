@@ -1706,9 +1706,33 @@ assert first["items"] and first["items"][0]["name"] == "Triple J", first
 assert first["items"][0]["kind"] == "station", first
 assert limit_seen[0][0] == "/json/stations/search", limit_seen
 assert limit_seen[0][1]["limit"] == "30", limit_seen
-payload, fresh = mod.cache_read("stations", ["search", "triple j", 30],
+payload, fresh = mod.cache_read("stations", ["search", "name", "triple j", 30],
                                 mod.METADATA_CACHE_TTL["stations"])
 assert payload is not None and fresh, (payload, fresh)
+
+# 3b. --tag is accepted anywhere, switches the directory param to tag= and
+#     keys its cache entry separately from the name search.
+tag_seen = []
+def tag_request(request_path, params):
+    tag_seen.append((request_path, params))
+    return [{"stationuuid": "u2", "name": "Jazz FM",
+             "url_resolved": "https://example.com/jazz", "tags": "jazz"}]
+
+mod._radio_browser_request = tag_request
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_station_search(["jazz", "--tag"])
+tag_first = json.loads(out.getvalue())
+assert tag_first["ok"] is True, tag_first
+assert tag_seen[0][1].get("tag") == "jazz", tag_seen
+assert "name" not in tag_seen[0][1], tag_seen
+tag_payload, tag_fresh = mod.cache_read(
+    "stations", ["search", "tag", "jazz", 30],
+    mod.METADATA_CACHE_TTL["stations"])
+assert tag_payload is not None and tag_fresh, (tag_payload, tag_fresh)
+name_payload, _ = mod.cache_read("stations", ["search", "name", "jazz", 30],
+                                 mod.METADATA_CACHE_TTL["stations"])
+assert name_payload is None, name_payload
 
 def dead_request(request_path, params):
     raise RuntimeError("offline")
@@ -1833,7 +1857,8 @@ mod.remember_play = lambda *a, **k: calls.append("remember_play")
 mod.maybe_save_session = lambda *a, **k: calls.append("maybe_save_session")
 mod.notify_track_change = lambda *a, **k: calls.append("notify_track_change")
 mod.spawn_precache_next = lambda *a, **k: calls.append("spawn_precache_next")
-mod.set_radio_current({"id": "u1", "name": "Triple J", "url": "https://x/s"})
+mod.set_radio_current({"id": "u1", "name": "Triple J", "url": "https://x/s",
+                       "favicon": "https://x/triplej.png"})
 status = mod.write_status_from_mpv({"pause": False,
                                     "media-title": "Some Song",
                                     "duration": 0, "time-pos": 3,
@@ -1841,6 +1866,7 @@ status = mod.write_status_from_mpv({"pause": False,
 assert status["live"] is True, status
 assert status["source"] == "radio", status
 assert status["stationName"] == "Triple J", status
+assert status["stationFavicon"] == "https://x/triplej.png", status
 assert status["nowPlaying"] == "Some Song", status
 assert status["title"] == "Triple J", status
 assert status["artist"] == "Some Song", status
@@ -1866,6 +1892,25 @@ assert mod._radio_now_playing("http://x/y", triplej_url) == ""
 assert mod._radio_now_playing("abc.streamguys1.com", triplej_url) == ""
 assert mod._radio_now_playing("Fleetwood Mac - Dreams",
                               triplej_url) == "Fleetwood Mac - Dreams"
+
+# 15c. The marker is not a global mode: a YouTube track appended to the radio
+#      mpv instance must not inherit live, and must still be recorded.
+mod.set_radio_current({"id": "u1", "name": "Triple J", "url": "https://x/s"})
+calls[:] = []
+s = mod.write_status_from_mpv(
+    {"pause": False, "media-title": "T",
+     "path": "https://www.youtube.com/watch?v=abcdefghijk",
+     "duration": 10, "time-pos": 1})
+assert "live" not in s, s
+assert s["videoId"] == "abcdefghijk", s
+assert calls.count("remember_play") == 1, calls
+calls[:] = []
+s2 = mod.write_status_from_mpv({"pause": False, "media-title": "icy",
+                                "path": "https://x/s", "duration": 0,
+                                "time-pos": 1})
+assert s2["live"] is True, s2
+assert s2["stationName"] == "Triple J", s2
+assert "remember_play" not in calls, calls
 
 # 16. With no marker the YouTube path is unchanged: no live keys, and the
 #     track is recorded exactly once.
@@ -1897,6 +1942,30 @@ assert mod.load_radio_history() == [], mod.load_radio_history()
 # 19. Both new commands are registered.
 assert "station-play" in mod.COMMANDS
 assert "station-history" in mod.COMMANDS
+
+# 20. build_queue_rows marks a live stream row in place (kept so indices stay
+#     aligned with mpv), hides it from the visible ordinal, and leaves YouTube
+#     rows untouched.
+mixed = mod.build_queue_rows([
+    {"filename": "http://abc.example/live/icecast.audio"},
+    {"filename": "https://www.youtube.com/watch?v=abcdefghijk"},
+], {"abcdefghijk": {"title": "T"}})
+assert len(mixed) == 2, mixed
+assert mixed[0]["stream"] is True, mixed
+assert mixed[0]["index"] == 0, mixed
+assert mixed[0]["videoId"] == "", mixed
+assert mixed[0]["number"] == 0, mixed
+assert mixed[1]["stream"] is False, mixed
+assert mixed[1]["index"] == 1, mixed
+assert mixed[1]["videoId"] == "abcdefghijk", mixed
+assert mixed[1]["number"] == 1, mixed
+assert mixed[1]["title"] == "T", mixed
+plain = mod.build_queue_rows([
+    {"filename": "https://www.youtube.com/watch?v=abcdefghijk"},
+    {"filename": "https://www.youtube.com/watch?v=bbcdefghijk"},
+], {})
+assert [row["stream"] for row in plain] == [False, False], plain
+assert [row["number"] for row in plain] == [1, 2], plain
 PY
 if [[ $? -eq 0 ]]; then
     pass "stations (catalog, search, favorites persistence + hardening)"

@@ -104,6 +104,7 @@ Panel {
   // current section.
   property string stationSection: "featured"
   property string stationQuery: ""
+  property string stationSearchMode: "name"
   property var stationResults: []
   property var stationFavorites: []
   property var stationCatalog: []
@@ -175,7 +176,7 @@ Panel {
     : (root.lastPlayed.length > 0 ? root.lastPlayed[0] : null)
   readonly property var tabItems: {
     var items = []
-    var qn = root.queueTracks.length
+    var qn = root.queueVisibleCount()
     items.push({ key: "queue", label: qn > 0 ? "Next (" + qn + ")" : "Next" })
     items.push({ key: "search", label: "Search" })
     items.push({ key: "last", label: "History" })
@@ -423,6 +424,17 @@ Panel {
     root.startProcess(queueClearProc, "queueClear")
   }
 
+  // Number of queue rows the user can actually see. A live stream is kept in
+  // the array (so indices stay aligned with mpv) but hidden in place.
+  function queueVisibleCount() {
+    var count = 0
+    for (var i = 0; i < root.queueTracks.length; i++) {
+      var row = root.queueTracks[i]
+      if (row && !row.stream) count++
+    }
+    return count
+  }
+
   function queueUpcomingCount() {
     var remaining = root.queueTracks.length - 1
     var pos = (typeof root.queuePosition === "number") ? root.queuePosition : 0
@@ -436,10 +448,29 @@ Panel {
   function queueCurrentIndex() {
     for (var i = 0; i < root.queueTracks.length; i++) {
       var row = root.queueTracks[i]
-      if ((row && row.current) || i === root.queuePosition) return i
+      if ((row && row.current) || i === root.queuePosition) {
+        return (row && row.stream) ? -1 : i
+      }
     }
     return (root.queuePosition >= 0 && root.queuePosition < root.queueTracks.length)
       ? root.queuePosition : -1
+  }
+
+  // Move the queue cursor by `dy`, stepping over hidden stream rows so the
+  // cursor never lands where there is no visible row.
+  function moveQueueSelection(dy) {
+    var rows = root.queueTracks
+    if (rows.length === 0 || dy === 0) return
+    var step = dy > 0 ? 1 : -1
+    var i = root.selectedIndex + step
+    while (i >= 0 && i < rows.length) {
+      var row = rows[i]
+      if (row && !row.stream) {
+        root.selectIndex(i)
+        return
+      }
+      i += step
+    }
   }
 
   // Bring the current queue row into view so the top of the Up Next tab is not
@@ -852,7 +883,9 @@ Panel {
       root.pendingStationSearch = q
       return
     }
-    stationSearchProc.command = [root.ctlPath, "station-search", q]
+    var command = [root.ctlPath, "station-search", q]
+    if (root.stationSearchMode === "tag") command.push("--tag")
+    stationSearchProc.command = command
     root.startProcess(stationSearchProc, "stationSearch")
   }
 
@@ -2864,6 +2897,10 @@ Panel {
           return
         }
         if (dy !== 0) {
+          if (root.activeListKind === "queue") {
+            root.moveQueueSelection(dy)
+            return
+          }
           var list = root.activeList
           if (list.length > 0) root.selectIndex(Math.max(-1, Math.min(list.length - 1, root.selectedIndex + dy)))
         } else if (dx !== 0) {
@@ -3051,7 +3088,10 @@ Panel {
                 Image {
                   id: albumImage
                   anchors.fill: parent
-                  source: root.thumbnailSource
+                  source: (root.radioLive && root.musicStatus
+                           && root.musicStatus.stationFavicon)
+                          ? root.musicStatus.stationFavicon
+                          : root.thumbnailSource
                   fillMode: Image.PreserveAspectCrop
                   asynchronous: true
                   cache: true
@@ -3762,7 +3802,8 @@ Panel {
                     delegate: Item {
                       id: queueRow
                       width: contentColumn.width
-                      height: Style.space(32)
+                      height: modelData.stream ? 0 : Style.space(32)
+                      visible: !modelData.stream
 
                       RowHighlight {
                         id: queueRowBg
@@ -3797,9 +3838,11 @@ Panel {
                             anchors.left: parent.left
                             width: Style.space(20)
                             textFormat: Text.PlainText
-                            text: (modelData.current || index === root.queuePosition)
-                              ? Model.ICON.play
-                              : String(index + 1)
+                            text: modelData.stream ? ""
+                              : (modelData.current
+                                 || index === root.queuePosition)
+                                ? Model.ICON.play
+                                : String(modelData.number || (index + 1))
                             color: (modelData.current || index === root.queuePosition)
                               ? Color.accent
                               : Qt.darker(root.fg, 1.4)
@@ -4219,7 +4262,7 @@ Panel {
                     fontSize: Style.font.bodySmall
                     foreground: root.fg
                     visible: root.searchFilter === "songs" && root.songCount(root.searchResults) > 0
-                    enabled: !root.busy && root.songCount(root.searchResults) > 0 && !root.radioLive
+                    enabled: !root.busy && root.songCount(root.searchResults) > 0
                     onClicked: root.enqueueFiles("queue")
                   }
                 }
@@ -4260,7 +4303,7 @@ Panel {
                     fontFamily: root.fam
                     fontSize: Style.font.bodySmall
                     foreground: root.fg
-                    enabled: !root.busy && !root.radioLive
+                    enabled: !root.busy
                     onClicked: {
                       var ids = Model.videoIds(root.selectedRows)
                       if (ids.length > 0) root.sendCmd("enqueue-files", ["queue"].concat(ids))
@@ -4931,7 +4974,9 @@ Panel {
                   id: stationField
                   width: parent.width - Style.space(44) - Style.spacing.sm
                   height: Style.spacing.controlHeight
-                  placeholderText: "Search radio stations..."
+                  placeholderText: root.stationSearchMode === "tag"
+                    ? "Search stations by genre..."
+                    : "Search stations by name..."
                   horizontalAlignment: Text.AlignHCenter
                   foreground: root.fg
                   hasCursor: false
@@ -4951,6 +4996,41 @@ Panel {
                     stationField.text = ""
                     root.stationQuery = ""
                     root.stationResults = []
+                  }
+                }
+              }
+
+              Row {
+                visible: root.stationSection === "search"
+                width: parent.width - Style.space(40)
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.spacing.sm
+
+                Repeater {
+                  model: [
+                    { key: "name", label: "Name" },
+                    { key: "tag", label: "Genre" }
+                  ]
+                  delegate: Button {
+                    width: (parent.width - Style.spacing.sm) / 2
+                    height: Style.spacing.controlHeight
+                    text: modelData.label
+                    fontFamily: root.fam
+                    fontSize: Style.font.bodySmall
+                    selected: root.stationSearchMode === modelData.key
+                    active: root.stationSearchMode === modelData.key
+                    bordered: true
+                    foreground: root.fg
+                    enabled: !stationSearchProc.running
+                    onClicked: {
+                      if (root.stationSearchMode !== modelData.key) {
+                        root.stationSearchMode = modelData.key
+                        if (root.stationQuery !== "") {
+                          root.stationResults = []
+                          root.searchStations(root.stationQuery)
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -5211,7 +5291,7 @@ Panel {
 
                 Button {
                   visible: root.libraryKind === "album" || root.libraryKind === "artist"
-                  enabled: !root.busy && root.librarySongCount() > 0 && !root.radioLive
+                  enabled: !root.busy && root.librarySongCount() > 0
                   width: Style.space(72)
                   height: Style.space(28)
                   text: "Queue all"
