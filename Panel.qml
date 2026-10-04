@@ -335,7 +335,8 @@ Panel {
       : (root.visualizerStyle === "gradient" ? "meter"
       : (root.visualizerStyle === "meter" ? "vu"
       : (root.visualizerStyle === "vu" ? "vuv"
-      : (root.visualizerStyle === "vuv" ? "vus" : "bars")))))
+      : (root.visualizerStyle === "vuv" ? "vus"
+      : (root.visualizerStyle === "vus" ? "dots" : "bars"))))))
   }
 
   function visualizerStyleLabel() {
@@ -345,7 +346,8 @@ Panel {
       : (root.visualizerStyle === "meter" ? "Meter"
       : (root.visualizerStyle === "vu" ? "VU"
       : (root.visualizerStyle === "vuv" ? "VU Vertical"
-      : (root.visualizerStyle === "vus" ? "VU Spectrum" : "Bars"))))))
+      : (root.visualizerStyle === "vus" ? "VU Spectrum"
+      : (root.visualizerStyle === "dots" ? "VU Dots" : "Bars")))))))
   }
 
   function visualizerBarColor(level) {
@@ -427,7 +429,7 @@ Panel {
     if (visualizerStyle === "bars" || visualizerStyle === "mirror"
         || visualizerStyle === "gradient" || visualizerStyle === "meter"
         || visualizerStyle === "vu" || visualizerStyle === "vuv"
-        || visualizerStyle === "vus")
+        || visualizerStyle === "vus" || visualizerStyle === "dots")
       root.visualizerStyle = visualizerStyle
     var kind = String(data.libraryKind || "")
     var refId = String(data.libraryRefId || "")
@@ -3427,7 +3429,8 @@ Panel {
             id: visualizerStrip
             visible: root.visualizerOn && Model.isActive(root.musicStatus)
             width: parent.width
-            height: root.visualizerStyle === "vuv" || root.visualizerStyle === "vus" ? Style.space(64) : Style.space(22)
+            height: root.visualizerStyle === "vuv" || root.visualizerStyle === "vus"
+              || root.visualizerStyle === "dots" ? Style.space(64) : Style.space(22)
 
             // 1. Spectrum bars (bars / mirror / gradient / meter)
             Item {
@@ -3561,6 +3564,54 @@ Panel {
                         width: bandColumn.width
                         height: (bandColumn.height - bandColumn.spacing * (root.visualizerSpectrumSegments - 1)) / root.visualizerSpectrumSegments
                         color: (lit || peakLit)
+                          ? root.visualizerZoneColor(fraction * 100)
+                          : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            // 6. VU dots (dots): one LED per band at its level (classic dot mode),
+            // with a peak-hold dot above it.
+            Item {
+              id: vuDotsRenderer
+              anchors.fill: parent
+              visible: root.visualizerStyle === "dots"
+
+              Row {
+                anchors.fill: parent
+                spacing: 2
+
+                Repeater {
+                  model: root.visualizerBarCount
+
+                  delegate: Column {
+                    id: dotColumn
+                    readonly property int band: index
+                    readonly property real value: Number(root.visualizerSpectrumBars[band]) || 0
+                    readonly property real peak: Number(root.visualizerBandPeaks[band]) || 0
+                    readonly property int levelLed: Math.min(root.visualizerSpectrumSegments - 1,
+                      Math.floor(value * root.visualizerSpectrumSegments / 100))
+                    readonly property int peakLed: Math.min(root.visualizerSpectrumSegments - 1,
+                      Math.floor(peak * root.visualizerSpectrumSegments / 100))
+                    width: (parent.width - parent.spacing * (root.visualizerBarCount - 1)) / root.visualizerBarCount
+                    height: parent.height
+                    spacing: 1
+
+                    Repeater {
+                      model: root.visualizerSpectrumSegments
+
+                      delegate: Rectangle {
+                        readonly property int segFromBottom: root.visualizerSpectrumSegments - 1 - index
+                        readonly property real fraction: segFromBottom / (root.visualizerSpectrumSegments - 1)
+                        readonly property bool dot: dotColumn.value > 0 && segFromBottom === dotColumn.levelLed
+                        readonly property bool peakDot: dotColumn.peak > 0 && segFromBottom === dotColumn.peakLed
+                        width: dotColumn.width
+                        height: (dotColumn.height - dotColumn.spacing * (root.visualizerSpectrumSegments - 1)) / root.visualizerSpectrumSegments
+                        radius: width / 2
+                        color: (dot || peakDot)
                           ? root.visualizerZoneColor(fraction * 100)
                           : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
                       }
