@@ -3144,16 +3144,43 @@ def cmd_station_play(args):
         digest = hashlib.sha1(row["url"].encode("utf-8")).hexdigest()
         row["id"] = "user:" + digest
     ensure_daemon()
-    mpv_kill()
-    clear_session()
-    ensure_private_runtime_dir()
     set_radio_current(row)
-    proc = subprocess.Popen(_radio_mpv_argv(row["url"]),
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
-    json_dump(MPV_PID_PATH, mpv_pid_record(proc))
-    wait_for_mpv()
-    props = wait_for_metadata()
+    if mpv_is_running():
+        # Preserve the running queue: insert the stream after the current
+        # entry (plain insert-next), then jump to it and unpause. The
+        # `-play` variant only starts when nothing else is playing.
+        before = mpv_query(["path", "playlist-pos", "playlist-count"]) or {}
+        try:
+            prev_pos = int(before.get("playlist-pos") or 0)
+        except (TypeError, ValueError):
+            prev_pos = 0
+        try:
+            prev_count = int(before.get("playlist-count") or 0)
+        except (TypeError, ValueError):
+            prev_count = 0
+        mpv_send("loadfile", [row["url"], "insert-next"])
+        # The loadfile is async: wait briefly until the entry exists.
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            query = mpv_query(["playlist-count"]) or {}
+            try:
+                if int(query.get("playlist-count") or 0) > prev_count:
+                    break
+            except (TypeError, ValueError):
+                pass
+            time.sleep(0.05)
+        mpv_send("playlist-play-index", [str(prev_pos + 1)])
+        mpv_send("set_property", ["pause", False])
+        props = wait_for_track_change(before.get("path") or "", prev_pos)
+    else:
+        mpv_kill()
+        ensure_private_runtime_dir()
+        proc = subprocess.Popen(_radio_mpv_argv(row["url"]),
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        json_dump(MPV_PID_PATH, mpv_pid_record(proc))
+        wait_for_mpv()
+        props = wait_for_metadata()
     if not mpv_is_running():
         clear_radio_current()
         write_status({"ok": False, "playing": False})

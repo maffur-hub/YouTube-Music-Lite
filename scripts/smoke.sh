@@ -1966,6 +1966,78 @@ plain = mod.build_queue_rows([
 ], {})
 assert [row["stream"] for row in plain] == [False, False], plain
 assert [row["number"] for row in plain] == [1, 2], plain
+
+# 21. station-play must not destroy a running queue: with mpv up it inserts the
+#     stream with plain insert-next, jumps to it and unpauses; no kill.
+calls = []
+q_calls = []
+
+def _fake_query(names):
+    q_calls.append(names)
+    if len(q_calls) == 1:
+        return {"path": "/old", "playlist-pos": 0, "playlist-count": 1}
+    return {"playlist-count": 2}
+
+mod.mpv_is_running = lambda: True
+mod.mpv_query = _fake_query
+mod.mpv_send = lambda *a: calls.append(a)
+mod.mpv_kill = lambda: calls.append("kill")
+mod.ensure_daemon = lambda *a, **k: None
+mod.wait_for_track_change = lambda *a, **k: {
+    "pause": False, "media-title": "icy", "path": "https://example.com/live"}
+mod.wait_for_metadata = lambda *a, **k: {
+    "pause": False, "media-title": "icy", "path": "https://example.com/live"}
+mod.write_status_from_mpv = lambda *a, **k: None
+mod.record_radio_play = lambda *a, **k: None
+mod._radio_browser_report_click = lambda *a, **k: None
+out = call(mod.cmd_station_play, ["https://example.com/live", "Test Station"])
+assert out["ok"] is True, out
+assert ("loadfile", ["https://example.com/live",
+                     "insert-next"]) in calls, calls
+assert ("playlist-play-index", ["1"]) in calls, calls
+assert ("set_property", ["pause", False]) in calls, calls
+used_next_play = any(
+    isinstance(c, tuple) and len(c) > 1 and "insert-next-play" in c[1]
+    for c in calls)
+assert not used_next_play, calls
+assert "kill" not in calls, calls
+assert mod.load_radio_current(), "marker not set after success"
+mod.clear_radio_current()
+
+# 22. With mpv down the fresh-launch path still runs, but the saved session is
+#     no longer discarded.
+fresh = []
+state = {"n": 0}
+
+def _running_then_up():
+    state["n"] += 1
+    return state["n"] > 1
+
+class _FakeProc:
+    pid = 4242
+
+def _fake_popen(*a, **k):
+    fresh.append("popen")
+    return _FakeProc()
+
+mod.mpv_is_running = _running_then_up
+mod.mpv_send = lambda *a: fresh.append(a)
+mod.mpv_kill = lambda: fresh.append("kill")
+mod.ensure_daemon = lambda *a, **k: None
+mod.ensure_private_runtime_dir = lambda: None
+mod.subprocess.Popen = _fake_popen
+mod.MPV_PID_PATH = os.path.join(mod.METADATA_CACHE_DIR, "mpv.pid")
+mod.mpv_pid_record = lambda proc: {"pid": 4242}
+mod.wait_for_mpv = lambda *a, **k: True
+mod.wait_for_metadata = lambda *a, **k: {
+    "pause": False, "media-title": "icy", "path": "https://example.com/live"}
+mod.clear_session = lambda: fresh.append("clear_session")
+out = call(mod.cmd_station_play, ["https://example.com/live", "Test Station"])
+assert out["ok"] is True, out
+assert "popen" in fresh, fresh
+assert "clear_session" not in fresh, fresh
+assert mod.load_radio_current(), "marker not set after fresh launch"
+mod.clear_radio_current()
 PY
 if [[ $? -eq 0 ]]; then
     pass "stations (catalog, search, favorites persistence + hardening)"
