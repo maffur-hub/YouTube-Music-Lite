@@ -31,6 +31,7 @@ const ICON = {
   globe: String.fromCharCode(0xf0ac),       // nf-fa-globe
   lock: String.fromCharCode(0xf023),        // nf-fa-lock
   save: String.fromCharCode(0xf0c7),        // nf-fa-save
+  equalizer: String.fromCharCode(0xf080),   // nf-fa-bar_chart
 }
 
 function parseStatus(raw) {
@@ -87,6 +88,21 @@ function tooltipText(status) {
 
 function isActive(status) {
   return !!(status && (status.playing || status.paused))
+}
+
+// One cava raw-ASCII frame -> an array of `count` bar heights in 0..100.
+// Fields missing from the line (short frame) or unparseable become 0; values
+// outside the range are clamped. Never returns undefined entries.
+function parseCavaFrame(line, count) {
+  var n = Math.max(0, Math.floor(Number(count) || 0))
+  var fields = String(line || "").trim().split(";")
+  var out = []
+  for (var i = 0; i < n; i++) {
+    var v = Number(fields[i])
+    if (isNaN(v)) v = 0
+    out.push(Math.max(0, Math.min(100, v)))
+  }
+  return out
 }
 
 function truncate(text, maxLen) {
@@ -277,6 +293,7 @@ if (typeof module !== "undefined") {
     tooltipText: tooltipText,
     isActive: isActive,
     isPlaying: isPlaying,
+    parseCavaFrame: parseCavaFrame,
     truncate: truncate,
     rowKey: rowKey,
     selectedCount: selectedCount,

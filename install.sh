@@ -72,7 +72,8 @@ else
   rm -rf "${PLUGIN_DIR}"
   mkdir -p "${PLUGIN_DIR}"
   cp "${ROOT}/BarWidget.qml" "${ROOT}/Model.js" \
-    "${ROOT}/Panel.qml" "${ROOT}/manifest.json" "${PLUGIN_DIR}/"
+    "${ROOT}/Panel.qml" "${ROOT}/manifest.json" \
+    "${ROOT}/cava.conf" "${PLUGIN_DIR}/"
 fi
 cp "${ROOT}/backend/yt_music.py" "${DATA_DIR}/yt_music.py"
 chmod 700 "${DATA_DIR}" "${VENV}"

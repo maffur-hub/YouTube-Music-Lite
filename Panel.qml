@@ -37,6 +37,14 @@ Panel {
   property bool refreshing: false
   property string statusText: ""
 
+  // Audio visualizer: cava's raw ASCII frames drive a flat bar strip below the
+  // now-playing Hero. `visualizerOn` is the user's toggle and is persisted in
+  // ui-state.json; `visualizerBars` holds the latest frame's 0..100 heights.
+  property var visualizerBars: []
+  property bool visualizerOn: true
+  readonly property int visualizerBarCount: 24
+  readonly property string cavaConfigPath: Qt.resolvedUrl("cava.conf").toString().replace("file://", "")
+
   readonly property string ctlPath: Quickshell.env("HOME") + "/.local/bin/yt-music-ctl"
   readonly property color fg: root.barForeground
   readonly property string fam: root.bar ? root.bar.fontFamily : Style.font.family
@@ -319,7 +327,7 @@ Panel {
         " os.makedirs(os.path.dirname(p),exist_ok=True)\n" +
         " d={'libraryKind':sys.argv[1],'libraryRefId':sys.argv[2],"
         + "'activeTab':sys.argv[3],'searchFilter':sys.argv[4],"
-        + "'stationSection':sys.argv[5]}\n" +
+        + "'stationSection':sys.argv[5],'visualizerOn':sys.argv[6]}\n" +
         " t=p+'.tmp'\n" +
         " f=open(t,'w')\n" +
         " f.write(json.dumps(d))\n" +
@@ -344,7 +352,8 @@ Panel {
     uiSaveProc.command = ["python3", "-c", root.uiStateScript("save"),
       root.libraryKind, root.libraryRefId,
       (root.activeTab === "") ? "search" : root.activeTab,
-      root.searchFilter, root.stationSection]
+      root.searchFilter, root.stationSection,
+      root.visualizerOn ? "1" : "0"]
     root.startProcess(uiSaveProc, "uiSave")
   }
 
@@ -367,6 +376,9 @@ Panel {
     if (stationSection === "featured" || stationSection === "favorites"
         || stationSection === "search")
       root.stationSection = stationSection
+    if (data.visualizerOn !== undefined)
+      root.visualizerOn = data.visualizerOn === true || data.visualizerOn === 1
+        || data.visualizerOn === "1"
     var kind = String(data.libraryKind || "")
     var refId = String(data.libraryRefId || "")
     var restored = false
@@ -1576,6 +1588,21 @@ Panel {
       if (!root.loggedIn && playlistsProc.state !== Process.Running)
         root.loadPlaylists()
     }
+  }
+
+  // Audio visualizer source: cava prints one raw ASCII bar frame per line.
+  // It runs only while the panel is open, the toggle is on, and audio is
+  // actually playing (radio or YouTube). A missing cava just exits quietly.
+  Process {
+    id: cavaProc
+    command: ["cava", "-p", root.cavaConfigPath]
+    running: root.opened && root.visualizerOn && Model.isPlaying(root.musicStatus)
+    stdout: SplitParser {
+      onRead: function(line) {
+        root.visualizerBars = Model.parseCavaFrame(line, root.visualizerBarCount)
+      }
+    }
+    onExited: root.visualizerBars = []
   }
 
   Process {
@@ -3318,6 +3345,54 @@ Panel {
                 }
               }
 
+            }
+          }
+
+          // ---- audio visualizer (a Hero strip: cava bars + on/off toggle)
+          Row {
+            visible: root.visualizerOn && Model.isActive(root.musicStatus)
+            width: parent.width
+            height: Style.space(22)
+            spacing: Style.spacing.sm
+
+            Item {
+              id: visualizerBarsItem
+              width: parent.width - Style.space(28) - parent.spacing
+              height: parent.height
+
+              Row {
+                id: visualizerRow
+                anchors.fill: parent
+                spacing: Style.spacing.sm
+
+                Repeater {
+                  model: root.visualizerBarCount
+
+                  delegate: Item {
+                    width: (visualizerRow.width - visualizerRow.spacing * (root.visualizerBarCount - 1)) / root.visualizerBarCount
+                    height: visualizerRow.height
+
+                    Rectangle {
+                      width: parent.width
+                      height: Math.max(2, parent.height * (root.visualizerBars[index] || 0) / 100)
+                      anchors.bottom: parent.bottom
+                      radius: width / 2
+                      color: Color.accent
+                      Behavior on height { NumberAnimation { duration: 55; easing.type: Easing.OutQuad } }
+                    }
+                  }
+                }
+              }
+            }
+
+            PanelActionButton {
+              width: Style.space(28)
+              height: Style.space(28)
+              iconText: Model.ICON.equalizer
+              tooltipText: root.visualizerOn ? "Hide visualizer" : "Show visualizer"
+              fontFamily: root.fam
+              foreground: root.visualizerOn ? Color.accent : root.fg
+              onClicked: root.visualizerOn = !root.visualizerOn
             }
           }
 

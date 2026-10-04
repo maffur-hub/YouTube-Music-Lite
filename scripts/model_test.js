@@ -203,4 +203,16 @@ eq(Model.idsToNames(["aaa", "zzz"], nameLabels, 2), "", "idsToNames returns \"\"
 eq(Model.idsToNames([], nameLabels, 2), "", "idsToNames([])")
 eq(Model.idsToNames(undefined, nameLabels, 2), "", "idsToNames(undefined)")
 
+// --- parseCavaFrame
+eq(Model.parseCavaFrame("10;50;100;", 4), [10, 50, 100, 0],
+  "parseCavaFrame maps every field and zeroes a trailing blank")
+eq(Model.parseCavaFrame("", 3), [0, 0, 0], "parseCavaFrame zero-pads an empty line")
+eq(Model.parseCavaFrame("200;-5;x", 3), [100, 0, 0],
+  "parseCavaFrame clamps high, floors low and zeroes NaN")
+eq(Model.parseCavaFrame("1;2;3;4;5", 3), [1, 2, 3],
+  "parseCavaFrame truncates a longer line to count")
+eq(Model.parseCavaFrame("1;2", 5), [1, 2, 0, 0, 0],
+  "parseCavaFrame zero-pads a shorter line to count")
+eq(Model.parseCavaFrame(undefined, 2), [0, 0], "parseCavaFrame handles undefined input")
+
 console.log(passed + " assertions passed")
