@@ -2399,6 +2399,11 @@ Panel {
         delegate: Rectangle {
           id: row
           required property var modelData
+          // Declared alongside modelData: once a delegate has any required
+          // property it must declare every injected one it reads, and this
+          // row uses `index` for the highlight. Without it the binding throws
+          // and the row is never themed.
+          required property int index
           Layout.fillWidth: true
           implicitWidth: rowLabel.implicitWidth + 2 * Style.spacing.controlPaddingX
           implicitHeight: Style.spacing.popupRowHeight
