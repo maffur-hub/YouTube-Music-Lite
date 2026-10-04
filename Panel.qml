@@ -42,6 +42,7 @@ Panel {
   // ui-state.json; `visualizerBars` holds the latest frame's 0..100 heights.
   property var visualizerBars: []
   property bool visualizerOn: true
+  property string visualizerStyle: "bars"
   readonly property int visualizerBarCount: 24
   readonly property string cavaConfigPath: Qt.resolvedUrl("cava.conf").toString().replace("file://", "")
 
@@ -319,6 +320,25 @@ Panel {
     root.saveUiState()
   }
 
+  function visualizerStyleNext() {
+    return root.visualizerStyle === "bars" ? "mirror"
+      : (root.visualizerStyle === "mirror" ? "gradient" : "bars")
+  }
+
+  function visualizerStyleLabel() {
+    return root.visualizerStyle === "bars" ? "Bars"
+      : (root.visualizerStyle === "mirror" ? "Mirror" : "Gradient")
+  }
+
+  function visualizerBarColor(level) {
+    var start = Color.accent
+    var end = Color.urgent
+    var t = Math.max(0, Math.min(100, Number(level) || 0)) / 100
+    return Qt.rgba(start.r + (end.r - start.r) * t,
+                   start.g + (end.g - start.g) * t,
+                   start.b + (end.b - start.b) * t, 1)
+  }
+
   function uiStateScript(mode) {
     if (mode === "save") {
       return "import json,sys,os\n" +
@@ -327,7 +347,8 @@ Panel {
         " os.makedirs(os.path.dirname(p),exist_ok=True)\n" +
         " d={'libraryKind':sys.argv[1],'libraryRefId':sys.argv[2],"
         + "'activeTab':sys.argv[3],'searchFilter':sys.argv[4],"
-        + "'stationSection':sys.argv[5],'visualizerOn':sys.argv[6]}\n" +
+        + "'stationSection':sys.argv[5],'visualizerOn':sys.argv[6],"
+        + "'visualizerStyle':sys.argv[7]}\n" +
         " t=p+'.tmp'\n" +
         " f=open(t,'w')\n" +
         " f.write(json.dumps(d))\n" +
@@ -353,7 +374,7 @@ Panel {
       root.libraryKind, root.libraryRefId,
       (root.activeTab === "") ? "search" : root.activeTab,
       root.searchFilter, root.stationSection,
-      root.visualizerOn ? "1" : "0"]
+      root.visualizerOn ? "1" : "0", root.visualizerStyle]
     root.startProcess(uiSaveProc, "uiSave")
   }
 
@@ -379,6 +400,10 @@ Panel {
     if (data.visualizerOn !== undefined)
       root.visualizerOn = data.visualizerOn === true || data.visualizerOn === 1
         || data.visualizerOn === "1"
+    var visualizerStyle = String(data.visualizerStyle || "")
+    if (visualizerStyle === "bars" || visualizerStyle === "mirror"
+        || visualizerStyle === "gradient")
+      root.visualizerStyle = visualizerStyle
     var kind = String(data.libraryKind || "")
     var refId = String(data.libraryRefId || "")
     var restored = false
@@ -3348,51 +3373,39 @@ Panel {
             }
           }
 
-          // ---- audio visualizer (a Hero strip: cava bars + on/off toggle)
-          Row {
+          // ---- audio visualizer (a Hero strip: cava bars)
+          Item {
+            id: visualizerStrip
             visible: root.visualizerOn && Model.isActive(root.musicStatus)
             width: parent.width
             height: Style.space(22)
-            spacing: Style.spacing.sm
 
-            Item {
-              id: visualizerBarsItem
-              width: parent.width - Style.space(28) - parent.spacing
-              height: parent.height
+            Row {
+              id: visualizerRow
+              anchors.fill: parent
+              spacing: Style.spacing.sm
 
-              Row {
-                id: visualizerRow
-                anchors.fill: parent
-                spacing: Style.spacing.sm
+              Repeater {
+                model: root.visualizerBarCount
 
-                Repeater {
-                  model: root.visualizerBarCount
+                delegate: Item {
+                  width: (visualizerRow.width - visualizerRow.spacing * (root.visualizerBarCount - 1)) / root.visualizerBarCount
+                  height: visualizerRow.height
 
-                  delegate: Item {
-                    width: (visualizerRow.width - visualizerRow.spacing * (root.visualizerBarCount - 1)) / root.visualizerBarCount
-                    height: visualizerRow.height
-
-                    Rectangle {
-                      width: parent.width
-                      height: Math.max(2, parent.height * (root.visualizerBars[index] || 0) / 100)
-                      anchors.bottom: parent.bottom
-                      radius: width / 2
-                      color: Color.accent
-                      Behavior on height { NumberAnimation { duration: 55; easing.type: Easing.OutQuad } }
-                    }
+                  Rectangle {
+                    width: parent.width
+                    height: Math.max(2, parent.height * (root.visualizerBars[index] || 0) / 100)
+                    y: root.visualizerStyle === "mirror"
+                       ? (parent.height - height) / 2
+                       : parent.height - height
+                    radius: width / 2
+                    color: root.visualizerStyle === "gradient"
+                      ? root.visualizerBarColor(root.visualizerBars[index] || 0)
+                      : Color.accent
+                    Behavior on height { NumberAnimation { duration: 55; easing.type: Easing.OutQuad } }
                   }
                 }
               }
-            }
-
-            PanelActionButton {
-              width: Style.space(28)
-              height: Style.space(28)
-              iconText: Model.ICON.equalizer
-              tooltipText: root.visualizerOn ? "Hide visualizer" : "Show visualizer"
-              fontFamily: root.fam
-              foreground: root.visualizerOn ? Color.accent : root.fg
-              onClicked: root.visualizerOn = !root.visualizerOn
             }
           }
 
@@ -3501,14 +3514,15 @@ Panel {
             }
           }
 
-          // ---- lyrics toggle (a live stream has no track lyrics)
+          // ---- lyrics toggle (a live stream has no track lyrics) + visualizer controls
           Row {
-            visible: Model.isActive(root.musicStatus) && !root.radioLive
+            visible: Model.isActive(root.musicStatus)
             width: parent.width
             height: Style.spacing.controlHeight
             spacing: Style.spacing.sm
 
             Button {
+              visible: !root.radioLive
               width: Style.space(96)
               height: Style.spacing.controlHeight
               text: "Lyrics"
@@ -3516,6 +3530,29 @@ Panel {
               fontSize: Style.font.bodySmall
               foreground: root.lyricsOpen ? Color.accent : root.fg
               onClicked: root.toggleLyrics()
+            }
+
+            Button {
+              width: Style.space(36)
+              height: Style.spacing.controlHeight
+              iconText: Model.ICON.equalizer
+              tooltipText: root.visualizerOn ? "Hide visualizer" : "Show visualizer"
+              fontFamily: root.fam
+              fontSize: Style.font.bodySmall
+              foreground: root.visualizerOn ? Color.accent : root.fg
+              onClicked: root.visualizerOn = !root.visualizerOn
+            }
+
+            Button {
+              visible: root.visualizerOn
+              width: Style.space(36)
+              height: Style.spacing.controlHeight
+              iconText: Model.ICON.sliders
+              tooltipText: "Visualizer style: " + root.visualizerStyleLabel()
+              fontFamily: root.fam
+              fontSize: Style.font.bodySmall
+              foreground: root.fg
+              onClicked: root.visualizerStyle = root.visualizerStyleNext()
             }
           }
 

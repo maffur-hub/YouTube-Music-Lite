@@ -32,6 +32,7 @@ const ICON = {
   lock: String.fromCharCode(0xf023),        // nf-fa-lock
   save: String.fromCharCode(0xf0c7),        // nf-fa-save
   equalizer: String.fromCharCode(0xf080),   // nf-fa-bar_chart
+  sliders: String.fromCharCode(0xf1de),     // nf-fa-sliders
 }
 
 function parseStatus(raw) {
