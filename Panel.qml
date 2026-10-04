@@ -57,6 +57,9 @@ Panel {
   property real visualizerPeak: 0
   property var visualizerBandPeaks: []
   property var visualizerSpectrumBars: []
+  // Single display gain applied on top of the volume scale, so a full-volume
+  // frame fills the meters instead of topping out around half.
+  readonly property real visualizerGain: 1.25
   readonly property int visualizerBarCount: 24
   readonly property int visualizerLadderSegments: 28
   readonly property int visualizerVerticalSegments: 20
@@ -1700,21 +1703,22 @@ Panel {
       onRead: function(line) {
         var bars = Model.parseCavaFrame(line, root.visualizerBarCount)
         var vol = root.musicStatus ? root.musicStatus.volume : 100
-        var volScale = Model.cavaVolumeScale(vol)
+        var disp = Model.cavaVolumeScale(vol) * root.visualizerGain
 
-        // Spectrum bars (bars/mirror/gradient/meter) track the volume directly.
-        root.visualizerBars = Model.cavaScaleBars(bars, volScale)
+        // Spectrum/flat bars track the volume and the display gain.
+        root.visualizerBars = Model.cavaScaleBars(bars, disp)
 
-        // Single VU/Peak level: damped level, then scaled by volume.
+        // Single VU/Peak level: damped, then volume+gain.
         var level0 = Model.cavaLevel(bars)
-        root.visualizerLevel = Math.max(0, Math.min(100, level0 * volScale))
+        root.visualizerLevel = Math.max(0, Math.min(100, level0 * disp))
         root.visualizerPeak = Math.max(root.visualizerLevel,
                                        Math.max(0, root.visualizerPeak - 2))
 
-        // VU spectrum keeps its headroom (tallest column = level0) AND tracks volume.
+        // VU spectrum keeps its headroom (tallest column = level0) and tracks
+        // volume+gain.
         var bandMax = Model.cavaPeak(bars)
         var head = Model.cavaScaleBars(bars, bandMax > 0 ? level0 / bandMax : 0)
-        root.visualizerSpectrumBars = Model.cavaScaleBars(head, volScale)
+        root.visualizerSpectrumBars = Model.cavaScaleBars(head, disp)
         root.visualizerBandPeaks = Model.cavaBandPeaks(
           root.visualizerSpectrumBars, root.visualizerBandPeaks, 4)
       }

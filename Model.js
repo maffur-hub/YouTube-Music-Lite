@@ -150,13 +150,15 @@ function cavaBandPeaks(bars, previous, decay) {
   return out
 }
 
-// Scale every band by `scale` (0..1), clamping to 0..100. Used to give the
-// spectrum headroom: the tallest column is mapped to the damped VU level.
+// Scale every band by `scale` (clamped low at 0; values may exceed 1 to
+// boost), clamping each result to 0..100. Used both to give the spectrum
+// headroom (tallest column maps to the damped VU level) and to apply display
+// gain (volume * visualizerGain).
 function cavaScaleBars(bars, scale) {
   var out = []
   var s = Number(scale)
   if (isNaN(s)) s = 1
-  s = Math.max(0, Math.min(1, s))
+  s = Math.max(0, s)
   if (Array.isArray(bars)) {
     for (var i = 0; i < bars.length; i++) {
       var v = Number(bars[i])
