@@ -70,8 +70,18 @@ stale responses, double fetches).
 - [ ] Extend the token pattern to the remaining fetch processes that use
   ad-hoc staleness guards (`searchProc` query compare, `albumStatusProc`
   refId compare) and give every fetch process a deadline if it lacks one.
-- [ ] Audit the timeout timers so every flagged state clears on timeout as well
-  as success.
+  Decision: left as-is. `searchProc`'s `data.query === root.searchQuery` and
+  `albumStatusProc`'s `refId === libraryRefId` are already correct staleness
+  guards (and the search one also drives the UI); replacing them with tokens
+  would be churn for no behavioural gain.
+- [x] Audited the timeout timers: all 28 fetch processes have a deadline, and
+  every flagged state has a clearing path on timeout. The only processes
+  without a deadline are the fire-and-forget writers (`cavaWriteProc`,
+  `cavaProc`, `uiSaveProc`, `uiLoadProc`), which is correct.
+- [x] Added `scripts/asyncstate_harness.js` (42 assertions): drives the token/
+  dirty/pending scenarios headlessly and asserts the panel's source shape
+  (no ad-hoc bookkeeping names remain; every fetch process exists; a deadline
+  per fetch).
 
 ## Phase 3 — Break up Panel.qml (MEDIUM RISK, largest diff)
 Extract self-contained regions into components, one per commit, verifying after
