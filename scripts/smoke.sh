@@ -1642,6 +1642,122 @@ else
     fail "editable Featured stations (deltas over the catalog)" "$(cat "$ERR_FILE")"
 fi
 
+# ------------------------------------------------- play resumes the saved queue (offline)
+# Toggle/resume with no player up must rebuild the saved session and start it
+# playing, rather than failing or silently doing nothing. Fully offline: the
+# state dir is replaced and mpv plus the spawner are stubbed.
+section "play resumes the saved queue (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import contextlib, importlib.util, io, json, os, sys, tempfile
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_resume_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# Redirect the session state into a throwaway dir: never touch real state.
+tmp = tempfile.mkdtemp(prefix="yt-music-resume-")
+mod.STATE_DIR = tmp
+mod.SESSION_PATH = os.path.join(tmp, "session.json")
+
+# Force the idle/running gate and capture any queue spawn instead of mpv.
+spawns = []
+mod._spawn_session_mpv = lambda ids, index, position, pause=True: spawns.append(
+    {"ids": list(ids), "index": index, "position": position, "pause": pause})
+
+
+def set_running(flag):
+    mod.mpv_is_running = lambda: flag
+
+
+class Failure(Exception):
+    pass
+
+
+def fake_fail(msg, code=1):
+    raise Failure(msg)
+
+
+mod.fail = fake_fail
+
+# Stub the live-player path so an already-running toggle never touches mpv.
+sent = []
+mod.mpv_send = lambda *a: sent.append(a)
+mod.get_mpv_props = lambda: {"pause": False}
+mod.write_status_from_mpv = lambda props: None
+
+
+def run(cmd, args=[]):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        cmd(args)
+    return json.loads(out.getvalue())
+
+
+ids = ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"]
+mod.save_session(ids, 2, 42.5)
+
+# Idle toggle restarts the saved queue PLAYING at the saved index.
+set_running(False)
+res = run(mod.cmd_toggle)
+assert res == {"ok": True, "resumed": True}, res
+assert len(spawns) == 1, spawns
+assert spawns[0]["pause"] is False, spawns[0]
+assert spawns[0]["index"] == 2 and spawns[0]["ids"] == ids, spawns[0]
+
+# No saved session keeps the previous failure.
+spawns.clear()
+mod.clear_session()
+set_running(False)
+try:
+    run(mod.cmd_toggle)
+except Failure as exc:
+    assert str(exc) == "Nothing playing", exc
+else:
+    raise AssertionError("toggle did not fail without a session")
+assert not spawns, spawns
+
+# A running player is toggled, not replaced by a fresh spawn.
+mod.save_session(ids, 1, 0)
+set_running(True)
+sent.clear()
+spawns.clear()
+mod.cmd_toggle([])
+assert not spawns, spawns
+assert ("set_property", ["pause", True]) in sent, sent
+
+# Resume when idle starts the saved queue playing too.
+set_running(False)
+spawns.clear()
+res = run(mod.cmd_resume)
+assert res == {"ok": True, "resumed": True}, res
+assert len(spawns) == 1 and spawns[0]["pause"] is False, spawns
+
+# Jump to track on a PAUSED running player must unpause: choosing a row means
+# play it, not just select it.
+sent.clear()
+mod.get_mpv_props = lambda: {"path": "/a", "playlist-pos": 0, "pause": True}
+mod.wait_for_track_change = lambda *a, **k: {
+    "path": "/c", "playlist-pos": 2, "pause": True}
+written = {}
+mod.write_status_from_mpv = lambda props, **k: written.update(props or {})
+mod.prune_radio_if_moved_on = lambda: None
+mod._queue_index = lambda args, usage: int(args[0])
+mod._queue_count = lambda: 3
+set_running(True)
+res = run(mod.cmd_queue_jump, ["2"])
+assert res == {"ok": True, "position": 2}, res
+assert ("set_property", ["pause", False]) in sent, sent
+assert written.get("pause") is False, written
+PY
+if [[ $? -eq 0 ]]; then
+    pass "play resumes the saved queue + queue-jump unpauses (toggle/resume/jump)"
+else
+    fail "play resumes the saved queue (toggle/resume)" "$(cat "$ERR_FILE")"
+fi
+
 # ------------------------------------------------- full-page playlist fetch (offline)
 # The correctness sites that resolve duplicates/indices must fetch the whole
 # playlist (limit=None); only the display path may keep a 100-item page.

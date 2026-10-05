@@ -2312,12 +2312,27 @@ def cmd_resume(args):
         mpv_send("set_property", ["pause", False])
         props = get_mpv_props()
         write_status_from_mpv(props)
-    print(json.dumps({"ok": True}))
+        print(json.dumps({"ok": True}))
+        return
+    # Idle: resume means start the saved queue up (never leave a silent no-op).
+    restored, _info = _restore_session(pause=False)
+    if restored:
+        print(json.dumps({"ok": True, "resumed": True}))
+    else:
+        print(json.dumps({"ok": True}))
 
 
 def cmd_toggle(args):
     if not mpv_is_running():
-        fail("Nothing playing")
+        # Nothing to toggle: start the saved queue playing again, at the
+        # position it was at before playback stopped (radio included, since a
+        # live station is deliberately not saved and therefore falls back to
+        # the last song queue). No session at all keeps the old failure.
+        restored, _info = _restore_session(pause=False)
+        if not restored:
+            fail("Nothing playing")
+        print(json.dumps({"ok": True, "resumed": True}))
+        return
     props = get_mpv_props()
     if props:
         paused = props.get("pause", True)
@@ -3551,17 +3566,20 @@ def _spawn_session_mpv(ids, index, position, pause=True):
     write_status_from_mpv(props)
 
 
-def cmd_restore(args):
-    """Rebuild the last queue paused at its saved index + position."""
+def _restore_session(pause=True):
+    """Validate the saved session and spawn its queue when idle.
+
+    Shared by restore/toggle/resume: all three must agree on what a resumable
+    session is. Returns (restored, info); info carries a reason when it is not
+    restored so each caller can phrase its own output.
+    """
     if mpv_is_running():
-        print(json.dumps({"ok": True, "restored": False, "reason": "already-playing"}))
-        return
+        return False, {"reason": "already-playing"}
     session = load_session()
     ids = session.get("videoIds") if isinstance(session, dict) else None
     ids = [v for v in ids if valid_video_id(v)] if isinstance(ids, list) else []
     if not ids:
-        print(json.dumps({"ok": True, "restored": False, "reason": "no-session"}))
-        return
+        return False, {"reason": "no-session"}
     try:
         index = max(0, min(len(ids) - 1, int(session.get("index") or 0)))
     except (TypeError, ValueError):
@@ -3570,8 +3588,14 @@ def cmd_restore(args):
         position = max(0.0, float(session.get("position") or 0))
     except (TypeError, ValueError):
         position = 0.0
-    _spawn_session_mpv(ids, index, position, pause=True)
-    print(json.dumps({"ok": True, "restored": True, "count": len(ids), "index": index}))
+    _spawn_session_mpv(ids, index, position, pause=pause)
+    return True, {"count": len(ids), "index": index}
+
+
+def cmd_restore(args):
+    """Rebuild the last queue paused at its saved index + position."""
+    restored, info = _restore_session(pause=True)
+    print(json.dumps({"ok": True, "restored": restored, **info}))
 
 
 def cmd_lyrics(args):
@@ -4830,11 +4854,17 @@ def cmd_queue_jump(args):
         return
     before = get_mpv_props()
     mpv_send("set_property", ["playlist-pos", index])
+    # Jumping selects the track, but a paused player would stay paused. "Jump
+    # to track" means play it, so unpause after the new entry is current.
     if before:
         props = wait_for_track_change(before.get("path"), before.get("playlist-pos"))
     else:
         time.sleep(0.3)
         props = get_mpv_props()
+    mpv_send("set_property", ["pause", False])
+    if isinstance(props, dict):
+        props = dict(props)
+        props["pause"] = False
     write_status_from_mpv(props)
     prune_radio_if_moved_on()
     print(json.dumps({"ok": True, "position": index}))
