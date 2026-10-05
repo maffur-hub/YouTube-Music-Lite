@@ -157,6 +157,9 @@ Panel {
   // Same coalescing for the featured catalog: an add/remove that lands mid-fetch
   // is replayed when the in-flight catalog load exits.
   readonly property var stationCatalogDirty: AsyncState.makeDirtyFlag()
+  // Optimistic favourite overrides (id -> bool) so the star flips on click.
+  // Cleared when the authoritative favourites list reloads.
+  property var stationFavOverrides: ({})
   property int queuePosition: -1
   property string contextQueueKey: ""
   property string queueKey: ""
@@ -875,6 +878,11 @@ Panel {
 
   function isStationFavorite(id) {
     var target = String(id || "")
+    // An in-flight toggle is reflected immediately so the star flips on click
+    // rather than after the round trip + refetch. The override is cleared once
+    // the authoritative list reloads.
+    if (root.stationFavOverrides[target] !== undefined)
+      return root.stationFavOverrides[target]
     for (var i = 0; i < root.stationFavorites.length; i++) {
       if (String(root.stationFavorites[i].id) === target) return true
     }
@@ -883,10 +891,16 @@ Panel {
 
   function toggleStationFavorite(row) {
     if (!row || !row.url || stationFavProc.running) return
-    if (root.isStationFavorite(row.id))
-      stationFavProc.command = [root.ctlPath, "station-fav-remove", String(row.id)]
-    else
+    var adding = !root.isStationFavorite(row.id)
+    // Optimistic flip; reverted on failure below.
+    var next = {}
+    for (var k in root.stationFavOverrides) next[k] = root.stationFavOverrides[k]
+    next[String(row.id)] = adding
+    root.stationFavOverrides = next
+    if (adding)
       stationFavProc.command = [root.ctlPath, "station-fav-add", JSON.stringify(row)]
+    else
+      stationFavProc.command = [root.ctlPath, "station-fav-remove", String(row.id)]
     root.startProcess(stationFavProc, "stationFav")
   }
 
@@ -1964,8 +1978,12 @@ Panel {
     onExited: function(exitCode) {
       stationFavoritesDeadline.stop()
       var data = root.parseProcessJson(root.processText("stationFavorites"))
-      if (data && data.ok && Array.isArray(data.items))
+      if (data && data.ok && Array.isArray(data.items)) {
         root.stationFavorites = root.normalizeStations(data.items)
+        // The authoritative list is in: the optimistic overrides are spent.
+        if (Object.keys(root.stationFavOverrides).length > 0)
+          root.stationFavOverrides = ({})
+      }
       // Replay a refresh that arrived while this fetch was running (e.g. a
       // favourite was toggled) so the list can never be left stale.
       if (root.stationFavoritesDirty.take())
@@ -2084,8 +2102,12 @@ Panel {
     onExited: function(exitCode) {
       stationFavDeadline.stop()
       var data = root.parseProcessJson(root.processText("stationFav"))
-      if (data && data.ok === false)
+      if (data && data.ok === false) {
+        // The optimistic flip was wrong: drop every override so the stars snap
+        // back to the authoritative list on the refresh below.
+        root.stationFavOverrides = ({})
         root.statusText = root.boundedString(data.error || "Station update failed", 256)
+      }
       root.refreshStationFavorites()
     }
   }

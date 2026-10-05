@@ -396,6 +396,10 @@ eq(Model.cavaScaleBars([10, 50, 100], 2), [20, 100, 100],
   "cavaScaleBars allows a >1 scale and clamps the values")
 eq(Model.cavaScaleBars([10, 50, 100], -2), [0, 0, 0], "cavaScaleBars clamps a <0 scale to 0")
 eq(Model.cavaScaleBars([10, 50, 100], NaN), [10, 50, 100], "cavaScaleBars defaults NaN scale to 1")
+eq(Model.cavaScaleBars([10, 50, 100], Infinity), [10, 50, 100],
+  "cavaScaleBars treats an infinite scale as the identity, not NaN")
+eq(Model.cavaScaleBars([0, 100], Infinity), [0, 100],
+  "cavaScaleBars an infinite scale never yields NaN heights")
 eq(Model.cavaScaleBars([NaN, 50, "x"], 0.5), [0, 25, 0],
   "cavaScaleBars zeroes NaN/unparseable entries")
 eq(Model.cavaScaleBars(null, 0.5), [], "cavaScaleBars(null) is []")

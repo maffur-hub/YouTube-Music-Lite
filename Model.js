@@ -157,13 +157,17 @@ function cavaBandPeaks(bars, previous, decay) {
 function cavaScaleBars(bars, scale) {
   var out = []
   var s = Number(scale)
-  if (isNaN(s)) s = 1
+  // Reject a non-finite scale (NaN/Infinity): Math.min(100, 0 * Infinity) is
+  // NaN, so an infinite factor must collapse to the identity, not poison the
+  // frame with NaN heights.
+  if (!isFinite(s)) s = 1
   s = Math.max(0, s)
   if (Array.isArray(bars)) {
     for (var i = 0; i < bars.length; i++) {
       var v = Number(bars[i])
       if (isNaN(v)) v = 0
-      out.push(Math.max(0, Math.min(100, v * s)))
+      var scaled = v * s
+      out.push(isFinite(scaled) ? Math.max(0, Math.min(100, scaled)) : 100)
     }
   }
   return out
