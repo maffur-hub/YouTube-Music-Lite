@@ -2628,13 +2628,16 @@ Panel {
 
   Process {
     id: coverProc
-    stdout: SplitParser { onRead: function(data) { root.appendProcessOutput("cover", data) } }
+    stdout: SplitParser { onRead: function(data) {
+      root.appendProcessOutput("cover", data)
+      // The backend fetches the cover out of process and prints its cached
+      // file:// path on success; only that local path may reach an Image.
+      var s = String(data).trim()
+      if (s.indexOf("file://") === 0) root.libraryImageSource = s
+    } }
     stderr: SplitParser { onRead: function(data) { root.appendProcessOutput("coverErr", data) } }
     onStarted: coverDeadline.start()
     onExited: function(exitCode) {
-      // `image <url>` prints nothing on success; the cached path is keyed by a
-      // sha256 we cannot rebuild from QML, so libraryImageSource stays on the
-      // remote URL (set by fetchCover) while this warms the on-disk cache.
       coverDeadline.stop()
     }
   }
@@ -2646,7 +2649,10 @@ Panel {
   }
 
   function fetchCover() {
-    root.libraryImageSource = root.libraryThumbUrl
+    // Never bind the remote thumbnail URL to Image.source: the `image` command
+    // fetches it out of process and prints the cached file:// path, which the
+    // stdout handler above assigns to libraryImageSource.
+    root.libraryImageSource = ""
     if (root.libraryThumbUrl === "" || coverProc.running) return
     coverProc.command = [root.ctlPath, "image", root.libraryThumbUrl]
     root.startProcess(coverProc, "cover")
@@ -3270,8 +3276,8 @@ Panel {
                   id: albumImage
                   anchors.fill: parent
                   source: (root.radioLive && root.musicStatus
-                           && root.musicStatus.stationFavicon)
-                          ? root.musicStatus.stationFavicon
+                           && root.musicStatus.stationFaviconLocal)
+                          ? Model.localImageSource(root.musicStatus.stationFaviconLocal)
                           : root.thumbnailSource
                   fillMode: Image.PreserveAspectCrop
                   asynchronous: true
@@ -5557,7 +5563,7 @@ Panel {
                           Image {
                             id: stationLogo
                             anchors.fill: parent
-                            source: modelData.favicon ? modelData.favicon : ""
+                            source: Model.localImageSource(modelData.faviconLocal)
                             asynchronous: true
                             cache: true
                             fillMode: Image.PreserveAspectFit
@@ -5825,7 +5831,7 @@ Panel {
                   Image {
                     id: libraryCoverImage
                     anchors.fill: parent
-                    source: root.libraryImageSource
+                    source: Model.localImageSource(root.libraryImageSource)
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
                     cache: true

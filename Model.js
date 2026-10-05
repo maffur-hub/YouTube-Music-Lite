@@ -258,6 +258,14 @@ function isVideoId(value) {
   return /^[A-Za-z0-9_-]{11}$/.test(String(value || ""))
 }
 
+// Only a local file:// path may reach an Image.source. Remote URLs crash the
+// compositor inside Qt's QQuickPixmapReader, which loads the CA bundle for an
+// in-process HTTPS fetch, so anything that is not file:// is rejected here.
+function localImageSource(value) {
+  var s = boundedString(value, 2048)
+  return s.indexOf("file://") === 0 ? s : ""
+}
+
 function normalizeSong(song) {
   if (!song || !isVideoId(song.videoId)) return null
   return {
@@ -322,6 +330,7 @@ function normalizeStations(items) {
       name: boundedString(item.name, 256),
       url: boundedString(item.url, 1024),
       favicon: boundedString(item.favicon, 1024),
+      faviconLocal: boundedString(item.faviconLocal, 2048),
       homepage: boundedString(item.homepage, 1024),
       tags: tags,
       country: boundedString(item.country, 16),
@@ -602,6 +611,7 @@ if (typeof module !== "undefined") {
     cavaConfig: cavaConfig,
     truncate: truncate,
     boundedString: boundedString,
+    localImageSource: localImageSource,
     isVideoId: isVideoId,
     normalizeSong: normalizeSong,
     normalizeSongs: normalizeSongs,

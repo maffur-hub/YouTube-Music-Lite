@@ -11,8 +11,10 @@ State lives under:
 """
 
 import argparse
+import concurrent.futures
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 import shutil
@@ -55,6 +57,7 @@ LIKES_TITLE = "Liked Music"
 CACHE_ROOT = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "yt-music")
 THUMBNAIL_CACHE_DIR = os.path.join(CACHE_ROOT, "thumbs")
 IMAGE_CACHE_DIR = os.path.join(CACHE_ROOT, "images")
+FAVICON_CACHE_DIR = os.path.join(CACHE_ROOT, "favicons")
 IMAGE_HOST_SUFFIXES = ("googleusercontent.com", "ytimg.com", "ggpht.com", "google.com")
 MAX_THUMBNAIL_BYTES = 1024 * 1024
 MAX_THUMBNAIL_DIMENSION = 4096
@@ -64,6 +67,10 @@ THUMBNAIL_CACHE_MAX_ENTRIES = 300
 THUMBNAIL_CACHE_MAX_BYTES = 32 * 1024 * 1024
 IMAGE_CACHE_MAX_ENTRIES = 150
 IMAGE_CACHE_MAX_BYTES = 24 * 1024 * 1024
+# Remote station favicons are fetched out of process and cached here. QML only
+# ever sees the resulting file:// path, so no in-process Qt TLS/CA load runs.
+FAVICON_CACHE_MAX_ENTRIES = 300
+FAVICON_CACHE_MAX_BYTES = 32 * 1024 * 1024
 
 # Precached audio for queue tracks: one file per videoId under
 # $XDG_CACHE_HOME/yt-music/audio (files 0600, directory 0700). The cap covers
@@ -1446,6 +1453,10 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
         status["stationId"] = radio.get("id", "")
         status["stationName"] = station_name
         status["stationFavicon"] = str(radio.get("favicon") or "")
+        # The local mirror is only a display hint: never fetch here (status is
+        # written constantly by short-lived processes); use the warm cache only.
+        status["stationFaviconLocal"] = cached_image_url_local(
+            status["stationFavicon"], fetch=False)
         status["nowPlaying"] = now_playing
         status["title"] = station_name
         status["artist"] = now_playing
@@ -3214,7 +3225,9 @@ def cmd_station_catalog(args):
     catalog updates. Offline; -r is ignored.
     """
     _args, _refresh = _strip_refresh(args)
-    print(json.dumps({"ok": True, "items": _featured_items()}))
+    print(json.dumps({"ok": True,
+                      "items": _with_local_favicons(_featured_items(),
+                                                    fetch=True)}))
 
 
 def cmd_station_search(args):
@@ -3259,7 +3272,10 @@ def cmd_station_search(args):
     if not refresh:
         payload, fresh = cache_read("stations", key, ttl)
         if fresh and payload is not None:
-            print(json.dumps(_cache_served(payload)))
+            served = _cache_served(payload)
+            served["items"] = _with_local_favicons(served.get("items"),
+                                                   fetch=False)
+            print(json.dumps(served))
             return
     try:
         rows = _radio_browser_request("/json/stations/search", {
@@ -3276,18 +3292,30 @@ def cmd_station_search(args):
                 items.append(row)
             if len(items) >= limit:
                 break
+        # The cached payload stays clean: only the printed copy carries the
+        # QML-facing faviconLocal path.
         payload = {"ok": True, "items": items, "cached": False}
         cache_write("stations", key, payload)
-        print(json.dumps(payload))
+        print(json.dumps({"ok": True,
+                          "items": _with_local_favicons(items, fetch=False),
+                          "cached": False}))
     except Exception as e:
-        if not _serve_stale("stations", key, ttl):
+        stale, _fresh = cache_read("stations", key, ttl)
+        if stale is None:
             print(json.dumps({"ok": False, "error": str(e)}))
+        else:
+            served = _cache_served(stale, stale=True)
+            served["items"] = _with_local_favicons(served.get("items"),
+                                                   fetch=False)
+            print(json.dumps(served))
 
 
 def cmd_station_favorites(args):
     """List locally saved radio stations. Offline; -r is ignored."""
     _args, _refresh = _strip_refresh(args)
-    print(json.dumps({"ok": True, "items": load_radio_stations()}))
+    print(json.dumps({"ok": True,
+                      "items": _with_local_favicons(load_radio_stations(),
+                                                    fetch=True)}))
 
 
 def cmd_station_fav_add(args):
@@ -3547,13 +3575,17 @@ def cmd_station_history(args):
         print(json.dumps({"ok": True, "cleared": True}))
         return
     if not args:
-        print(json.dumps({"ok": True, "items": load_radio_history()}))
+        print(json.dumps({"ok": True,
+                          "items": _with_local_favicons(load_radio_history(),
+                                                        fetch=False)}))
         return
     try:
         limit = max(1, min(RADIO_HISTORY_MAX, int(args[0])))
     except ValueError:
         fail("Usage: yt-music-ctl station-history [limit|clear]")
-    print(json.dumps({"ok": True, "items": load_radio_history()[:limit]}))
+    print(json.dumps({"ok": True,
+                      "items": _with_local_favicons(load_radio_history()[:limit],
+                                                    fetch=False)}))
 
 
 def cmd_history(args):
@@ -3787,6 +3819,32 @@ def _urlopen_no_redirect(request, timeout):
     return urllib.request.build_opener(_NoRedirectHandler).open(request, timeout=timeout)
 
 
+class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only when every hop stays on a public http(s) host.
+
+    Favicons commonly 301 to a CDN, so refusing redirects outright drops them.
+    Each hop is re-validated before urllib is allowed to follow it, so a 3xx
+    still cannot be used to reach the loopback or the local network (SSRF).
+    The default max-redirect limit is left in place to stop redirect loops.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            parts = urllib.parse.urlsplit(newurl)
+            if parts.scheme not in ("http", "https"):
+                return None
+            if not _host_is_public(parts.hostname or ""):
+                return None
+        except Exception:
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _urlopen_public_redirect(request, timeout):
+    return urllib.request.build_opener(_PublicRedirectHandler).open(
+        request, timeout=timeout)
+
+
 def _prune_media_cache(directory, max_entries, max_bytes):
     """Evict oldest files until both caps hold. Never raises.
 
@@ -3817,6 +3875,214 @@ def _prune_media_cache(directory, max_entries, max_bytes):
             os.unlink(path)
         except OSError:
             pass
+
+
+def _host_is_public(host):
+    """True only when every address a host resolves to is a public address.
+
+    Blocks loopback, link-local, private, reserved, multicast and unspecified
+    ranges so a station favicon cannot be pointed at the local network or the
+    loopback interface (SSRF). Unresolvable, empty and `localhost` hosts are
+    rejected. Never raises.
+    """
+    host = str(host or "").strip()
+    if not host or host.lower() == "localhost":
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            address = info[4][0]
+            ip = ipaddress.ip_address(address)
+        except Exception:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+            return False
+    return True
+
+
+def _image_extension(data):
+    """Sniff a supported image format and return its extension, else None.
+
+    Only known raster magic numbers and an SVG opening tag are accepted, so a
+    non-image body (an HTML error page, say) can never be stored and later
+    rendered by QML.
+    """
+    if not data:
+        return None
+    if data[:2] == b"\xff\xd8":
+        return ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data[:2] == b"BM":
+        return ".bmp"
+    if data[:4] == b"\x00\x00\x01\x00":
+        return ".ico"
+    head = data[:1024].lstrip()
+    if head.startswith(b"<?xml") or head.startswith(b"<svg"):
+        return ".svg"
+    return None
+
+
+def _cached_image_path(key):
+    """Existing cached favicon file for `key`, or None.
+
+    Only a regular, non-empty, user-owned file whose basename starts with
+    `key` + "." is returned, so a planted symlink can never be served.
+    """
+    prefix = key + "."
+    try:
+        names = os.listdir(FAVICON_CACHE_DIR)
+    except OSError:
+        return None
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        path = os.path.join(FAVICON_CACHE_DIR, name)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_size > 0 and st.st_uid == os.getuid():
+            return path
+    return None
+
+
+def ensure_cached_remote_image(url, timeout=6):
+    """Download a remote image into FAVICON_CACHE_DIR, returning its path.
+
+    Only http(s) URLs whose host resolves exclusively to public addresses are
+    fetched, and redirects are refused so a 3xx cannot reach an internal host.
+    The body is capped, its format sniffed, and it is written atomically (0600)
+    before the cache is pruned. Any failure yields None and never raises.
+    """
+    try:
+        if not isinstance(url, str):
+            return None
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ("http", "https"):
+            return None
+        if not _host_is_public(parts.hostname or ""):
+            return None
+        key = hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
+        cached = _cached_image_path(key)
+        if cached is not None:
+            return cached
+        _ensure_private_dir(CACHE_ROOT)
+        _ensure_private_dir(FAVICON_CACHE_DIR)
+        request = urllib.request.Request(url, headers={"User-Agent": "yt-music-ctl/1"})
+        with _urlopen_public_redirect(request, timeout=timeout) as response:
+            if not _host_is_public(
+                    urllib.parse.urlsplit(response.geturl()).hostname or ""):
+                return None
+            data = response.read(MAX_THUMBNAIL_BYTES + 1)
+        if len(data) > MAX_THUMBNAIL_BYTES:
+            return None
+        extension = _image_extension(data)
+        if extension is None:
+            return None
+        fd, temporary = tempfile.mkstemp(dir=FAVICON_CACHE_DIR,
+                                         prefix=".favicon-", suffix=extension)
+        try:
+            with os.fdopen(fd, "wb") as output:
+                output.write(data)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, os.path.join(FAVICON_CACHE_DIR, key + extension))
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        _prune_media_cache(FAVICON_CACHE_DIR, FAVICON_CACHE_MAX_ENTRIES,
+                           FAVICON_CACHE_MAX_BYTES)
+        return _cached_image_path(key)
+    except Exception:
+        return None
+
+
+def cached_image_url_local(url, fetch=True):
+    """A file:// URL for a cached remote image, or "" when unavailable.
+
+    With fetch=False only an already-cached file is returned and no network is
+    touched; the frequently written status path relies on that. With fetch=True
+    a missing image is downloaded first. Never raises.
+    """
+    try:
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            return ""
+        key = hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
+        path = _cached_image_path(key)
+        if path is None and fetch:
+            path = ensure_cached_remote_image(url)
+        if path is None:
+            return ""
+        return "file://" + path
+    except Exception:
+        return ""
+
+
+def _with_local_favicons(items, fetch=True, budget_seconds=4.0):
+    """Copy station rows, adding a QML-facing `faviconLocal` file:// path.
+
+    The remote `favicon` field is never modified: it is persisted and must stay
+    remote so it can be refreshed later. With fetch=True the distinct favicon
+    URLs are warmed concurrently and the wait is capped at `budget_seconds`; a
+    row still pending when the budget expires keeps `faviconLocal` "". With
+    fetch=False only already-cached files are used, so no network happens. Any
+    failure yields the rows with an empty `faviconLocal`. Never raises.
+    """
+    try:
+        rows = [dict(item) if isinstance(item, dict) else item
+                for item in (items or [])]
+    except Exception:
+        return list(items or [])
+    urls = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        favicon = row.get("favicon")
+        if (isinstance(favicon, str) and favicon.startswith(("http://", "https://"))
+                and favicon not in urls):
+            urls.append(favicon)
+    if fetch and urls:
+        resolved = {}
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        try:
+            futures = {pool.submit(cached_image_url_local, url, True): url
+                       for url in urls}
+            done, _pending = concurrent.futures.wait(futures,
+                                                     timeout=budget_seconds)
+            for future in done:
+                url = futures[future]
+                try:
+                    resolved[url] = future.result()
+                except Exception:
+                    resolved[url] = ""
+        finally:
+            # Do not block on the slowest host: rows still pending keep "".
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                pool.shutdown(wait=False)
+        for row in rows:
+            if isinstance(row, dict):
+                favicon = row.get("favicon")
+                row["faviconLocal"] = (resolved.get(favicon, "")
+                                       if isinstance(favicon, str) else "")
+        return rows
+    for row in rows:
+        if isinstance(row, dict):
+            favicon = row.get("favicon")
+            row["faviconLocal"] = (cached_image_url_local(favicon, fetch=False)
+                                   if isinstance(favicon, str) else "")
+    return rows
 
 
 class _ThumbnailError(Exception):
@@ -3901,6 +4167,7 @@ def cmd_image(args):
     path = os.path.join(IMAGE_CACHE_DIR, f"{key}.jpg")
     try:
         if _owned_regular_file(path) and os.path.getsize(path) > 0:
+            print("file://" + path)
             return
         request = urllib.request.Request(url, headers={"User-Agent": "yt-music-ctl/1"})
         with _urlopen_no_redirect(request, timeout=8) as response:
@@ -3928,6 +4195,7 @@ def cmd_image(args):
             if os.path.exists(temporary):
                 os.unlink(temporary)
         _prune_media_cache(IMAGE_CACHE_DIR, IMAGE_CACHE_MAX_ENTRIES, IMAGE_CACHE_MAX_BYTES)
+        print("file://" + path)
     except Exception as exc:
         fail(f"Image fetch failed: {exc}")
 

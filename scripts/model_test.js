@@ -211,6 +211,20 @@ eq(Model.isVideoId("abcdefghijk"), true, "isVideoId accepts an 11-char id")
 eq(Model.isVideoId("short"), false, "isVideoId rejects a short id")
 eq(Model.isVideoId(""), false, "isVideoId rejects empty")
 
+// --- localImageSource: only file:// reaches an Image.source
+eq(Model.localImageSource("file:///home/u/.cache/yt-music/favicons/a.png"),
+  "file:///home/u/.cache/yt-music/favicons/a.png",
+  "localImageSource accepts a file:// path")
+eq(Model.localImageSource("http://example.com/f.png"), "",
+  "localImageSource rejects http")
+eq(Model.localImageSource("https://example.com/f.png"), "",
+  "localImageSource rejects https")
+eq(Model.localImageSource(""), "", "localImageSource rejects empty")
+eq(Model.localImageSource(null), "", "localImageSource rejects null")
+eq(Model.localImageSource(undefined), "", "localImageSource rejects undefined")
+eq(Model.localImageSource("favicons/a.png"), "",
+  "localImageSource rejects a bare path")
+
 // --- normalizeSong / normalizeSongs
 eq(Model.normalizeSong({ videoId: "bad", title: "T" }), null,
   "normalizeSong rejects an invalid videoId")
@@ -254,6 +268,14 @@ eq(stations[0].tags, ["a", "b"], "normalizeStations drops empty tags")
 eq(stations[0].bitrate, 128, "normalizeStations coerces bitrate")
 eq(stations[1].tags, [], "normalizeStations ignores a non-list tags field")
 eq(Model.normalizeStations(null), [], "normalizeStations tolerates null")
+const stationLocal = Model.normalizeStations([
+  { id: "s3", url: "http://z", favicon: "http://z/f.png",
+    faviconLocal: "file:///cache/favicons/z.png" },
+])
+eq(stationLocal[0].favicon, "http://z/f.png",
+  "normalizeStations keeps the remote favicon")
+eq(stationLocal[0].faviconLocal, "file:///cache/favicons/z.png",
+  "normalizeStations passes faviconLocal through")
 
 // --- normalizePlaylists
 eq(Model.normalizePlaylists([{ id: "p1", title: "T", description: "D" }, { title: "no id" }]),
