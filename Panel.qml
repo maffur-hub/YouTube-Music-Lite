@@ -606,17 +606,24 @@ Panel {
     if (key === "stationSearch") return stationSearchDeadline
     if (key === "stationPlay") return stationPlayDeadline
     if (key === "stationFav") return stationFavDeadline
+    if (key === "stationFeatured") return stationFeaturedDeadline
     return null
   }
 
+  // Called when a request's deadline fires. It runs whether or not the process
+  // is still `running`: a missing `yt-music-ctl` fails to start, so `running`
+  // is already false and a `if (running)` guard would leave the panel's flags
+  // stuck forever. Every flag a request can set is cleared here.
   function commandTimeoutHit(key) {
     root.statusText = "Backend unavailable — is yt-music-ctl installed?"
     if (key === "status") root.refreshing = false
     else if (key === "search") root.searching = false
-    else if (key === "play" || key === "mix" || key === "queue" || key === "logout" || key === "create" || key === "cmd") root.busy = false
-    else if (key === "albumCmd") { root.albumCmdRunning = false; root.pumpAlbumCmdQueue() }
-    else if (key === "lyrics") root.lyricsLoading = false
+    else if (key === "stationSearch") root.stationSearching = false
     else if (key === "stationPlay") root.stationBusy = false
+    else if (key === "tracks" || key === "library") root.loadingText = ""
+    else if (key === "lyrics") root.lyricsLoading = false
+    else if (key === "albumCmd") { root.albumCmdRunning = false; root.pumpAlbumCmdQueue() }
+    else if (key === "play" || key === "mix" || key === "queue" || key === "logout" || key === "create" || key === "cmd") root.busy = false
   }
 
   function appendProcessOutput(key, chunk) {
@@ -2114,8 +2121,8 @@ Panel {
 
   Timer { id: stationFavoritesDeadline; interval: root.commandTimeout; onTriggered: { if (stationFavoritesProc.running) stationFavoritesProc.running = false } }
   Timer { id: stationCatalogDeadline; interval: root.commandTimeout; onTriggered: { if (stationCatalogProc.running) stationCatalogProc.running = false } }
-  Timer { id: stationSearchDeadline; interval: root.commandTimeout; onTriggered: { if (stationSearchProc.running) stationSearchProc.running = false } }
-  Timer { id: stationPlayDeadline; interval: root.commandTimeout; onTriggered: { if (stationPlayProc.running) { stationPlayProc.running = false; root.stationBusy = false } } }
+  Timer { id: stationSearchDeadline; interval: root.commandTimeout; onTriggered: { if (stationSearchProc.running) stationSearchProc.running = false; root.commandTimeoutHit("stationSearch") } }
+  Timer { id: stationPlayDeadline; interval: root.commandTimeout; onTriggered: { if (stationPlayProc.running) stationPlayProc.running = false; root.commandTimeoutHit("stationPlay") } }
   Timer { id: stationFavDeadline; interval: root.commandTimeout; onTriggered: { if (stationFavProc.running) stationFavProc.running = false } }
   Timer { id: stationFeaturedDeadline; interval: root.commandTimeout; onTriggered: { if (stationFeaturedProc.running) stationFeaturedProc.running = false } }
 
@@ -2492,13 +2499,13 @@ Panel {
 
   Timer { id: statusDeadline; interval: root.commandTimeout; onTriggered: { if (statusProc.running) { statusProc.running = false; root.statusText = "Status request timed out" } else root.commandTimeoutHit("status") } }
   Timer { id: playlistsDeadline; interval: root.commandTimeout; onTriggered: { if (playlistsProc.running) { playlistsProc.running = false; root.statusText = "Library request timed out" } } }
-  Timer { id: tracksDeadline; interval: root.commandTimeout; onTriggered: { if (tracksProc.running) { tracksProc.running = false; root.statusText = "Playlist request timed out" } } }
+  Timer { id: tracksDeadline; interval: root.commandTimeout; onTriggered: { if (tracksProc.running) tracksProc.running = false; root.commandTimeoutHit("tracks") } }
   Timer { id: searchDeadline; interval: root.commandTimeout; onTriggered: { if (searchProc.running) { searchProc.running = false; root.statusText = "Search timed out" } else root.commandTimeoutHit("search") } }
   Timer { id: playDeadline; interval: root.commandTimeout; onTriggered: { if (playNowProc.running) playNowProc.running = false; else root.commandTimeoutHit("play") } }
   Timer { id: mixDeadline; interval: root.commandTimeout; onTriggered: { if (mixProc.running) mixProc.running = false; else root.commandTimeoutHit("mix") } }
   Timer { id: queueDeadline; interval: root.commandTimeout; onTriggered: { if (queueProc.running) queueProc.running = false; else root.commandTimeoutHit("queue") } }
   Timer { id: queueListDeadline; interval: root.commandTimeout; onTriggered: { if (queueListProc.running) queueListProc.running = false } }
-  Timer { id: libraryDeadline; interval: root.commandTimeout; onTriggered: { if (libraryProc.running) libraryProc.running = false } }
+  Timer { id: libraryDeadline; interval: root.commandTimeout; onTriggered: { if (libraryProc.running) libraryProc.running = false; root.commandTimeoutHit("library") } }
   Timer { id: albumStatusDeadline; interval: root.commandTimeout; onTriggered: { if (albumStatusProc.running) albumStatusProc.running = false } }
   Timer { id: albumCmdDeadline; interval: root.commandTimeout; onTriggered: { if (albumCmdProc.running) albumCmdProc.running = false; root.albumCmdRunning = false; root.pumpAlbumCmdQueue() } }
   Timer { id: logoutDeadline; interval: root.commandTimeout; onTriggered: { if (logoutProc.running) logoutProc.running = false; else root.commandTimeoutHit("logout") } }

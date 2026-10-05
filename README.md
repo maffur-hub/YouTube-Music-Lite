@@ -225,7 +225,9 @@ sudo pacman -S mpv-mpris
 
 MPRIS identifies the player as `mpv` (`playerctl -p mpv ...`). The notice
 printed by `./install.sh` and `yt-music-ctl doctor` both report whether it
-is installed.
+is installed. `doctor` also reports the other runtime prerequisites — `mpv`,
+`yt-dlp`, `cava` (the optional visualizer), and `python3` — with an install
+hint for anything missing.
 
 ## Testing
 

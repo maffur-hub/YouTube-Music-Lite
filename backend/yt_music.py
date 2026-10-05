@@ -5772,18 +5772,27 @@ def cmd_doctor(args):
     """Print a JSON report of the desktop-integration prerequisites.
 
     mpris is what exposes playback on D-Bus (org.mpris.MediaPlayer2.mpv) so
-    the media keys and Omarchy's media widget can control this player. Pure
-    filesystem/PATH checks: no subprocesses, nothing that can fail loudly.
+    the media keys and Omarchy's media widget can control this player. cava
+    drives the optional audio visualizer. Pure filesystem/PATH checks: no
+    subprocesses, nothing that can fail loudly.
     """
     script = mpris_script_path()
     mpris = script is not None
+    cava = shutil.which("cava") is not None
+    hints = []
+    if not mpris:
+        hints.append("sudo pacman -S mpv-mpris")
+    if not cava:
+        hints.append("sudo pacman -S cava (audio visualizer)")
     print(json.dumps({
         "ok": True,
         "mpris": mpris,
         "mpris_script": script,
         "mpv": shutil.which("mpv") is not None,
         "yt_dlp": shutil.which("yt-dlp") is not None,
-        "hint": "" if mpris else "sudo pacman -S mpv-mpris",
+        "cava": cava,
+        "python": shutil.which("python3") is not None,
+        "hint": " · ".join(hints),
     }))
 
 

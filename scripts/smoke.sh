@@ -1639,6 +1639,50 @@ else
     fail "stream progress + status marker" "$(cat "$ERR_FILE")"
 fi
 
+# ------------------------------------------------- dependency doctor (offline)
+# `doctor` must report every runtime prerequisite (including the optional cava
+# visualizer) and a combined hint, without running a subprocess.
+section "dependency doctor (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import contextlib, importlib.util, io, json, os, sys
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_doctor_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# Missing mpris AND cava: both hints are present.
+mod.mpris_script_path = lambda: None
+mod.shutil.which = lambda name: None if name == "cava" else "/usr/bin/" + name
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_doctor([])
+report = json.loads(out.getvalue())
+assert report["ok"] is True, report
+for key in ("mpris", "mpris_script", "mpv", "yt_dlp", "cava", "python", "hint"):
+    assert key in report, (key, report)
+assert report["mpris"] is False and report["cava"] is False, report
+assert "mpv-mpris" in report["hint"], report
+assert "cava" in report["hint"], report
+
+# Both present: no hint.
+mod.mpris_script_path = lambda: "/etc/mpv/scripts/mpris.so"
+mod.shutil.which = lambda name: "/usr/bin/" + name
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_doctor([])
+report = json.loads(out.getvalue())
+assert report["mpris"] is True and report["cava"] is True, report
+assert report["hint"] == "", report
+PY
+if [[ $? -eq 0 ]]; then
+    pass "doctor reports every dependency + hint"
+else
+    fail "dependency doctor" "$(cat "$ERR_FILE")"
+fi
+
 # ------------------------------------------------- volume persistence (offline)
 # A fresh mpv starts at 100%, so the chosen volume must be remembered and fed
 # to every respawn (play, radio, restore, resume) or it silently jumps back to

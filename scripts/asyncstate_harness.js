@@ -16,6 +16,7 @@ const assert = require("node:assert/strict")
 const fs = require("node:fs")
 const path = require("node:path")
 const AsyncState = require("../AsyncState.js")
+const Model = require("../Model.js")
 
 let passed = 0
 function ok(value, msg) { passed++; assert.equal(value, true, msg) }
@@ -86,5 +87,60 @@ for (const id of fetchProcs) {
 // the multi-line block forms rather than naming each (the file has ~28).
 const deadlineIds = new Set((panel.match(/id: \w+Deadline/g) || []))
 ok(deadlineIds.size >= 25, "the panel has a deadline timer per fetch (" + deadlineIds.size + ")")
+
+// Every `startProcess(proc, "key")` must map to a deadline in `deadlineFor`,
+// or the process can hang forever when the backend fails to start (the
+// FailedToStart case never emits onExited). The only keys allowed to skip a
+// deadline are the fire-and-forget ui-state writers.
+{
+  const started = new Set(
+    (panel.match(/startProcess\([A-Za-z]+Proc, "([a-zA-Z]+)"\)/g) || [])
+      .map((m) => m.match(/"([a-zA-Z]+)"\)$/)[1]))
+  const deadlineFn = panel.slice(
+    panel.indexOf("function deadlineFor"),
+    panel.indexOf("function commandTimeoutHit"))
+  const mapped = new Set((deadlineFn.match(/key === "([a-zA-Z]+)"/g) || [])
+    .map((m) => m.match(/"([a-zA-Z]+)"/)[1]))
+  const noDeadlineAllowed = new Set(["uiSave", "uiLoad"])
+  const missing = [...started].filter(
+    (k) => !mapped.has(k) && !noDeadlineAllowed.has(k))
+  eq(missing, [], "every startProcess key has a deadline (missing: " + missing.join(",") + ")")
+  ok(started.size >= 25, "the panel starts at least 25 distinct processes (" + started.size + ")")
+}
+
+// A status file that is absent or corrupt must parse to null, not throw.
+eq(Model.parseStatus(""), null, "parseStatus of an empty status file is null")
+eq(Model.parseStatus("{ not json"), null, "parseStatus of a corrupt file is null")
+eq(Model.parseStatus('{"ok": false}'), null, "parseStatus of ok:false is null")
+eq(Model.parseStatus('{"ok": true, "playing": true}').playing, true,
+  "parseStatus accepts a valid status")
+
+// When the backend is missing, FailedToStart leaves `proc.running` false, so a
+// deadline that only acts `if (proc.running)` would never clear the panel's
+// flags. `commandTimeoutHit` must therefore handle every key whose request
+// sets a flag, and the flag-setting deadlines must call it unconditionally.
+{
+  const hitFn = panel.slice(
+    panel.indexOf("function commandTimeoutHit"),
+    panel.indexOf("function appendProcessOutput"))
+  const handled = new Set((hitFn.match(/key === "([a-zA-Z]+)"/g) || [])
+    .map((m) => m.match(/"([a-zA-Z]+)"/)[1]))
+  const flagKeys = ["status", "search", "stationSearch", "stationPlay",
+                    "tracks", "library", "lyrics", "albumCmd",
+                    "play", "mix", "queue", "logout", "create", "cmd"]
+  const missing = flagKeys.filter((k) => !handled.has(k))
+  eq(missing, [], "commandTimeoutHit clears every flag-setting key (missing: " + missing.join(",") + ")")
+
+  // The deadlines that gate a flag must call commandTimeoutHit even when the
+  // process never started.
+  for (const [id, key] of [["stationSearchDeadline", "stationSearch"],
+                           ["stationPlayDeadline", "stationPlay"],
+                           ["tracksDeadline", "tracks"],
+                           ["libraryDeadline", "library"]]) {
+    const line = (panel.match(new RegExp("Timer \\{ id: " + id + ";[^\\n]*")) || [""])[0]
+    ok(line.includes('commandTimeoutHit("' + key + '")'),
+      id + " clears its flag via commandTimeoutHit")
+  }
+}
 
 console.log(passed + " assertions passed")

@@ -121,6 +121,21 @@ Close the confirmed-but-unfixed items in `docs/backlog.md`:
 - Confirm the panel degrades cleanly when `yt-music-ctl`, `mpv`, or `cava` is
   missing, and when `status.json` is absent/corrupt.
 
+### Progress
+- [x] `doctor` now reports `cava` and `python3` alongside `mpris`/`mpv`/`yt-dlp`
+  and builds a combined install hint; covered by an offline smoke section.
+- [x] Fixed a real resilience bug: `stationFeatured` was missing from
+  `deadlineFor`, so a failed start left the featured toggle blocked. Added a
+  harness guard that every `startProcess(proc, "key")` key maps to a deadline
+  (except the fire-and-forget `uiSave`/`uiLoad`).
+- [x] Fixed the `FailedToStart` wedge class: `commandTimeoutHit` now clears
+  every flag-setting key, and the `stationSearch`/`stationPlay`/`tracks`/
+  `library` deadlines call it unconditionally, so a missing `yt-music-ctl`
+  cannot leave `stationSearching`/`stationBusy`/`loadingText` stuck. Guarded in
+  the harness.
+- [x] Confirmed `status.json` absent/corrupt parses to null (`BarWidget`
+  `onLoadFailed`, `Model.parseStatus`), now asserted in the harness.
+
 ## Phase 6 — Discoverability (LOW RISK)
 - A keyboard-shortcut / context-menu cheat sheet in the panel, and a first-run
   hint covering the right-click menus (station rows, queue rows, bar icon).

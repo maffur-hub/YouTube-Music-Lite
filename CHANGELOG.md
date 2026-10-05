@@ -4,6 +4,11 @@
 
 Review-driven fixes (see `docs/review-findings.md`, `docs/phase2-decisions.md`).
 
+- Hardening: `doctor` now reports `cava` and `python3` too, and the panel no
+  longer leaves a stuck spinner/flag when `yt-music-ctl` is missing (the
+  station-search, station-play, playlist and library deadlines now clear their
+  state even when the process fails to start). A missing featured-station
+  deadline was also fixed.
 - A radio station that mpv accepts but never actually plays is no longer
   reported as a success (and no longer recorded in history): playback is only
   confirmed once the stream position advances or real ICY metadata arrives.
