@@ -29,6 +29,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - MPRIS: playback is controllable from the desktop through `mpv-mpris` (media keys, Omarchy's media widget), with title, artist, and album art reported to any MPRIS client
 - Private per-user runtime state and MPV IPC socket
 - Lyrics for the current track, fetched on demand and reloaded when the track changes
+- An audio visualizer fed by `cava` (required for this feature) with an on/off toggle, eight styles (bars, bars-mirror, voice-gradient, bars-meter, VU ladder, vertical VU, VU spectrum, VU dots), and mono/stereo plus linear/decibel display options
 - A bar widget that shows an accent note glyph, the current `title · artist`, a hover tooltip, and left/middle/right-click controls
 - Local Last Played history with its own Clear button
 - Keyboard control of the panel: move a list cursor, seek, drive the transport, and close the panel
@@ -171,6 +172,7 @@ The metadata read commands (`search`, `library`, `home`, `history`, `last-played
 - MPV
 - `yt-dlp`
 - `mpv-mpris` (optional, but recommended: enables the desktop media keys and the Omarchy media widget)
+- `cava` (optional, but required for the audio visualizer)
 - `libnotify`/`notify-send` for track-change notifications (part of a standard Omarchy install)
 - A Chromium-based browser or Firefox logged into YouTube Music
 

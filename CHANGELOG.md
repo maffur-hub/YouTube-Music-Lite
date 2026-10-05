@@ -50,6 +50,26 @@ Review-driven fixes (see `docs/review-findings.md`, `docs/phase2-decisions.md`).
 - Right-click menus use a single highlight cursor again: hovering a row and the
   arrow keys drive the same selection, so a menu can no longer show two rows
   highlighted at once.
+- Added a `cava`-driven audio visualizer below the now-playing card, with an
+  on/off toggle, eight styles (bars, bars-mirror, voice-gradient, bars-meter, VU
+  ladder, vertical VU, VU spectrum, VU dots),
+  and mono/stereo plus linear/decibel display options; `install.sh` now notes the
+  optional `cava` dependency and the README lists it.
+- The linear/decibel visualizer option now works: cava 0.10.7 ignores the
+  `scaling` config key, so the curve is applied to each parsed frame in the
+  panel instead of being written to the cava config.
+- Switching from one live station to another now refreshes Up Next instead of
+  leaving the previous station's rows (both share the same queue key).
+- A favourite add/remove that lands while a favourites fetch is already running
+  is now replayed when that fetch exits, so the list can no longer stay stale.
+- Station search no longer keeps showing the previous query's results or flashes
+  "No stations found." while a new search is pending, surfaces backend errors in
+  the status line, and pressing Enter no longer fires a duplicate lookup.
+- Starting radio with the lyrics panel open now closes it, matching the hidden
+  Lyrics button.
+- Enter/Space on the Stations tab no longer toggles playback.
+- The VU, vertical VU, and VU-spectrum meters no longer light their bottom
+  segment at silence.
 
 ## 2.2.0 — 2026-09-30
 
