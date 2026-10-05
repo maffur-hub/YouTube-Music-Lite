@@ -66,7 +66,6 @@ Panel {
   readonly property int visualizerSpectrumSegments: 10
   readonly property string cavaRuntimePath: Quickshell.env("HOME") + "/.local/state/yt-music/cava-runtime.conf"
   onVisualizerChannelsChanged: root.writeCavaConfig()
-  onVisualizerScalingChanged: root.writeCavaConfig()
 
   readonly property string ctlPath: Quickshell.env("HOME") + "/.local/bin/yt-music-ctl"
   readonly property color fg: root.barForeground
@@ -953,13 +952,16 @@ Panel {
     if (q === "") {
       root.stationResults = []
       root.stationSearching = false
+      root.pendingStationSearch = ""
       return
     }
     if (stationSearchProc.running) {
       // Let the in-flight lookup finish; replay only a genuinely newer query
       // (an identical one is already on its way and needs no second run).
-      if (String((stationSearchProc.command || [])[2] || "") !== q)
-        root.pendingStationSearch = q
+      // Always overwrite: returning to the in-flight query must clear a
+      // pending one, or the replay would wedge `stationSearching` true.
+      root.pendingStationSearch =
+        (String((stationSearchProc.command || [])[2] || "") !== q) ? q : ""
       return
     }
     var command = [root.ctlPath, "station-search", q]
@@ -1695,11 +1697,13 @@ Panel {
       "import os,sys\n"
       + "p=sys.argv[1]\n"
       + "os.makedirs(os.path.dirname(p),exist_ok=True)\n"
-      + "open(p,'w').write(sys.argv[2])\n",
+      + "tmp=p+'.tmp'\n"
+      + "open(tmp,'w').write(sys.argv[2])\n"
+      + "os.replace(tmp,p)\n",
       root.cavaRuntimePath,
       Model.cavaConfig(root.visualizerChannels)]
     onExited: function(exitCode) {
-      root.cavaReady = true
+      if (exitCode === 0) root.cavaReady = true
       if (root.cavaWritePending) {
         root.cavaWritePending = false
         root.writeCavaConfig()
@@ -2080,6 +2084,8 @@ Panel {
           root.statusText = root.boundedString(data.error || "Station search failed", 256)
         else if (data && data.ok)
           root.stationResults = root.normalizeStations(data.items)
+        else
+          root.statusText = root.boundedString("Station search failed", 256)
       }
       if (root.pendingStationSearch !== "") {
         var pending = root.pendingStationSearch
@@ -2137,7 +2143,7 @@ Panel {
   Timer { id: stationCatalogDeadline; interval: root.commandTimeout; onTriggered: { if (stationCatalogProc.running) stationCatalogProc.running = false } }
   Timer { id: stationSearchDeadline; interval: root.commandTimeout; onTriggered: { if (stationSearchProc.running) stationSearchProc.running = false } }
   Timer { id: stationPlayDeadline; interval: root.commandTimeout; onTriggered: { if (stationPlayProc.running) { stationPlayProc.running = false; root.stationBusy = false } } }
-  Timer { id: stationFavDeadline; interval: root.commandTimeout; onTriggered: { if (stationFavProc.running) { stationFavProc.running = false; root.refreshStationFavorites() } } }
+  Timer { id: stationFavDeadline; interval: root.commandTimeout; onTriggered: { if (stationFavProc.running) stationFavProc.running = false } }
 
   Timer {
     id: stationSearchDebounce
