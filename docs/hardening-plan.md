@@ -105,6 +105,16 @@ Close the confirmed-but-unfixed items in `docs/backlog.md`:
 - Radio History section, LIVE badge on the pinned row, and cava `source`
   pinning to the monitor.
 
+### Progress
+- [x] Silent station: `wait_for_stream_progress()` added; the cold-start path
+  fails a stream that neither advances its position nor yields real ICY
+  metadata. Offline smoke covers dead/progressing/ICY.
+- [x] Optimistic favourite star (`stationFavOverrides`, revert on failure).
+- [x] `cavaScaleBars` Infinity guard + `model_test.js` coverage.
+- [x] Stale live marker reconciled in `cmd_status`.
+- [ ] UI gaps remain (not reliability): Radio History section, LIVE badge on the
+  pinned queue row, and pinning cava's `source` to the output monitor.
+
 ## Phase 5 — Dependency and resilience checks (LOW RISK)
 - `install.sh` / `doctor`: report cava presence (done) and add a dependency
   self-check summary.
