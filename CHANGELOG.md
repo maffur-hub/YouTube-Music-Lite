@@ -4,6 +4,16 @@
 
 Review-driven fixes (see `docs/review-findings.md`, `docs/phase2-decisions.md`).
 
+- The chosen volume is now remembered across mpv respawns. Every playback start
+  (play, radio, restore, resume, mix, enqueue) spawns a fresh mpv, which always
+  began at 100%, so the volume jumped to full after stopping or switching; the
+  level is now persisted (and picked up from media-key/MPRIS changes) and passed
+  to each spawn as `--volume`.
+- Hardening: moved pure row-shaping helpers (`boundedString`, `isVideoId`,
+  `normalizeSong`/`normalizeSongs`/`normalizeMixedRows`/`normalizeStations`/
+  `normalizePlaylists`) from `Panel.qml` into `Model.js`, where `model_test.js`
+  covers them (190 assertions). See `docs/hardening-plan.md`.
+
 - The bar widget's right-click now opens a transport menu (Play/Pause, Previous,
   Next, Stop, Open/Close player) instead of stopping or refreshing playback;
   middle-click still toggles play/pause.

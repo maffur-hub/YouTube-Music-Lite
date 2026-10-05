@@ -203,6 +203,64 @@ eq(Model.idsToNames(["aaa", "zzz"], nameLabels, 2), "", "idsToNames returns \"\"
 eq(Model.idsToNames([], nameLabels, 2), "", "idsToNames([])")
 eq(Model.idsToNames(undefined, nameLabels, 2), "", "idsToNames(undefined)")
 
+// --- boundedString / isVideoId
+eq(Model.boundedString("hello", 3), "hel", "boundedString truncates")
+eq(Model.boundedString(null, 4), "", "boundedString(null) is empty")
+eq(Model.boundedString(undefined, 4), "", "boundedString(undefined) is empty")
+eq(Model.isVideoId("abcdefghijk"), true, "isVideoId accepts an 11-char id")
+eq(Model.isVideoId("short"), false, "isVideoId rejects a short id")
+eq(Model.isVideoId(""), false, "isVideoId rejects empty")
+
+// --- normalizeSong / normalizeSongs
+eq(Model.normalizeSong({ videoId: "bad", title: "T" }), null,
+  "normalizeSong rejects an invalid videoId")
+eq(Model.normalizeSong({ videoId: "abcdefghijk", title: "T", artist: "A",
+                         album: "Al", duration: 12.5 }),
+  { videoId: "abcdefghijk", title: "T", artist: "A", album: "Al", duration: 12.5 },
+  "normalizeSong shapes a valid song")
+eq(Model.normalizeSong({ videoId: "abcdefghijk", duration: -3 }).duration, 0,
+  "normalizeSong floors a negative duration")
+eq(Model.normalizeSong({ videoId: "abcdefghijk", duration: 9e9 }).duration, 86400,
+  "normalizeSong caps a huge duration")
+eq(Model.normalizeSongs([{ videoId: "abcdefghijk" }, { videoId: "x" }], 10).length, 1,
+  "normalizeSongs drops invalid songs")
+eq(Model.normalizeSongs("nope", 10), [], "normalizeSongs tolerates a non-array")
+eq(Model.normalizeSongs([{ videoId: "abcdefghijk" }], 0), [],
+  "normalizeSongs honours the limit")
+
+// --- normalizeMixedRows
+const mixed = Model.normalizeMixedRows([
+  { kind: "song", videoId: "abcdefghijk", title: "S" },
+  { kind: "album", browseId: "AL", title: "Al" },
+  { kind: "song", videoId: "bad" },
+], 10)
+eq(mixed.length, 2, "normalizeMixedRows keeps valid songs and browse rows")
+eq(mixed[0].kind, "song", "normalizeMixedRows tags songs")
+eq(mixed[1].kind, "album", "normalizeMixedRows tags albums")
+eq(mixed[1].browseId, "AL", "normalizeMixedRows keeps the browseId")
+eq(Model.normalizeMixedRows([{ kind: "album" }], 10), [],
+  "normalizeMixedRows drops a browse row without a browseId")
+eq(Model.normalizeMixedRows(undefined, 10), [],
+  "normalizeMixedRows tolerates undefined")
+
+// --- normalizeStations
+const stations = Model.normalizeStations([
+  { id: "s1", name: "N", url: "http://x", tags: ["a", "b", ""], bitrate: "128" },
+  { id: "s2", name: "M", url: "http://y", tags: "notalist" },
+])
+eq(stations.length, 2, "normalizeStations keeps every row")
+eq(stations[0].kind, "station", "normalizeStations tags stations")
+eq(stations[0].tags, ["a", "b"], "normalizeStations drops empty tags")
+eq(stations[0].bitrate, 128, "normalizeStations coerces bitrate")
+eq(stations[1].tags, [], "normalizeStations ignores a non-list tags field")
+eq(Model.normalizeStations(null), [], "normalizeStations tolerates null")
+
+// --- normalizePlaylists
+eq(Model.normalizePlaylists([{ id: "p1", title: "T", description: "D" }, { title: "no id" }]),
+  [{ id: "p1", title: "T", description: "D" }],
+  "normalizePlaylists keeps id rows and drops id-less ones")
+eq(Model.normalizePlaylists(undefined), [], "normalizePlaylists tolerates undefined")
+
 // --- parseCavaFrame
 eq(Model.parseCavaFrame("10;50;100;", 4), [10, 50, 100, 0],
   "parseCavaFrame maps every field and zeroes a trailing blank")

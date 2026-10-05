@@ -636,72 +636,19 @@ Panel {
     return String(root.processOutput[key] || "")
   }
 
-  function boundedString(value, limit) {
-    return String(value === undefined || value === null ? "" : value).slice(0, limit)
-  }
+  // Pure row-shaping lives in Model.js so it is unit-tested; these thin
+  // wrappers keep the call sites in this file unchanged.
+  function boundedString(value, limit) { return Model.boundedString(value, limit) }
 
-  function isVideoId(value) {
-    return /^[A-Za-z0-9_-]{11}$/.test(String(value || ""))
-  }
+  function isVideoId(value) { return Model.isVideoId(value) }
 
-  function normalizeSong(song) {
-    if (!song || !isVideoId(song.videoId)) return null
-    return {
-      videoId: String(song.videoId),
-      title: root.boundedString(song.title, 256),
-      artist: root.boundedString(song.artist, 256),
-      album: root.boundedString(song.album, 256),
-      duration: Math.max(0, Math.min(86400, Number(song.duration) || 0))
-    }
-  }
+  function normalizeSong(song) { return Model.normalizeSong(song) }
 
-  function normalizeSongs(items, limit) {
-    var result = []
-    for (var i = 0; i < Math.min(Array.isArray(items) ? items.length : 0, limit); i++) {
-      var song = root.normalizeSong(items[i])
-      if (song) result.push(song)
-    }
-    return result
-  }
+  function normalizeSongs(items, limit) { return Model.normalizeSongs(items, limit) }
 
-  function normalizeMixedRows(items, limit) {
-    var out = []
-    var count = Math.min(Array.isArray(items) ? items.length : 0, limit)
-    for (var i = 0; i < count; i++) {
-      var item = items[i] || {}
-      var kind = String(item.kind || "")
-      if (kind === "song") {
-        var vid = String(item.videoId || "")
-        if (!root.isVideoId(vid)) continue
-        out.push({ kind: "song", videoId: vid, browseId: "",
-                   title: root.boundedString(item.title, 256),
-                   artist: root.boundedString(item.artist, 256),
-                   album: root.boundedString(item.album, 256),
-                   duration: Math.max(0, Math.min(86400, Number(item.duration) || 0)) })
-      } else if (kind === "album" || kind === "artist" || kind === "playlist") {
-        var bid = root.boundedString(item.browseId, 256)
-        if (!bid) continue
-        out.push({ kind: kind, videoId: "", browseId: bid,
-                   title: root.boundedString(item.title, 256),
-                   artist: root.boundedString(item.artist, 256), duration: 0 })
-      }
-    }
-    return out
-  }
+  function normalizeMixedRows(items, limit) { return Model.normalizeMixedRows(items, limit) }
 
-  function normalizePlaylists(items) {
-    var result = []
-    for (var i = 0; i < Math.min(Array.isArray(items) ? items.length : 0, 100); i++) {
-      var playlist = items[i]
-      if (!playlist || !playlist.id) continue
-      result.push({
-        id: root.boundedString(playlist.id, 256),
-        title: root.boundedString(playlist.title, 256),
-        description: root.boundedString(playlist.description, 256)
-      })
-    }
-    return result
-  }
+  function normalizePlaylists(items) { return Model.normalizePlaylists(items) }
 
   function parseProcessJson(raw) {
     try {
@@ -891,34 +838,7 @@ Panel {
   }
 
   // ---- internet radio (Stations tab): favorites + directory search
-  function normalizeStations(items) {
-    var out = []
-    var count = Math.min(Array.isArray(items) ? items.length : 0, 100)
-    for (var i = 0; i < count; i++) {
-      var item = items[i] || {}
-      var tags = []
-      if (Array.isArray(item.tags)) {
-        for (var t = 0; t < item.tags.length && tags.length < 32; t++) {
-          var tag = root.boundedString(item.tags[t], 64).trim()
-          if (tag !== "") tags.push(tag)
-        }
-      }
-      out.push({
-        kind: "station",
-        id: root.boundedString(item.id, 256),
-        name: root.boundedString(item.name, 256),
-        url: root.boundedString(item.url, 1024),
-        favicon: root.boundedString(item.favicon, 1024),
-        homepage: root.boundedString(item.homepage, 1024),
-        tags: tags,
-        country: root.boundedString(item.country, 16),
-        codec: root.boundedString(item.codec, 32),
-        bitrate: Math.max(0, Number(item.bitrate) || 0),
-        source: root.boundedString(item.source, 32)
-      })
-    }
-    return out
-  }
+  function normalizeStations(items) { return Model.normalizeStations(items) }
 
   function stationSubtitle(row) {
     if (!row) return ""

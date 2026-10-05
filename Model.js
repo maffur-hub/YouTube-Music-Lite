@@ -239,6 +239,111 @@ function truncate(text, maxLen) {
   return t.substring(0, maxLen - 1) + "…"
 }
 
+// ---- backend-row normalization (pure; used by Panel.qml)
+//
+// These shape backend JSON into the row objects the panel renders. They lived
+// in Panel.qml as methods, tangled with QML state; here they are pure and
+// unit-tested, so a backend shape change is caught by model_test.js instead of
+// only by hand.
+
+function boundedString(value, limit) {
+  return String(value === undefined || value === null ? "" : value).slice(0, limit)
+}
+
+function isVideoId(value) {
+  return /^[A-Za-z0-9_-]{11}$/.test(String(value || ""))
+}
+
+function normalizeSong(song) {
+  if (!song || !isVideoId(song.videoId)) return null
+  return {
+    videoId: String(song.videoId),
+    title: boundedString(song.title, 256),
+    artist: boundedString(song.artist, 256),
+    album: boundedString(song.album, 256),
+    duration: Math.max(0, Math.min(86400, Number(song.duration) || 0))
+  }
+}
+
+function normalizeSongs(items, limit) {
+  var result = []
+  var count = Math.min(Array.isArray(items) ? items.length : 0, limit)
+  for (var i = 0; i < count; i++) {
+    var song = normalizeSong(items[i])
+    if (song) result.push(song)
+  }
+  return result
+}
+
+function normalizeMixedRows(items, limit) {
+  var out = []
+  var count = Math.min(Array.isArray(items) ? items.length : 0, limit)
+  for (var i = 0; i < count; i++) {
+    var item = items[i] || {}
+    var kind = String(item.kind || "")
+    if (kind === "song") {
+      var vid = String(item.videoId || "")
+      if (!isVideoId(vid)) continue
+      out.push({ kind: "song", videoId: vid, browseId: "",
+                 title: boundedString(item.title, 256),
+                 artist: boundedString(item.artist, 256),
+                 album: boundedString(item.album, 256),
+                 duration: Math.max(0, Math.min(86400, Number(item.duration) || 0)) })
+    } else if (kind === "album" || kind === "artist" || kind === "playlist") {
+      var bid = boundedString(item.browseId, 256)
+      if (!bid) continue
+      out.push({ kind: kind, videoId: "", browseId: bid,
+                 title: boundedString(item.title, 256),
+                 artist: boundedString(item.artist, 256), duration: 0 })
+    }
+  }
+  return out
+}
+
+function normalizeStations(items) {
+  var out = []
+  var count = Math.min(Array.isArray(items) ? items.length : 0, 100)
+  for (var i = 0; i < count; i++) {
+    var item = items[i] || {}
+    var tags = []
+    if (Array.isArray(item.tags)) {
+      for (var t = 0; t < item.tags.length && tags.length < 32; t++) {
+        var tag = boundedString(item.tags[t], 64).trim()
+        if (tag !== "") tags.push(tag)
+      }
+    }
+    out.push({
+      kind: "station",
+      id: boundedString(item.id, 256),
+      name: boundedString(item.name, 256),
+      url: boundedString(item.url, 1024),
+      favicon: boundedString(item.favicon, 1024),
+      homepage: boundedString(item.homepage, 1024),
+      tags: tags,
+      country: boundedString(item.country, 16),
+      codec: boundedString(item.codec, 32),
+      bitrate: Math.max(0, Number(item.bitrate) || 0),
+      source: boundedString(item.source, 32)
+    })
+  }
+  return out
+}
+
+function normalizePlaylists(items) {
+  var result = []
+  var count = Math.min(Array.isArray(items) ? items.length : 0, 100)
+  for (var i = 0; i < count; i++) {
+    var playlist = items[i]
+    if (!playlist || !playlist.id) continue
+    result.push({
+      id: boundedString(playlist.id, 256),
+      title: boundedString(playlist.title, 256),
+      description: boundedString(playlist.description, 256)
+    })
+  }
+  return result
+}
+
 // ---- multi-select helpers (pure; used by Panel.qml and scripts/model_test.js)
 
 // Stable identity for a search row: songs key on videoId, everything else on
@@ -431,6 +536,13 @@ if (typeof module !== "undefined") {
     cavaZone: cavaZone,
     cavaConfig: cavaConfig,
     truncate: truncate,
+    boundedString: boundedString,
+    isVideoId: isVideoId,
+    normalizeSong: normalizeSong,
+    normalizeSongs: normalizeSongs,
+    normalizeMixedRows: normalizeMixedRows,
+    normalizeStations: normalizeStations,
+    normalizePlaylists: normalizePlaylists,
     rowKey: rowKey,
     selectedCount: selectedCount,
     withRowSelected: withRowSelected,
