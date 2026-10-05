@@ -1552,6 +1552,96 @@ else
     fail "radio bug fixes (station switch, session index, stream detection)" "$(cat "$ERR_FILE")"
 fi
 
+# ------------------------------------------------- editable Featured stations (offline)
+# The Featured list is seeded from RADIO_CATALOG and stores only deltas: the
+# custom rows the user added and the catalog ids the user hid. Checks that an
+# empty state returns the whole catalog, that remove hides a catalog row and
+# re-add unhides it, that a custom station is prepended without duplicating,
+# and that the delta file is private. Fully offline: the state dir is replaced.
+section "editable Featured stations (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import contextlib, importlib.util, io, json, os, stat, sys, tempfile
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_featured_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# Redirect the Featured state into a throwaway dir: never touch real state.
+tmp = tempfile.mkdtemp(prefix="yt-music-featured-")
+mod.STATE_DIR = tmp
+mod.RADIO_FEATURED_PATH = os.path.join(tmp, "radio-featured.json")
+
+
+def run(cmd, args):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        cmd(args)
+    return json.loads(out.getvalue())
+
+
+# Empty state returns the full catalog, deduped by id, and does not write.
+cat = run(mod.cmd_station_catalog, [])
+ids = [r["id"] for r in cat["items"]]
+n = len(ids)
+assert cat["ok"] is True
+assert n == len(mod._catalog_featured_ids())
+assert n == len(set(ids)), "catalog returned duplicate ids"
+assert not os.path.exists(mod.RADIO_FEATURED_PATH), "read wrote state"
+
+# Removing a catalog id hides it from the merged list.
+target_item = cat["items"][0]
+target = target_item["id"]
+res = run(mod.cmd_station_featured_remove, [target])
+assert res["ok"] and res["removed"] and res["id"] == target, res
+assert res["count"] == n - 1, res
+ids = [r["id"] for r in run(mod.cmd_station_catalog, [])["items"]]
+assert target not in ids and len(ids) == n - 1
+
+# Re-adding the same catalog record unhides it without duplicating.
+res = run(mod.cmd_station_featured_add, [json.dumps(target_item)])
+assert res["ok"] and res["added"], res
+ids = [r["id"] for r in run(mod.cmd_station_catalog, [])["items"]]
+assert target in ids and len(ids) == n == len(set(ids)), (len(ids), n)
+
+# A custom station is prepended and the catalog still follows.
+custom_url = "http://example.com/custom-stream"
+res = run(mod.cmd_station_featured_add, [custom_url, "Custom FM"])
+custom_id = res["id"]
+assert res["ok"] and res["count"] == n + 1, res
+ids = [r["id"] for r in run(mod.cmd_station_catalog, [])["items"]]
+assert ids[0] == custom_id and res["count"] == len(ids) == n + 1, ids[:3]
+
+# A duplicate add does not duplicate or reorder.
+res = run(mod.cmd_station_featured_add, [custom_url, "Custom FM"])
+assert res["count"] == n + 1, res
+ids = [r["id"] for r in run(mod.cmd_station_catalog, [])["items"]]
+assert ids.count(custom_id) == 1 and ids[0] == custom_id, ids[:3]
+
+# The delta file is private (0600).
+mode = stat.S_IMODE(os.stat(mod.RADIO_FEATURED_PATH).st_mode)
+assert mode == 0o600, oct(mode)
+
+# A bare-list file is tolerated as added rows.
+with open(mod.RADIO_FEATURED_PATH, "w") as fh:
+    json.dump([{"url": custom_url, "name": "Custom FM"}], fh)
+state = mod.load_featured()
+assert len(state["added"]) == 1 and state["hidden"] == [], state
+
+# Removing a custom id drops it from added rather than hiding anything.
+res = run(mod.cmd_station_featured_remove, [custom_id])
+assert res["count"] == n, res
+ids = [r["id"] for r in run(mod.cmd_station_catalog, [])["items"]]
+assert custom_id not in ids and len(ids) == n
+PY
+if [[ $? -eq 0 ]]; then
+    pass "editable Featured stations (deltas over the catalog)"
+else
+    fail "editable Featured stations (deltas over the catalog)" "$(cat "$ERR_FILE")"
+fi
+
 # ------------------------------------------------- full-page playlist fetch (offline)
 # The correctness sites that resolve duplicates/indices must fetch the whole
 # playlist (limit=None); only the display path may keep a 100-item page.

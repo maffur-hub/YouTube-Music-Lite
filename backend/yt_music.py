@@ -1569,6 +1569,10 @@ def normalize_station(raw, source):
 # unbounded read; the write path clamps every string and tag length so a
 # hostile directory row cannot inflate the file without bound.
 RADIO_STATIONS_PATH = os.path.join(STATE_DIR, "radio-stations.json")
+# The editable Featured list stores only deltas over RADIO_CATALOG: the rows
+# the user added and the catalog ids the user hid. Keeping deltas means a
+# future catalog update still flows through without clobbering user edits.
+RADIO_FEATURED_PATH = os.path.join(STATE_DIR, "radio-featured.json")
 RADIO_STATIONS_MAX = 500
 RADIO_FIELD_MAX = 512
 
@@ -1674,6 +1678,104 @@ def save_radio_stations(items):
                   mode=0o600)
     except Exception:
         pass
+
+
+def _catalog_featured_ids():
+    """Ids of every embedded RADIO_CATALOG row that normalizes cleanly."""
+    ids = set()
+    for raw in RADIO_CATALOG:
+        row = normalize_station(raw, "catalog")
+        if row:
+            _ensure_station_id(row)
+            ids.add(row["id"])
+    return ids
+
+
+def load_featured():
+    """The user's Featured deltas: added rows plus hidden catalog ids.
+
+    Tolerates either the versioned {"added": [...], "hidden": [...]} wrapper or
+    a bare list of added rows, so a hand-edited file still loads. Added rows
+    are normalized, id-assigned, deduped and capped; hidden is a deduped list
+    of non-empty strings. Never raises.
+    """
+    try:
+        data = _read_private_json(RADIO_FEATURED_PATH, default={})
+        if isinstance(data, dict):
+            entries = data.get("added")
+            hidden = data.get("hidden")
+        else:
+            entries = data
+            hidden = []
+        added = []
+        seen = set()
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                row = normalize_station(entry,
+                                        entry.get("source") or "favorite")
+                if not row:
+                    continue
+                _ensure_station_id(row)
+                if row["id"] in seen:
+                    continue
+                seen.add(row["id"])
+                added.append(row)
+                if len(added) >= RADIO_STATIONS_MAX:
+                    break
+        if isinstance(hidden, list):
+            hidden = [str(h).strip() for h in hidden]
+            hidden = [h for h in hidden if h]
+            hidden = list(dict.fromkeys(hidden))
+        else:
+            hidden = []
+        return {"added": added, "hidden": hidden}
+    except Exception:
+        return {"added": [], "hidden": []}
+
+
+def save_featured(added, hidden):
+    """Write the Featured deltas privately, in the versioned wrapper.
+
+    Kept separate from save_radio_stations so favorites and Featured stay
+    independent files. Never raises.
+    """
+    try:
+        json_dump(RADIO_FEATURED_PATH,
+                  {"version": 1, "added": added, "hidden": hidden},
+                  mode=0o600)
+    except Exception:
+        pass
+
+
+def _featured_items():
+    """The merged Featured list: user additions first, then catalog rows.
+
+    Catalog ids the user hid are dropped, and a catalog id already present in
+    the additions is not duplicated, so a user's edit of a catalog station
+    wins without dropping the catalog row entirely. Shared by the catalog
+    command and the add/remove counts so the three cannot drift.
+    """
+    state = load_featured()
+    hidden = set(state["hidden"])
+    items = []
+    seen = set()
+    for row in state["added"]:
+        if row["id"] in seen:
+            continue
+        seen.add(row["id"])
+        items.append(row)
+    for raw in RADIO_CATALOG:
+        row = normalize_station(raw, "catalog")
+        if not row:
+            continue
+        _ensure_station_id(row)
+        if row["id"] in hidden or row["id"] in seen:
+            continue
+        seen.add(row["id"])
+        items.append(row)
+    return items
 
 
 # --------------------------------------------------- radio marker + history
@@ -3014,14 +3116,14 @@ def cmd_home(args):
 
 
 def cmd_station_catalog(args):
-    """List the embedded curated radio stations. Offline; -r is ignored."""
+    """List the editable Featured stations, merged over the embedded catalog.
+
+    Starts from the user's added/hidden deltas and appends every remaining
+    catalog row, so the list is user-editable yet still benefits from future
+    catalog updates. Offline; -r is ignored.
+    """
     _args, _refresh = _strip_refresh(args)
-    items = []
-    for raw in RADIO_CATALOG:
-        row = normalize_station(raw, "catalog")
-        if row:
-            items.append(row)
-    print(json.dumps({"ok": True, "items": items}))
+    print(json.dumps({"ok": True, "items": _featured_items()}))
 
 
 def cmd_station_search(args):
@@ -3153,6 +3255,69 @@ def cmd_station_fav_remove(args):
     save_radio_stations(remaining)
     print(json.dumps({"ok": True, "removed": removed,
                       "count": len(load_radio_stations())}))
+
+
+def cmd_station_featured_add(args):
+    """Add one station to the Featured list, from JSON or a bare URL + name.
+
+    Adding also unhides a previously hidden catalog station. A custom station
+    is prepended; a catalog station is left to the catalog pass so it is not
+    duplicated in the stored deltas.
+    """
+    if not args:
+        print(json.dumps({"ok": False, "error":
+                          "Usage: yt-music-ctl station-featured-add "
+                          "'<json>|<url> [name]'"}))
+        return
+    if args[0].lstrip().startswith("{"):
+        try:
+            raw = json.loads(args[0])
+        except (TypeError, ValueError):
+            print(json.dumps({"ok": False, "error": "Invalid station JSON"}))
+            return
+        source = "favorite"
+    else:
+        raw = {"url": args[0], "name": " ".join(args[1:]).strip()}
+        source = "user"
+    row = normalize_station(raw, source)
+    if not row:
+        print(json.dumps({"ok": False, "error": "Invalid station URL"}))
+        return
+    _ensure_station_id(row)
+    state = load_featured()
+    added = [e for e in state["added"] if e.get("id") != row["id"]]
+    hidden = [h for h in state["hidden"] if h != row["id"]]
+    if row["id"] not in _catalog_featured_ids():
+        # Keep the newest addition when at the cap: _featured_items walks the
+        # stored order, so trim the oldest tail before prepending.
+        if len(added) >= RADIO_STATIONS_MAX:
+            added = added[-(RADIO_STATIONS_MAX - 1):]
+        added.insert(0, row)
+    save_featured(added, hidden)
+    print(json.dumps({"ok": True, "added": True, "id": row["id"],
+                      "count": len(_featured_items())}))
+
+
+def cmd_station_featured_remove(args):
+    """Remove one station from the Featured list by id.
+
+    A user addition is dropped outright; a catalog station is hidden so the
+    embedded row does not reappear on the next read. Offline.
+    """
+    args, _refresh = _strip_refresh(args)
+    if not args:
+        print(json.dumps({"ok": False, "error":
+                          "Usage: yt-music-ctl station-featured-remove <id>"}))
+        return
+    target = args[0]
+    state = load_featured()
+    added = [e for e in state["added"] if e.get("id") != target]
+    hidden = list(state["hidden"])
+    if target in _catalog_featured_ids() and target not in hidden:
+        hidden.append(target)
+    save_featured(added, hidden)
+    print(json.dumps({"ok": True, "removed": True, "id": target,
+                      "count": len(_featured_items())}))
 
 
 def _radio_mpv_argv(url):
@@ -5574,6 +5739,8 @@ COMMANDS = {
     "station-favorites": cmd_station_favorites,
     "station-fav-add": cmd_station_fav_add,
     "station-fav-remove": cmd_station_fav_remove,
+    "station-featured-add": cmd_station_featured_add,
+    "station-featured-remove": cmd_station_featured_remove,
     "station-play": cmd_station_play,
     "station-history": cmd_station_history,
     "history": cmd_history,
@@ -5638,12 +5805,14 @@ def main():
         print("  liked [limit]            List liked songs")
         print("  library <kind> [limit]   List library songs|albums|artists|playlists")
         print("  home [sections]          Fetch the home feed (default 3 sections)")
-        print("  station-catalog           List the bundled curated radio stations (JSON)")
+        print("  station-catalog           List the (editable) Featured radio stations (JSON)")
         print("  station-search [--tag] <query>  Search Radio Browser "
               "by name or genre [--limit N]")
         print("  station-favorites         List saved radio stations (JSON)")
         print("  station-fav-add '<json>|<url> [name]'   Save a radio station to favorites")
         print("  station-fav-remove <id>   Remove a saved radio station")
+        print("  station-featured-add '<json>|<url> [name]'   Add a station to Featured")
+        print("  station-featured-remove <id>   Remove a station from Featured")
         print("  station-play '<json>|<url>|<id>' [name]  Play an internet radio station")
         print("  station-history [limit|clear]   Recently played radio stations")
         print("  history [limit]          List recently played tracks")
