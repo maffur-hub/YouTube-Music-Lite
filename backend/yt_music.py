@@ -1278,13 +1278,16 @@ def video_id_from_url(url):
     if local:
         return local
     parsed = urllib.parse.urlsplit(url)
-    host = (parsed.hostname or "").lower()
+    # A trailing dot is a valid FQDN root ("youtube.com.") but would defeat
+    # the suffix checks below, so strip it before matching the host.
+    host = (parsed.hostname or "").lower().rstrip(".")
     if host == "youtu.be":
         segment = parsed.path.lstrip("/").split("/")[0].split("?")[0]
         return segment or None
     if (host in ("youtube.com", "www.youtube.com", "m.youtube.com",
-                 "music.youtube.com")
-            or host.endswith(".youtube.com")):
+                 "music.youtube.com", "youtube-nocookie.com")
+            or host.endswith(".youtube.com")
+            or host.endswith(".youtube-nocookie.com")):
         return urllib.parse.parse_qs(parsed.query).get("v", [None])[0]
     return None
 
@@ -1296,9 +1299,13 @@ def _is_youtube_url(url):
     makes it return None just like a non-YouTube host, so stream detection
     needs this to keep a YouTube watch URL from masquerading as a live stream.
     """
-    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    # Match video_id_from_url's host set, trailing dot included, so a
+    # no-cookie or FQDN-root YouTube URL is never read as a live stream.
+    host = (urllib.parse.urlsplit(url).hostname or "").lower().rstrip(".")
     return (host == "youtu.be" or host == "youtube.com"
-            or host.endswith(".youtube.com"))
+            or host.endswith(".youtube.com")
+            or host == "youtube-nocookie.com"
+            or host.endswith(".youtube-nocookie.com"))
 
 
 def extract_video_id(props):
@@ -3121,6 +3128,11 @@ def cmd_station_fav_add(args):
         else:
             updated.append(entry)
     if not replaced:
+        # save_radio_stations keeps the first RADIO_STATIONS_MAX rows, so a new
+        # station appended at the cap would be silently dropped while we still
+        # reported success. Evict the oldest entry first so the newest survives.
+        if len(updated) >= RADIO_STATIONS_MAX:
+            updated = updated[-(RADIO_STATIONS_MAX - 1):]
         updated.append(row)
     save_radio_stations(updated)
     print(json.dumps({"ok": True, "added": True, "id": row["id"],
@@ -3192,11 +3204,11 @@ def cmd_station_play(args):
     _ensure_station_id(row)
     ensure_daemon()
     if mpv_is_running():
-        # Pin the station at the TOP of the queue and play it. Stamp the new
-        # marker first: the old stream left over from the previous station is
-        # dropped only after the new one is current, so the marker already
-        # names the right station when drop_radio_streams keeps the entry at
-        # index 0 and removes the stale stream rows behind it.
+        # Pin the station at the TOP of the queue and play it. Capture the old
+        # marker before stamping the new one: if the loadfile never inserts an
+        # entry we must restore it, otherwise the old station would keep
+        # playing under the new station's name.
+        old_marker = load_radio_current()
         set_radio_current(row)
         before = mpv_query(["path", "playlist-pos", "playlist-count"]) or {}
         try:
@@ -3204,16 +3216,31 @@ def cmd_station_play(args):
         except (TypeError, ValueError):
             prev_count = 0
         mpv_send("loadfile", [row["url"], "insert-at", "0"])
-        # The loadfile is async: wait briefly until the entry exists.
+        # The loadfile is async: wait briefly until the entry exists. If the
+        # count never grows mpv rejected the URL, so treat that as a failure
+        # rather than playing whatever entry is already at index 0.
+        loaded = False
         deadline = time.time() + 2.0
         while time.time() < deadline:
             query = mpv_query(["playlist-count"]) or {}
             try:
                 if int(query.get("playlist-count") or 0) > prev_count:
+                    loaded = True
                     break
             except (TypeError, ValueError):
                 pass
             time.sleep(0.05)
+        if not loaded:
+            # Restore reality: the failed station never became current, so the
+            # old marker (if any) is reinstated and the status re-derived from
+            # mpv. No play-index, drop, history or success is reported.
+            if old_marker:
+                set_radio_current(old_marker)
+            else:
+                clear_radio_current()
+            write_status_from_mpv(get_mpv_props() or {})
+            print(json.dumps({"ok": False, "error": "Station failed to load"}))
+            return
         mpv_send("playlist-play-index", ["0"])
         mpv_send("set_property", ["pause", False])
         # playlist-pos is now 0 (the new station), so the old station's stream
@@ -3918,9 +3945,20 @@ def drop_radio_streams(keep_current=True, clear_marker=True):
                     pos = int(props.get("playlist-pos"))
                 except (TypeError, ValueError):
                     pos = -1
-                drop = [index for index, entry in enumerate(playlist)
-                        if (not keep_current or index != pos)
-                        and _is_stream_entry(entry)]
+                if keep_current:
+                    # Only a readable, in-range position names the stream to
+                    # keep. An unknown position (-1/out of range) means we
+                    # cannot tell which row is current, so drop nothing rather
+                    # than risk removing every stream including the playing one.
+                    if 0 <= pos < len(playlist):
+                        drop = [index for index, entry
+                                in enumerate(playlist)
+                                if index != pos and _is_stream_entry(entry)]
+                    else:
+                        drop = []
+                else:
+                    drop = [index for index, entry in enumerate(playlist)
+                            if _is_stream_entry(entry)]
                 for index in sorted(drop, reverse=True):
                     mpv_send("playlist-remove", [index])
     except Exception:
@@ -4662,6 +4700,10 @@ def cmd_queue_remove(args):
         write_status_from_mpv(get_mpv_props())
     else:
         write_status({"ok": True, "playing": False})
+    # Removing the currently-playing stream must clear the live marker (and
+    # any other stream rows); removing a non-current entry leaves a
+    # still-current stream alone.
+    prune_radio_if_moved_on()
     print(json.dumps({"ok": True, "removed": index}))
 
 
@@ -4739,6 +4781,8 @@ def cmd_queue_remove_keys(args):
         write_status_from_mpv(get_mpv_props())
     else:
         write_status({"ok": True, "playing": False})
+    # A removed stream row leaves a stale marker unless the stream still plays.
+    prune_radio_if_moved_on()
     print(json.dumps({"ok": True, "removed": sorted(removed)}))
 
 
@@ -4752,6 +4796,8 @@ def cmd_queue_clear(args):
         ids = session.get("videoIds") if isinstance(session, dict) else None
         removed = len(ids) if isinstance(ids, list) else 0
         clear_session()
+        # No player: any live marker is stale by definition.
+        clear_radio_current()
         write_status({"ok": True, "playing": False})
         print(json.dumps({"ok": True, "cleared": True, "removed": removed,
                           "remaining": 0, "playing": False}))
@@ -4769,6 +4815,9 @@ def cmd_queue_clear(args):
         if isinstance(resp, dict) and resp.get("error") == "success":
             removed += 1
     write_status_from_mpv(get_mpv_props() or {})
+    # Clearing keeps the current entry playing, so the marker survives only if
+    # that current entry is still a stream; a song means it is stale.
+    prune_radio_if_moved_on()
     playlist, _pos = _playlist_state()
     remaining = len(playlist) if isinstance(playlist, list) else 0
     print(json.dumps({"ok": True, "cleared": True, "removed": removed,

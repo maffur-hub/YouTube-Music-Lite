@@ -1320,6 +1320,36 @@ marker = mod.load_radio_current()
 assert marker and marker["name"] == "B", marker
 mod.clear_radio_current()
 
+# FIX 1b: a station switch whose loadfile never grows playlist-count must
+# fail cleanly: ok:false, the previous station stays queued and marked, and
+# no play-index/drop/history/success is emitted (old station not relabelled).
+playlist[:] = [{"filename": "http://example.com/a"}]
+pos = 0
+sends[:] = []
+
+
+def reject_send(command, args):
+    sends.append((command, args))
+    if command == "loadfile":
+        return {"error": "error"}
+
+
+mod.mpv_send = reject_send
+mod.get_mpv_props = lambda: {"path": "http://example.com/a", "playlist-pos": 0}
+mod.record_radio_play = lambda *a, **k: None
+mod.time.time = lambda: 1e18  # skip the ~2 s async deadline
+mod.set_radio_current({"id": "a", "name": "A", "url": "http://example.com/a"})
+fail_out = io.StringIO()
+with contextlib.redirect_stdout(fail_out):
+    mod.cmd_station_play(["http://example.com/b", "B"])
+failed = json.loads(fail_out.getvalue())
+assert failed == {"ok": False, "error": "Station failed to load"}, failed
+assert [e["filename"] for e in playlist] == ["http://example.com/a"], playlist
+assert not any(c[0] in ("playlist-play-index", "set_property",
+                        "playlist-remove") for c in sends), sends
+assert mod.load_radio_current()["name"] == "A", mod.load_radio_current()
+mod.clear_radio_current()
+
 # FIX 3: maybe_save_session maps the resolved index from mpv's playlist-pos,
 # so a repeated track resumes at the copy actually playing and skips streams.
 A = "https://www.youtube.com/watch?v=AAAAAAAAAAA"
@@ -1349,6 +1379,20 @@ assert mod._is_stream_entry(
 assert mod._is_stream_entry({"filename": STREAM}) is True
 assert mod._is_stream_entry(
     {"filename": "https://www.youtube.com/watch?v=AAAAAAAAAAA"}) is False
+# FIX 3b: youtube-nocookie.com and a trailing-dot FQDN host are YouTube hosts,
+# so neither is misread as a live stream, and the id still parses.
+assert mod.video_id_from_url(
+    "https://www.youtube-nocookie.com/watch?v=AAAAAAAAAAA") == "AAAAAAAAAAA"
+assert mod.video_id_from_url(
+    "https://youtube.com./watch?v=AAAAAAAAAAA") == "AAAAAAAAAAA"
+assert mod._is_youtube_url(
+    "https://www.youtube-nocookie.com/watch?v=") is True
+assert mod._is_youtube_url("https://www.youtube.com./watch?v=") is True
+assert mod._is_stream_entry(
+    {"filename": "https://www.youtube-nocookie.com/watch?v=AAAAAAAAAAA"
+     }) is False
+# The earlier blank-invalid `watch?v=` case still parses to no id.
+assert mod.video_id_from_url("https://www.youtube.com/watch?v=") is None
 rows = mod.build_queue_rows([
     {"filename": "https://www.youtube.com/watch?v="},
     {"filename": STREAM},
@@ -1371,6 +1415,42 @@ with contextlib.redirect_stdout(out):
     mod.cmd_station_search(["jazz", "--limit", "5"])
 assert json.loads(out.getvalue())["ok"] is True
 
+# FIX 5b: drop_radio_streams with an unreadable playlist-pos must drop nothing
+# when keep_current is set (never guess which stream is playing).
+mod.set_radio_current({"id": "u1", "name": "S", "url": "http://x/live"})
+mod.mpv_is_running = lambda: True
+mod.mpv_query = lambda names: {
+    "playlist": [
+        {"filename": "http://x/live"},
+        {"filename": "https://www.youtube.com/watch?v=AAAAAAAAAAA"},
+        {"filename": "http://y/live2"},
+    ],
+    "playlist-pos": -1,
+}
+bogus = []
+mod.mpv_send = lambda *a: bogus.append(a)
+mod.drop_radio_streams(keep_current=True, clear_marker=False)
+assert bogus == [], bogus
+assert mod.load_radio_current() is not None, "marker dropped, no clear asked"
+mod.clear_radio_current()
+
+# FIX 4b: adding a favourite at the cap evicts the oldest, keeping the newest.
+_station_cap = mod.RADIO_STATIONS_MAX
+_stations = []
+for i in range(_station_cap):
+    _stations.append({"id": "cap:%d" % i, "name": "Cap %d" % i,
+                      "url": "https://example.com/cap%d" % i})
+mod.save_radio_stations(_stations)
+add_out = io.StringIO()
+with contextlib.redirect_stdout(add_out):
+    mod.cmd_station_fav_add([json.dumps({
+        "stationuuid": "newest-501", "name": "Newest",
+        "url": "https://example.com/newest"})])
+_after = mod.load_radio_stations()
+assert len(_after) == _station_cap, len(_after)
+assert any(e["id"] == "newest-501" for e in _after), "newest was dropped"
+assert not any(e["id"] == "cap:0" for e in _after), "oldest not evicted"
+
 # FIX 6: two id-less saved entries no longer collapse under the "" key.
 with open(mod.RADIO_STATIONS_PATH, "w") as fh:
     json.dump({"version": 1, "stations": [
@@ -1381,6 +1461,75 @@ items = mod.load_radio_stations()
 assert len(items) == 2, items
 assert len({e["id"] for e in items}) == 2, items
 assert all(e["id"].startswith("user:") for e in items), items
+
+# FIX 2: removing the currently-playing stream clears the stale live marker
+# (queue-remove), while removing a non-current entry leaves it alone.
+mod.mpv_is_running = lambda: True
+mod.write_status_from_mpv = lambda *a, **k: None
+q_playlist = [
+    {"filename": "http://x/live"},
+    {"filename": "https://www.youtube.com/watch?v=AAAAAAAAAAA"},
+]
+
+
+def q_query(names):
+    if names == ["playlist"]:
+        return {"playlist": list(q_playlist)}
+    return {"playlist": list(q_playlist), "playlist-pos": 0,
+            "playlist-count": len(q_playlist)}
+
+
+def q_send(command, *args):
+    if command == "playlist-remove":
+        del q_playlist[int(args[0])]
+    return {"error": "success"}
+
+
+mod.mpv_query = q_query
+mod.mpv_send = q_send
+mod.set_radio_current({"id": "u1", "name": "S", "url": "http://x/live"})
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_queue_remove(["0"])
+assert json.loads(out.getvalue())["ok"] is True
+assert mod.load_radio_current() is None, "marker survived removing the stream"
+
+# A non-current entry removed while the stream is current: marker stays.
+q_playlist[:] = [
+    {"filename": "http://x/live"},
+    {"filename": "https://www.youtube.com/watch?v=AAAAAAAAAAA"},
+]
+mod.set_radio_current({"id": "u1", "name": "S", "url": "http://x/live"})
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_queue_remove(["1"])
+assert json.loads(out.getvalue())["ok"] is True
+assert mod.load_radio_current() is not None, "marker wrongly dropped"
+mod.clear_radio_current()
+
+# FIX 2b: queue-clear with no player drops a stale marker; with a player it
+# keeps the marker only while the current entry is still a stream.
+mod.mpv_is_running = lambda: False
+mod.mpv_send = lambda *a: None
+mod.set_radio_current({"id": "u1", "name": "S", "url": "http://x/live"})
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_queue_clear([])
+assert json.loads(out.getvalue())["ok"] is True
+assert mod.load_radio_current() is None, "marker survived queue-clear idle"
+
+mod.mpv_is_running = lambda: True
+mod.mpv_query = lambda names: {
+    "playlist": [{"filename": "http://x/live"}],
+    "playlist-pos": 0,
+}
+mod.set_radio_current({"id": "u1", "name": "S", "url": "http://x/live"})
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_queue_clear([])
+assert json.loads(out.getvalue())["ok"] is True
+assert mod.load_radio_current() is not None, "current stream marker dropped"
+mod.clear_radio_current()
 
 # FIX 8: spawning a saved session clears a stale radio marker.
 mod.mpv_is_running = lambda: False
@@ -2195,20 +2344,29 @@ mod.clear_radio_current()
 #     no kill.
 calls = []
 q_calls = []
+q_playlist = [{"filename": "https://www.youtube.com/watch?v=oldoldoldol"}]
 
 def _fake_query(names):
     q_calls.append(names)
+    if names == ["playlist-count"]:
+        return {"playlist-count": len(q_playlist)}
     if names == ["playlist", "playlist-pos"]:
-        return {"playlist": [
-            {"filename": "https://www.youtube.com/watch?v=oldoldoldol"},
-        ], "playlist-pos": 0}
+        return {"playlist": list(q_playlist), "playlist-pos": 0}
     if "playlist" in names:
-        return {"path": "/old", "playlist-pos": 0, "playlist-count": 1}
-    return {"playlist-count": 2}
+        return {"path": "/old", "playlist-pos": 0,
+                "playlist-count": len(q_playlist)}
+    return {"playlist-count": len(q_playlist)}
+
+
+def _fake_send(*a):
+    calls.append(a if len(a) > 1 else a[0])
+    if a and a[0] == "loadfile":
+        q_playlist.insert(0, {"filename": a[1][0]})
+
 
 mod.mpv_is_running = lambda: True
 mod.mpv_query = _fake_query
-mod.mpv_send = lambda *a: calls.append(a)
+mod.mpv_send = _fake_send
 mod.mpv_kill = lambda: calls.append("kill")
 mod.ensure_daemon = lambda *a, **k: None
 mod.wait_for_track_change = lambda *a, **k: {
