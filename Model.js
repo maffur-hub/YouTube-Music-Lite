@@ -169,6 +169,26 @@ function cavaScaleBars(bars, scale) {
   return out
 }
 
+// The visualizer's LIN/dB option, applied to the parsed 0..100 frame. cava
+// 0.10.7 (the released version) does not understand the `scaling` config key
+// (only unreleased master does), so the choice lives in the frontend instead of
+// the generated config. Everything but "decibel" is an identity copy; the
+// decibel curve lifts quiet bands while keeping the endpoints (0 -> 0,
+// 100 -> 100) fixed. Non-arrays yield []; NaN entries are treated as 0.
+function cavaApplyScaling(bars, scaling) {
+  if (!Array.isArray(bars)) return []
+  if (scaling !== "decibel") return bars.slice()
+  var out = []
+  for (var i = 0; i < bars.length; i++) {
+    var v = Number(bars[i])
+    if (isNaN(v)) v = 0
+    v = Math.max(0, Math.min(100, v))
+    var scaled = 100 * Math.log(1 + 9 * v / 100) / Math.LN10
+    out.push(Math.max(0, Math.min(100, scaled)))
+  }
+  return out
+}
+
 // Display gain from the player volume (0..150 maps to 0..1.5); NaN -> 1.
 function cavaVolumeScale(volume) {
   var v = Number(volume)
@@ -186,16 +206,15 @@ function cavaZone(level) {
 }
 
 // Complete cava config written to the runtime path. Display-only: changing
-// channels/scaling never affects audio playback.
-function cavaConfig(channels, scaling) {
+// channels never affects audio playback. The linear/decibel choice is applied
+// in the frontend (see cavaApplyScaling) because cava 0.10.7 ignores `scaling`.
+function cavaConfig(channels) {
   var ch = channels === "mono" ? "mono" : "stereo"
-  var sc = scaling === "decibel" ? "decibel" : "linear"
   return "[general]\n"
     + "bars = 24\n"
     + "framerate = 30\n"
     + "autosens = 1\n"
     + "sensitivity = 100\n"
-    + "scaling = " + sc + "\n"
     + "live-config = 1\n"
     + "\n[input]\n"
     + "method = pulse\n"
@@ -407,6 +426,7 @@ if (typeof module !== "undefined") {
     cavaLevel: cavaLevel,
     cavaBandPeaks: cavaBandPeaks,
     cavaScaleBars: cavaScaleBars,
+    cavaApplyScaling: cavaApplyScaling,
     cavaVolumeScale: cavaVolumeScale,
     cavaZone: cavaZone,
     cavaConfig: cavaConfig,

@@ -144,6 +144,13 @@ Panel {
     : (root.stationSection === "featured" ? root.stationCatalog : root.stationFavorites)
   property bool stationBusy: false
   property string pendingStationSearch: ""
+  // True while a station search is in flight or debouncing; drives the
+  // Searching…/empty states so a replaced query never flashes "No stations
+  // found." in the gap before the next request starts.
+  property bool stationSearching: false
+  // Set when a favourites refresh is skipped because one is already running,
+  // so the in-flight fetch replays it on exit instead of dropping the update.
+  property bool stationFavoritesDirty: false
   property int queuePosition: -1
   property string contextQueueKey: ""
   property string queueKey: ""
@@ -928,7 +935,11 @@ Panel {
   }
 
   function refreshStationFavorites() {
-    if (stationFavoritesProc.running) return
+    if (stationFavoritesProc.running) {
+      // The fetch in flight will replay this once it exits.
+      root.stationFavoritesDirty = true
+      return
+    }
     root.startProcess(stationFavoritesProc, "stationFavorites")
   }
 
@@ -941,16 +952,20 @@ Panel {
     var q = root.boundedString(query, 256).trim()
     if (q === "") {
       root.stationResults = []
+      root.stationSearching = false
       return
     }
     if (stationSearchProc.running) {
-      // Let the in-flight lookup finish; the newest query runs on exit.
-      root.pendingStationSearch = q
+      // Let the in-flight lookup finish; replay only a genuinely newer query
+      // (an identical one is already on its way and needs no second run).
+      if (String((stationSearchProc.command || [])[2] || "") !== q)
+        root.pendingStationSearch = q
       return
     }
     var command = [root.ctlPath, "station-search", q]
     if (root.stationSearchMode === "tag") command.push("--tag")
     stationSearchProc.command = command
+    root.stationSearching = true
     root.startProcess(stationSearchProc, "stationSearch")
   }
 
@@ -1682,7 +1697,7 @@ Panel {
       + "os.makedirs(os.path.dirname(p),exist_ok=True)\n"
       + "open(p,'w').write(sys.argv[2])\n",
       root.cavaRuntimePath,
-      Model.cavaConfig(root.visualizerChannels, root.visualizerScaling)]
+      Model.cavaConfig(root.visualizerChannels)]
     onExited: function(exitCode) {
       root.cavaReady = true
       if (root.cavaWritePending) {
@@ -1701,7 +1716,7 @@ Panel {
     running: root.cavaReady && root.opened && root.visualizerOn && Model.isPlaying(root.musicStatus)
     stdout: SplitParser {
       onRead: function(line) {
-        var bars = Model.parseCavaFrame(line, root.visualizerBarCount)
+        var bars = Model.cavaApplyScaling(Model.parseCavaFrame(line, root.visualizerBarCount), root.visualizerScaling)
         var vol = root.musicStatus ? root.musicStatus.volume : 100
         var disp = Model.cavaVolumeScale(vol) * root.visualizerGain
 
@@ -2015,6 +2030,12 @@ Panel {
       var data = root.parseProcessJson(root.processText("stationFavorites"))
       if (data && data.ok && Array.isArray(data.items))
         root.stationFavorites = root.normalizeStations(data.items)
+      // Replay a refresh that arrived while this fetch was running (e.g. a
+      // favourite was toggled) so the list can never be left stale.
+      if (root.stationFavoritesDirty) {
+        root.stationFavoritesDirty = false
+        root.refreshStationFavorites()
+      }
     }
   }
 
@@ -2051,8 +2072,15 @@ Panel {
       // `station-search` does not echo the query, so compare the one we sent:
       // a late response for a replaced query must not overwrite newer results.
       var sent = String((stationSearchProc.command || [])[2] || "")
-      if (data && data.ok && sent === root.stationQuery)
-        root.stationResults = root.normalizeStations(data.items)
+      if (sent === root.stationQuery) {
+        // Only this response owns the current query; a replaced query keeps the
+        // searching flag until its own request starts (and exits).
+        root.stationSearching = false
+        if (data && data.ok === false)
+          root.statusText = root.boundedString(data.error || "Station search failed", 256)
+        else if (data && data.ok)
+          root.stationResults = root.normalizeStations(data.items)
+      }
       if (root.pendingStationSearch !== "") {
         var pending = root.pendingStationSearch
         root.pendingStationSearch = ""
@@ -2077,6 +2105,10 @@ Panel {
       if (exitCode === 0 && (!data || data.ok !== false)) {
         root.statusText = "Playing station ✓"
         root.refresh()
+        // Two live stations share the queue key `videoId:playlistPos`, so
+        // onMusicStatusChanged will not fire refreshQueue for a station->station
+        // switch; refresh it here so Up Next never keeps the old station's rows.
+        root.refreshQueue()
       } else {
         root.statusText = root.boundedString((data && data.error) || "Station failed", 256)
       }
@@ -2115,13 +2147,19 @@ Panel {
   }
 
   // Only search when the user actually asks for it; empty queries reset.
+  // A changed non-empty query clears the old list and flags a search straight
+  // away, so the previous query's results and the "No stations found." empty
+  // state never flash while the debounce waits to fire.
   onStationQueryChanged: {
     if (String(root.stationQuery || "").trim() === "") {
       stationSearchDebounce.stop()
       root.stationResults = []
+      root.stationSearching = false
       root.pendingStationSearch = ""
       return
     }
+    root.stationResults = []
+    root.stationSearching = true
     stationSearchDebounce.restart()
   }
 
@@ -2644,6 +2682,9 @@ Panel {
   onLastPlayedChanged: root.loadThumbnail()
   onMusicStatusChanged: {
     root.loadThumbnail()
+    // Radio has no track lyrics and hides the Lyrics button; close the panel
+    // so a stream cannot leave the lyrics view stranded behind the UI.
+    if (root.radioLive && root.lyricsOpen) root.lyricsOpen = false
     var currentVideoId = String(root.musicStatus ? root.musicStatus.videoId : "")
     if (root.lyricsOpen && currentVideoId !== root.lyricsVideoId)
       root.loadLyrics(currentVideoId)
@@ -3033,6 +3074,9 @@ Panel {
       }
       onActivateRequested: function() {
         if (root.deleteConfirmOpen) { root.deleteActivePlaylist(); return }
+        // The Stations tab has no keyboard list (activeListKind is ""), so
+        // Enter/Space must not fall through to the transport toggle.
+        if (root.activeTab === "stations") return
         if (root.selectMode && root.activeListKind === "search") {
           root.toggleRowAt(root.selectedIndex, true)
           return
@@ -3535,7 +3579,8 @@ Panel {
 
                 delegate: Rectangle {
                   readonly property real fraction: index / (root.visualizerLadderSegments - 1)
-                  readonly property bool lit: fraction * 100 <= root.visualizerLevel
+                  readonly property bool lit: root.visualizerLevel > 0
+                    && fraction * 100 <= root.visualizerLevel
                   readonly property bool peakLit: root.visualizerPeak > 0
                     && (fraction * 100 <= root.visualizerPeak
                       && (index === root.visualizerLadderSegments - 1
@@ -3566,7 +3611,8 @@ Panel {
                   // the bottom segment.
                   readonly property int seg: root.visualizerVerticalSegments - 1 - index
                   readonly property real fraction: seg / (root.visualizerVerticalSegments - 1)
-                  readonly property bool lit: fraction * 100 <= root.visualizerLevel
+                  readonly property bool lit: root.visualizerLevel > 0
+                    && fraction * 100 <= root.visualizerLevel
                   readonly property bool peakLit: root.visualizerPeak > 0
                     && (fraction * 100 <= root.visualizerPeak
                       && (seg === root.visualizerVerticalSegments - 1
@@ -3608,7 +3654,7 @@ Panel {
                         readonly property real fraction: segFromBottom / (root.visualizerSpectrumSegments - 1)
                         readonly property real value: Number(root.visualizerSpectrumBars[bandColumn.band]) || 0
                         readonly property real peak: Number(root.visualizerBandPeaks[bandColumn.band]) || 0
-                        readonly property bool lit: fraction * 100 <= value
+                        readonly property bool lit: value > 0 && fraction * 100 <= value
                         readonly property bool peakLit: peak > 0 && fraction * 100 <= peak
                           && (segFromBottom === root.visualizerSpectrumSegments - 1
                             || (segFromBottom + 1) / (root.visualizerSpectrumSegments - 1) * 100 > peak)
@@ -5354,7 +5400,12 @@ Panel {
                   foreground: root.fg
                   hasCursor: false
                   onTextChanged: root.stationQuery = text.trim()
-                  onAccepted: root.searchStations(text)
+                  onAccepted: {
+                    // Enter searches now; cancel the pending debounce so it
+                    // cannot fire a second, duplicate lookup.
+                    stationSearchDebounce.stop()
+                    root.searchStations(text)
+                  }
                 }
 
                 Button {
@@ -5550,7 +5601,7 @@ Panel {
               }
 
               Text {
-                visible: root.stationSection === "search" && stationSearchProc.running
+                visible: root.stationSection === "search" && root.stationSearching
                 width: parent.width
                 textFormat: Text.PlainText
                 text: "Searching…"
@@ -5560,7 +5611,7 @@ Panel {
               }
 
               Text {
-                visible: root.stationSection === "search" && !stationSearchProc.running
+                visible: root.stationSection === "search" && !root.stationSearching
                   && root.stationQuery !== "" && root.stationResults.length === 0
                 width: parent.width
                 textFormat: Text.PlainText

@@ -239,16 +239,33 @@ ok(Model.cavaConfig("bogus", "linear").indexOf("channels = stereo") !== -1,
   "cavaConfig falls back to stereo for an invalid channel")
 ok(Model.cavaConfig("mono", "linear").indexOf("channels = mono") !== -1,
   "cavaConfig maps mono")
-ok(Model.cavaConfig("stereo", "decibel").indexOf("scaling = decibel") !== -1,
-  "cavaConfig maps decibel")
-ok(Model.cavaConfig("stereo", "bogus").indexOf("scaling = linear") !== -1,
-  "cavaConfig falls back to linear for invalid scaling")
 ok(Model.cavaConfig("mono", "decibel").indexOf("live-config = 1") !== -1,
   "cavaConfig enables live-config")
 ok(Model.cavaConfig("mono", "decibel").indexOf("mono_option = average") !== -1,
   "cavaConfig sets mono_option to average")
 ok(Model.cavaConfig("mono", "decibel").indexOf("[general]") === 0,
   "cavaConfig starts with [general]")
+
+// --- cavaApplyScaling
+const cavaLinear = [0, 25, 50, 100]
+eq(Model.cavaApplyScaling(cavaLinear, "linear"), cavaLinear,
+  "cavaApplyScaling linear is an identity")
+eq(Model.cavaApplyScaling(cavaLinear, "bogus"), cavaLinear,
+  "cavaApplyScaling treats an unknown scaling as an identity")
+eq(Model.cavaApplyScaling(cavaLinear, undefined), cavaLinear,
+  "cavaApplyScaling treats a missing scaling as an identity")
+ok(Model.cavaApplyScaling(cavaLinear, "linear") !== cavaLinear,
+  "cavaApplyScaling always returns a new array")
+eq(Model.cavaApplyScaling([0], "decibel"), [0], "cavaApplyScaling decibel(0) stays 0")
+eq(Model.cavaApplyScaling([100], "decibel"), [100], "cavaApplyScaling decibel(100) stays 100")
+ok(Model.cavaApplyScaling([50], "decibel")[0] > 50,
+  "cavaApplyScaling decibel lifts a mid value above linear")
+eq(Model.cavaApplyScaling([200, -5], "decibel"), [100, 0],
+  "cavaApplyScaling decibel clamps to 0..100")
+eq(Model.cavaApplyScaling([NaN], "decibel"), [0],
+  "cavaApplyScaling decibel zeroes NaN")
+eq(Model.cavaApplyScaling(null, "decibel"), [], "cavaApplyScaling(null) is []")
+eq(Model.cavaApplyScaling(undefined, "linear"), [], "cavaApplyScaling(undefined) is []")
 
 // --- cavaZone
 eq(Model.cavaZone(0), "green", "cavaZone(0) is green")

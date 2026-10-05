@@ -43,6 +43,16 @@ if [[ "${MPRIS_FOUND}" -eq 0 ]]; then
   fi
 fi
 
+# Non-fatal: cava is only needed by the panel's audio visualizer. Without it
+# the visualizer stays empty and cava exits quietly.
+if ! command -v cava >/dev/null 2>&1; then
+  if command -v pacman >/dev/null 2>&1; then
+    printf 'Note: install cava to enable the audio visualizer: sudo pacman -S cava\n'
+  else
+    printf 'Note: install cava (the audio spectrum visualizer) to enable the audio visualizer\n'
+  fi
+fi
+
 mkdir -p "${BIN_DIR}" "${DATA_DIR}"
 python3 -m venv "${VENV}"
 "${VENV}/bin/python" -m pip install --require-hashes --only-binary=:all: \
