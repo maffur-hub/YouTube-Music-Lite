@@ -153,6 +153,9 @@ Panel {
   // Set when a favourites refresh is skipped because one is already running,
   // so the in-flight fetch replays it on exit instead of dropping the update.
   property bool stationFavoritesDirty: false
+  // Same coalescing for the featured catalog: an add/remove that lands mid-fetch
+  // is replayed when the in-flight catalog load exits.
+  property bool stationCatalogDirty: false
   property int queuePosition: -1
   property string contextQueueKey: ""
   property string queueKey: ""
@@ -328,6 +331,8 @@ Panel {
   property real contextX: 0
   property real contextY: 0
   property var contextRow: null
+  // The station row whose right-click menu is open.
+  property var contextStation: null
 
   function open() {
     statusText = ""
@@ -946,7 +951,11 @@ Panel {
   }
 
   function refreshStationCatalog() {
-    if (stationCatalogProc.running) return
+    if (stationCatalogProc.running) {
+      // The fetch in flight will replay this once it exits.
+      root.stationCatalogDirty = true
+      return
+    }
     root.startProcess(stationCatalogProc, "stationCatalog")
   }
 
@@ -989,6 +998,23 @@ Panel {
     else
       stationFavProc.command = [root.ctlPath, "station-fav-add", JSON.stringify(row)]
     root.startProcess(stationFavProc, "stationFav")
+  }
+
+  function isStationFeatured(id) {
+    var target = String(id || "")
+    for (var i = 0; i < root.stationCatalog.length; i++) {
+      if (String(root.stationCatalog[i].id) === target) return true
+    }
+    return false
+  }
+
+  function toggleStationFeatured(row) {
+    if (!row || !row.id || stationFeaturedProc.running) return
+    if (root.isStationFeatured(row.id))
+      stationFeaturedProc.command = [root.ctlPath, "station-featured-remove", String(row.id)]
+    else
+      stationFeaturedProc.command = [root.ctlPath, "station-featured-add", JSON.stringify(row)]
+    root.startProcess(stationFeaturedProc, "stationFeatured")
   }
 
   function playStation(row) {
@@ -1532,6 +1558,27 @@ Panel {
     }
   }
 
+  function openStationMenu(row, x, y) {
+    if (!row) return
+    root.contextStation = row
+    root.contextX = x; root.contextY = y
+    root.rebuildStationMenu()
+    stationMenu.popupAt(panelFlick, x, y)
+  }
+
+  function rebuildStationMenu() {
+    clearMenu(stationMenu)
+    var row = root.contextStation
+    if (!row) return
+    stationMenu.addItem("Play station", function() { root.playStation(row) })
+    stationMenu.addItem(root.isStationFeatured(row.id) ? "Remove from Featured"
+                                                        : "Add to Featured",
+      function() { root.toggleStationFeatured(row) })
+    stationMenu.addItem(root.isStationFavorite(row.id) ? "Remove from Favorites"
+                                                       : "Add to Favorites",
+      function() { root.toggleStationFavorite(row) })
+  }
+
   function rebuildPlaylistPicker() {
     clearMenu(playlistPickerMenu)
     for (var i = 0; i < root.playlists.length; i++) {
@@ -2066,6 +2113,30 @@ Panel {
       var data = root.parseProcessJson(root.processText("stationCatalog"))
       if (data && data.ok && Array.isArray(data.items))
         root.stationCatalog = root.normalizeStations(data.items)
+      // Replay a refresh that arrived while this fetch was running (e.g. a
+      // featured add/remove) so the list can never be left stale.
+      if (root.stationCatalogDirty) {
+        root.stationCatalogDirty = false
+        root.refreshStationCatalog()
+      }
+    }
+  }
+
+  Process {
+    id: stationFeaturedProc
+    stdout: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationFeatured", data) }
+    }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("stationFeaturedErr", data) }
+    }
+    onStarted: stationFeaturedDeadline.start()
+    onExited: function(exitCode) {
+      stationFeaturedDeadline.stop()
+      var data = root.parseProcessJson(root.processText("stationFeatured"))
+      if (data && data.ok === false)
+        root.statusText = root.boundedString(data.error || "Station update failed", 256)
+      root.refreshStationCatalog()
     }
   }
 
@@ -2152,6 +2223,7 @@ Panel {
   Timer { id: stationSearchDeadline; interval: root.commandTimeout; onTriggered: { if (stationSearchProc.running) stationSearchProc.running = false } }
   Timer { id: stationPlayDeadline; interval: root.commandTimeout; onTriggered: { if (stationPlayProc.running) { stationPlayProc.running = false; root.stationBusy = false } } }
   Timer { id: stationFavDeadline; interval: root.commandTimeout; onTriggered: { if (stationFavProc.running) stationFavProc.running = false } }
+  Timer { id: stationFeaturedDeadline; interval: root.commandTimeout; onTriggered: { if (stationFeaturedProc.running) stationFeaturedProc.running = false } }
 
   Timer {
     id: stationSearchDebounce
@@ -3039,6 +3111,7 @@ Panel {
   }
 
   MenuPopup { id: contextMenu }
+  MenuPopup { id: stationMenu }
 
   MenuPopup {
     id: playlistPickerMenu
@@ -5622,6 +5695,15 @@ Panel {
                           onClicked: root.playStation(modelData)
                         }
                       }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.RightButton
+                        onClicked: function(mouse) {
+                          var point = stationRow.mapToItem(panelFlick, mouse.x, mouse.y)
+                          root.openStationMenu(modelData, point.x, point.y)
+                        }
+                      }
                     }
                   }
                 }
@@ -5654,7 +5736,7 @@ Panel {
                 width: parent.width
                 wrapMode: Text.WordWrap
                 textFormat: Text.PlainText
-                text: "No featured stations available."
+                text: "No featured stations available. Search the directory, then right-click a station to add it."
                 color: Qt.darker(root.fg, 1.4)
                 font.family: root.fam
                 font.pixelSize: Style.font.bodySmall

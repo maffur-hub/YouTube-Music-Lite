@@ -4,6 +4,11 @@
 
 Review-driven fixes (see `docs/review-findings.md`, `docs/phase2-decisions.md`).
 
+- Featured stations are now editable from the panel: right-click any station row
+  (Featured, Favorites, or Search) to add it to or remove it from Featured. Adds
+  and removes are coalesced with an in-flight catalog fetch so the list cannot
+  stay stale.
+
 - Fixed `yt-music-ctl volume` printing a traceback on non-numeric input; it now
   fails with a usage error like the other commands.
 - Hardened `~/.config/yt-music/` and `auth.json` to 0700/0600 (they hold browser

@@ -11,6 +11,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - Create private playlists from the player
 - Play, pause, previous, next, shuffle, like, and dislike controls
 - Remove tracks from playlists with right-click
+- Featured stations are editable: right-click any station row to add it to or remove it from Featured
 - Rename a playlist and switch its privacy (public, private, or unlisted) from the playlist options menu
 - Delete a playlist after an explicit confirmation dialog
 - Reorder playlist tracks with right-click Move up / Move down
@@ -149,6 +150,7 @@ Shortcuts pause while a text field or an open menu has focus. Ctrl-click toggles
 - **Artist row**: Artist info, Start radio, Play all, Add all to queue, Add all to playlist…, Open.
 - **Playlist row**: Play all, Add all to queue, Add all to playlist…, Open.
 - **Queue row**: Move up, Move down, Remove from queue — plus the song actions when the row is a normal track.
+- **Station row**: Play station, Add to / Remove from Featured, Add to / Remove from Favorites.
 
 ### Command line
 
