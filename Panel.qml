@@ -532,24 +532,14 @@ Panel {
   }
 
   function queueUpcomingCount() {
-    var remaining = root.queueTracks.length - 1
-    var pos = (typeof root.queuePosition === "number") ? root.queuePosition : 0
-    if (pos >= 0) remaining -= pos
-    return Math.max(0, remaining)
+    return Model.queueUpcomingCount(root.queueTracks, root.queuePosition)
   }
 
   // Index of the currently-playing/queued row, or -1. Prefers mpv's reported
   // position, falling back to the row flagged `current` from the backend so the
   // saved-queue (nothing playing) view works too.
   function queueCurrentIndex() {
-    for (var i = 0; i < root.queueTracks.length; i++) {
-      var row = root.queueTracks[i]
-      if ((row && row.current) || i === root.queuePosition) {
-        return i
-      }
-    }
-    return (root.queuePosition >= 0 && root.queuePosition < root.queueTracks.length)
-      ? root.queuePosition : -1
+    return Model.queueCurrentIndex(root.queueTracks, root.queuePosition)
   }
 
   // Bring the current queue row into view so the top of the Up Next tab is not
@@ -840,26 +830,7 @@ Panel {
   // ---- internet radio (Stations tab): favorites + directory search
   function normalizeStations(items) { return Model.normalizeStations(items) }
 
-  function stationSubtitle(row) {
-    if (!row) return ""
-    var parts = []
-    var country = root.boundedString(row.country, 16).trim()
-    if (country !== "") parts.push(country)
-    var tags = []
-    if (Array.isArray(row.tags)) {
-      for (var i = 0; i < row.tags.length && tags.length < 4; i++) {
-        var tag = String(row.tags[i] || "").trim()
-        if (tag !== "") tags.push(tag)
-      }
-    }
-    if (tags.length > 0) parts.push(tags.join(", "))
-    var codec = root.boundedString(row.codec, 32).trim()
-    var bitrate = Math.max(0, Number(row.bitrate) || 0)
-    if (codec !== "" && bitrate > 0) parts.push(codec + " " + Math.round(bitrate) + "k")
-    else if (codec !== "") parts.push(codec)
-    else if (bitrate > 0) parts.push(Math.round(bitrate) + "k")
-    return parts.join(" · ")
-  }
+  function stationSubtitle(row) { return Model.stationSubtitle(row) }
 
   function refreshStationFavorites() {
     if (stationFavoritesProc.running) {
@@ -1230,24 +1201,13 @@ Panel {
     root.activeTab = ""
   }
 
-  function songCount(rows) {
-    var n = 0
-    for (var i = 0; i < rows.length; i++)
-      if (rows[i].kind === "song") n++
-    return n
-  }
+  function songCount(rows) { return Model.songCount(rows) }
 
   function librarySongCount() {
     return root.songCount(root.libraryRows)
   }
 
-  function songSubtitle(row) {
-    if (!row) return ""
-    var artist = String(row.artist || "")
-    var album = String(row.album || "")
-    if (artist && album) return artist + " · " + album
-    return artist || album
-  }
+  function songSubtitle(row) { return Model.songSubtitle(row) }
 
   function enqueueNav(mode, kind, id) {
     if (!id || root.busy) return

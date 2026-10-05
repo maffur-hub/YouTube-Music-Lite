@@ -261,6 +261,43 @@ eq(Model.normalizePlaylists([{ id: "p1", title: "T", description: "D" }, { title
   "normalizePlaylists keeps id rows and drops id-less ones")
 eq(Model.normalizePlaylists(undefined), [], "normalizePlaylists tolerates undefined")
 
+// --- songSubtitle / stationSubtitle
+eq(Model.songSubtitle({ artist: "A", album: "Al" }), "A · Al",
+  "songSubtitle combines artist and album")
+eq(Model.songSubtitle({ artist: "A" }), "A", "songSubtitle artist only")
+eq(Model.songSubtitle({ album: "Al" }), "Al", "songSubtitle album only")
+eq(Model.songSubtitle(null), "", "songSubtitle(null)")
+eq(Model.stationSubtitle({ country: "AU", tags: ["jazz", "soul"],
+                           codec: "AAC", bitrate: 128 }),
+  "AU · jazz, soul · AAC 128k", "stationSubtitle joins every part")
+eq(Model.stationSubtitle({ country: "US", bitrate: 96 }), "US · 96k",
+  "stationSubtitle bitrate without codec")
+eq(Model.stationSubtitle({ codec: "MP3" }), "MP3",
+  "stationSubtitle codec without bitrate")
+eq(Model.stationSubtitle({}), "", "stationSubtitle of an empty row")
+eq(Model.stationSubtitle(null), "", "stationSubtitle(null)")
+
+// --- songCount
+eq(Model.songCount([song, album, song]), 2, "songCount counts only song rows")
+eq(Model.songCount([]), 0, "songCount([])")
+eq(Model.songCount(undefined), 0, "songCount(undefined)")
+
+// --- queueUpcomingCount / queueCurrentIndex
+eq(Model.queueUpcomingCount([song, song, song], 0), 2,
+  "queueUpcomingCount from the first row")
+eq(Model.queueUpcomingCount([song, song, song], 2), 0,
+  "queueUpcomingCount at the last row")
+eq(Model.queueUpcomingCount([], 0), 0, "queueUpcomingCount([])")
+eq(Model.queueUpcomingCount([song, song], -1), 1,
+  "queueUpcomingCount ignores a negative position")
+eq(Model.queueCurrentIndex([song, { kind: "song", current: true }, song], -1), 1,
+  "queueCurrentIndex prefers the current-flagged row")
+eq(Model.queueCurrentIndex([song, song], 1), 1,
+  "queueCurrentIndex falls back to the mpv position")
+eq(Model.queueCurrentIndex([song, song], 9), -1,
+  "queueCurrentIndex returns -1 for an out-of-range position")
+eq(Model.queueCurrentIndex([], 0), -1, "queueCurrentIndex([])")
+
 // --- parseCavaFrame
 eq(Model.parseCavaFrame("10;50;100;", 4), [10, 50, 100, 0],
   "parseCavaFrame maps every field and zeroes a trailing blank")

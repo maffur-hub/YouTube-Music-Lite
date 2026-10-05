@@ -344,6 +344,67 @@ function normalizePlaylists(items) {
   return result
 }
 
+// "artist · album", or whichever of the two exists.
+function songSubtitle(row) {
+  if (!row) return ""
+  var artist = String(row.artist || "")
+  var album = String(row.album || "")
+  if (artist && album) return artist + " · " + album
+  return artist || album
+}
+
+// "country · tags · codec bitratek" for a station row, skipping empty parts.
+function stationSubtitle(row) {
+  if (!row) return ""
+  var parts = []
+  var country = boundedString(row.country, 16).trim()
+  if (country !== "") parts.push(country)
+  var tags = []
+  if (Array.isArray(row.tags)) {
+    for (var i = 0; i < row.tags.length && tags.length < 4; i++) {
+      var tag = String(row.tags[i] || "").trim()
+      if (tag !== "") tags.push(tag)
+    }
+  }
+  if (tags.length > 0) parts.push(tags.join(", "))
+  var codec = boundedString(row.codec, 32).trim()
+  var bitrate = Math.max(0, Number(row.bitrate) || 0)
+  if (codec !== "" && bitrate > 0) parts.push(codec + " " + Math.round(bitrate) + "k")
+  else if (codec !== "") parts.push(codec)
+  else if (bitrate > 0) parts.push(Math.round(bitrate) + "k")
+  return parts.join(" · ")
+}
+
+// Number of song rows in a mixed list (albums/artists/playlists excluded).
+function songCount(rows) {
+  var n = 0
+  if (!Array.isArray(rows)) return 0
+  for (var i = 0; i < rows.length; i++)
+    if (rows[i] && rows[i].kind === "song") n++
+  return n
+}
+
+// Rows after the current one, or 0 when the queue is empty/unknown.
+function queueUpcomingCount(tracks, position) {
+  var list = Array.isArray(tracks) ? tracks : []
+  var remaining = list.length - 1
+  var pos = (typeof position === "number") ? position : 0
+  if (pos >= 0) remaining -= pos
+  return Math.max(0, remaining)
+}
+
+// Index of the currently-playing/queued row, or -1. Prefers mpv's reported
+// position, falling back to the row flagged `current` from the backend so the
+// saved-queue (nothing playing) view works too.
+function queueCurrentIndex(tracks, position) {
+  var list = Array.isArray(tracks) ? tracks : []
+  for (var i = 0; i < list.length; i++) {
+    var row = list[i]
+    if ((row && row.current) || i === position) return i
+  }
+  return (position >= 0 && position < list.length) ? position : -1
+}
+
 // ---- multi-select helpers (pure; used by Panel.qml and scripts/model_test.js)
 
 // Stable identity for a search row: songs key on videoId, everything else on
@@ -543,6 +604,11 @@ if (typeof module !== "undefined") {
     normalizeMixedRows: normalizeMixedRows,
     normalizeStations: normalizeStations,
     normalizePlaylists: normalizePlaylists,
+    songSubtitle: songSubtitle,
+    stationSubtitle: stationSubtitle,
+    songCount: songCount,
+    queueUpcomingCount: queueUpcomingCount,
+    queueCurrentIndex: queueCurrentIndex,
     rowKey: rowKey,
     selectedCount: selectedCount,
     withRowSelected: withRowSelected,

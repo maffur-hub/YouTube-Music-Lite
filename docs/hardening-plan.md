@@ -35,8 +35,12 @@ new `Model.*` names.
   `Model.js` and exported; `Panel.qml` now has one-line wrappers. `model_test.js`
   grew from 163 to 190 assertions covering them (invalid ids, duration clamps,
   non-array tolerance, tag cleaning, id-less playlist drop).
-- [ ] `songSubtitle` / `stationSubtitle` / `librarySongCount` / `songCount`.
-- [ ] `queueUpcomingCount` / `queueCurrentIndex`.
+- [x] `songSubtitle`, `stationSubtitle`, `songCount`, `queueUpcomingCount`,
+  `queueCurrentIndex` moved to `Model.js` (as pure functions taking rows +
+  position); `Panel.qml` keeps thin wrappers that supply root state.
+  `model_test.js` grew to 210 assertions.
+- [ ] `librarySongCount` stays a trivial root wrapper (`songCount(libraryRows)`).
+- Phase 1 complete. Next: Phase 2 (process/state-machine hardening).
 
 ## Phase 2 — Process/state-machine hardening (MEDIUM RISK)
 The 54-process + ~40-timer mesh is where our real bugs came from (stuck flags,
