@@ -1238,6 +1238,171 @@ else
     fail "per-key refresh sentinel + private-dir helper" "$(cat "$ERR_FILE")"
 fi
 
+# ------------------------------------------------- radio bug fixes (offline)
+# Regression checks for the 2026-10 radio fixes: switching stations must leave
+# exactly the new station queued (FIX 1), a repeated track must resume at the
+# position actually playing (FIX 3), a YouTube URL with an empty v is not a
+# stream (FIX 5), id-less favorites keep distinct ids (FIX 6), a bare --limit
+# is a usage error (FIX 4), and a session spawn clears a stale radio marker
+# (FIX 8). Fully offline: mpv, the network and the real state dir are replaced.
+section "radio bug fixes (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import contextlib, importlib.util, io, json, os, sys, tempfile
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_radio_fixes", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# Redirect every state file into a throwaway dir: never touch real state.
+tmp = tempfile.mkdtemp(prefix="yt-music-radio-fixes-")
+mod.STATE_DIR = tmp
+mod.METADATA_CACHE_DIR = os.path.join(tmp, "cache")
+mod.STATUS_PATH = os.path.join(tmp, "status.json")
+mod.TRACK_META_PATH = os.path.join(tmp, "track-meta.json")
+mod.RADIO_CURRENT_PATH = os.path.join(tmp, "radio-current.json")
+mod.RADIO_HISTORY_PATH = os.path.join(tmp, "radio-history.json")
+mod.RADIO_STATIONS_PATH = os.path.join(tmp, "radio-stations.json")
+mod.SESSION_PATH = os.path.join(tmp, "session.json")
+
+# FIX 1: starting station B while station A plays leaves exactly [B] queued,
+# and the live marker names B (the old stream row is dropped after the new one
+# is current, with the marker preserved).
+playlist = [{"filename": "http://example.com/a"}]
+pos = 0
+sends = []
+
+
+def fake_query(names):
+    if names == ["path", "playlist-pos", "playlist-count"]:
+        cur = playlist[pos]["filename"] if 0 <= pos < len(playlist) else ""
+        return {"path": cur, "playlist-pos": pos,
+                "playlist-count": len(playlist)}
+    if names == ["playlist-count"]:
+        return {"playlist-count": len(playlist)}
+    if names == ["playlist", "playlist-pos"]:
+        return {"playlist": list(playlist), "playlist-pos": pos}
+    return {}
+
+
+def fake_send(command, args):
+    global pos
+    sends.append((command, args))
+    if command == "loadfile":
+        playlist.insert(0, {"filename": args[0]})
+        pos = 0
+    elif command == "playlist-play-index":
+        pos = int(args[0])
+    elif command == "playlist-remove":
+        idx = int(args[0])
+        del playlist[idx]
+        if pos > idx:
+            pos -= 1
+
+
+mod.mpv_is_running = lambda: True
+mod.mpv_query = fake_query
+mod.mpv_send = fake_send
+mod.wait_for_track_change = lambda *a, **k: {
+    "pause": False, "media-title": "icy", "path": "http://example.com/b"}
+mod.write_status_from_mpv = lambda *a, **k: None
+mod.record_radio_play = lambda *a, **k: None
+mod._radio_browser_report_click = lambda *a, **k: None
+mod.ensure_daemon = lambda *a, **k: None
+
+mod.set_radio_current({"id": "a", "name": "A", "url": "http://example.com/a"})
+mod.cmd_station_play(["http://example.com/b", "B"])
+assert [e["filename"] for e in playlist] == ["http://example.com/b"], playlist
+assert ("playlist-remove", [1]) in sends, sends
+marker = mod.load_radio_current()
+assert marker and marker["name"] == "B", marker
+mod.clear_radio_current()
+
+# FIX 3: maybe_save_session maps the resolved index from mpv's playlist-pos,
+# so a repeated track resumes at the copy actually playing and skips streams.
+A = "https://www.youtube.com/watch?v=AAAAAAAAAAA"
+B = "https://www.youtube.com/watch?v=BBBBBBBBBBB"
+STREAM = "http://stream.example/live"
+
+
+def run_session(entries, mpv_pos):
+    mod._session_save_state = {"videoId": "", "savedAt": 0.0}
+    mod._playlist_state = lambda: (entries, mpv_pos)
+    mod.maybe_save_session({"videoId": "AAAAAAAAAAA", "position": 7})
+    return mod.load_session()
+
+
+sess = run_session([{"filename": A}, {"filename": B}, {"filename": A}], 2)
+assert sess["videoIds"] == ["AAAAAAAAAAA", "BBBBBBBBBBB", "AAAAAAAAAAA"], sess
+assert sess["index"] == 2, sess
+sess = run_session([{"filename": A}, {"filename": STREAM},
+                    {"filename": A}], 2)
+assert sess["videoIds"] == ["AAAAAAAAAAA", "AAAAAAAAAAA"], sess
+assert sess["index"] == 1, sess
+
+# FIX 5: a YouTube URL with an empty/invalid v is not a live stream; a real
+# non-YouTube http(s) row still is, and build_queue_rows agrees.
+assert mod._is_stream_entry(
+    {"filename": "https://www.youtube.com/watch?v="}) is False
+assert mod._is_stream_entry({"filename": STREAM}) is True
+assert mod._is_stream_entry(
+    {"filename": "https://www.youtube.com/watch?v=AAAAAAAAAAA"}) is False
+rows = mod.build_queue_rows([
+    {"filename": "https://www.youtube.com/watch?v="},
+    {"filename": STREAM},
+], {}, radio={"name": "Triple J", "url": STREAM})
+assert rows[0]["stream"] is False, rows
+assert rows[1]["stream"] is True, rows
+assert rows[1]["title"] == "Triple J", rows
+
+# FIX 4: a bare trailing --limit (or a non-integer value) is a usage error and
+# is never leaked into the query. A valid --limit N still works.
+mod._radio_browser_request = lambda *a, **k: []
+for argv in (["--limit"], ["jazz", "--limit"], ["jazz", "--limit", "abc"]):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        mod.cmd_station_search(argv)
+    payload = json.loads(out.getvalue())
+    assert payload["ok"] is False, (argv, payload)
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_station_search(["jazz", "--limit", "5"])
+assert json.loads(out.getvalue())["ok"] is True
+
+# FIX 6: two id-less saved entries no longer collapse under the "" key.
+with open(mod.RADIO_STATIONS_PATH, "w") as fh:
+    json.dump({"version": 1, "stations": [
+        {"url": "https://example.com/one", "name": "One", "source": "user"},
+        {"url": "https://example.com/two", "name": "Two", "source": "user"},
+    ]}, fh)
+items = mod.load_radio_stations()
+assert len(items) == 2, items
+assert len({e["id"] for e in items}) == 2, items
+assert all(e["id"].startswith("user:") for e in items), items
+
+# FIX 8: spawning a saved session clears a stale radio marker.
+mod.mpv_is_running = lambda: False
+mod.ensure_daemon = lambda *a, **k: None
+mod.ensure_private_runtime_dir = lambda: None
+mod.subprocess.Popen = lambda *a, **k: type("P", (), {"pid": 4242})()
+mod.MPV_PID_PATH = os.path.join(tmp, "mpv.pid")
+mod.wait_for_mpv = lambda *a, **k: True
+mod.get_mpv_props = lambda: {"path": mod.watch_url("AAAAAAAAAAA")}
+mod.mpv_send = lambda *a, **k: None
+mod.wait_for_metadata = lambda *a, **k: {"pause": True, "media-title": ""}
+mod.write_status_from_mpv = lambda *a, **k: None
+mod.set_radio_current({"id": "old", "name": "Old", "url": "http://x/old"})
+mod._spawn_session_mpv(["AAAAAAAAAAA"], 0, 0.0, pause=True)
+assert mod.load_radio_current() is None, "stale marker survived a session spawn"
+PY
+if [[ $? -eq 0 ]]; then
+    pass "radio bug fixes (station switch, session index, stream detection)"
+else
+    fail "radio bug fixes (station switch, session index, stream detection)" "$(cat "$ERR_FILE")"
+fi
+
 # ------------------------------------------------- full-page playlist fetch (offline)
 # The correctness sites that resolve duplicates/indices must fetch the whole
 # playlist (limit=None); only the display path may keep a 100-item page.
@@ -1985,12 +2150,12 @@ mod.mpv_query = lambda names: {
 drops = []
 mod.mpv_send = lambda *a: drops.append(a)
 mod.drop_radio_streams()
-assert ("playlist-remove", ["2"]) in drops, drops
-assert ("playlist-remove", ["0"]) in drops, drops
-assert drops.index(("playlist-remove", ["2"])) < drops.index(
-    ("playlist-remove", ["0"])), drops
+assert ("playlist-remove", [2]) in drops, drops
+assert ("playlist-remove", [0]) in drops, drops
+assert drops.index(("playlist-remove", [2])) < drops.index(
+    ("playlist-remove", [0])), drops
 assert not any(isinstance(c, tuple) and c[0] == "playlist-remove"
-               and c[1] == ["1"] for c in drops), drops
+               and c[1] == [1] for c in drops), drops
 assert mod.load_radio_current() is None, "marker not cleared after drop"
 
 # 20c. prune_radio_if_moved_on decides from the entry at the CURRENT position
@@ -2008,7 +2173,7 @@ moves = []
 mod.mpv_send = lambda *a: moves.append(a)
 mod.set_radio_current({"id": "u1", "name": "Triple J", "url": "https://x/s"})
 mod.prune_radio_if_moved_on()
-assert ("playlist-remove", ["0"]) in moves, moves
+assert ("playlist-remove", [0]) in moves, moves
 assert mod.load_radio_current() is None, "marker not cleared after prune"
 # The stream is current (index 0): nothing is removed and the marker stays.
 mod.set_radio_current({"id": "u1", "name": "Triple J", "url": "https://x/s"})

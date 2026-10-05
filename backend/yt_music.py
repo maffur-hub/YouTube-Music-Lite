@@ -818,7 +818,8 @@ def maybe_save_session(status):
         if not playlist:
             return
         ids = []
-        for entry in playlist:
+        resolved_pos = -1
+        for index, entry in enumerate(playlist):
             path = entry.get("filename") if isinstance(entry, dict) else ""
             path = path or ""
             vid = video_id_from_url(path) if path else ""
@@ -828,13 +829,18 @@ def maybe_save_session(status):
                 # A stream entry cannot be resumed: skip it and keep the songs
                 # rather than abandoning the whole queue.
                 continue
+            # Record the resolved index while walking the same order mpv
+            # reported. A lookup by video id would land on the first copy of a
+            # repeated track instead of the one actually playing.
+            if index == pos:
+                resolved_pos = len(ids)
             ids.append(vid)
         if not ids:
             return
-        # Skipping stream entries shifts the playing index, so map the current
-        # video id into the resolved list instead of trusting mpv's position.
-        pos = ids.index(video_id) if video_id in ids else 0
-        save_session(ids, pos, status.get("position") or 0)
+        if not 0 <= resolved_pos < len(ids):
+            # No usable positional mapping (mpv pos unreadable): fall back.
+            resolved_pos = ids.index(video_id) if video_id in ids else 0
+        save_session(ids, resolved_pos, status.get("position") or 0)
         _session_save_state["videoId"] = video_id
         _session_save_state["savedAt"] = now
     except Exception:
@@ -1283,6 +1289,18 @@ def video_id_from_url(url):
     return None
 
 
+def _is_youtube_url(url):
+    """True when a URL points at a YouTube host (watch, music, or short link).
+
+    video_id_from_url already parses exactly those hosts, but an empty `v=`
+    makes it return None just like a non-YouTube host, so stream detection
+    needs this to keep a YouTube watch URL from masquerading as a live stream.
+    """
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return (host == "youtu.be" or host == "youtube.com"
+            or host.endswith(".youtube.com"))
+
+
 def extract_video_id(props):
     if not props:
         return None
@@ -1584,6 +1602,19 @@ def _read_private_json(path, cap_bytes=1024 * 1024, default=None):
                 pass
 
 
+def _ensure_station_id(row):
+    """Give a normalized station a stable id when its source had none.
+
+    Without this the id is "" and every id-less entry collapses under the same
+    key in the by-id maps used by load/save, silently dropping all but one.
+    """
+    if not row.get("id"):
+        digest = hashlib.sha1(
+            str(row.get("url") or "").encode("utf-8")).hexdigest()
+        row["id"] = "user:" + digest
+    return row
+
+
 def load_radio_stations():
     """Saved radio stations, deduped by id, capped, and normalized.
 
@@ -1604,6 +1635,7 @@ def load_radio_stations():
                 continue
             row = normalize_station(entry, entry.get("source") or "favorite")
             if row:
+                _ensure_station_id(row)
                 by_id[row["id"]] = row
         return list(by_id.values())[:RADIO_STATIONS_MAX]
     except Exception:
@@ -1624,6 +1656,7 @@ def save_radio_stations(items):
             row = normalize_station(entry, entry.get("source") or "favorite")
             if not row:
                 continue
+            _ensure_station_id(row)
             for key in ("id", "name", "url", "favicon", "homepage", "country",
                         "codec", "source"):
                 row[key] = str(row.get(key) or "")[:RADIO_FIELD_MAX]
@@ -1683,13 +1716,14 @@ def record_radio_play(station):
                  if isinstance(e, dict) and e.get("id") != station_id]
         tags = station.get("tags")
         record = {
-            "id": station_id,
-            "name": str(station.get("name") or ""),
-            "url": str(station.get("url") or ""),
-            "favicon": str(station.get("favicon") or ""),
-            "tags": tags if isinstance(tags, list) else [],
-            "country": str(station.get("country") or ""),
-            "codec": str(station.get("codec") or ""),
+            "id": station_id[:RADIO_FIELD_MAX],
+            "name": str(station.get("name") or "")[:RADIO_FIELD_MAX],
+            "url": str(station.get("url") or "")[:RADIO_FIELD_MAX],
+            "favicon": str(station.get("favicon") or "")[:RADIO_FIELD_MAX],
+            "tags": ([str(t)[:64] for t in tags][:32]
+                     if isinstance(tags, list) else []),
+            "country": str(station.get("country") or "")[:RADIO_FIELD_MAX],
+            "codec": str(station.get("codec") or "")[:RADIO_FIELD_MAX],
             "bitrate": _int_or_zero(station.get("bitrate")),
             "playedAt": round(time.time()),
         }
@@ -2994,8 +3028,21 @@ def cmd_station_search(args):
             tag_mode = True
             index += 1
             continue
-        if args[index] == "--limit" and index + 1 < len(args):
-            limit = _int_or_zero(args[index + 1]) or 30
+        if args[index] == "--limit":
+            # A bare trailing --limit (or a non-integer value) is a usage error
+            # rather than leaking the flag into the query string.
+            if index + 1 >= len(args):
+                print(json.dumps({"ok": False, "error":
+                                  "Usage: yt-music-ctl station-search [--tag] "
+                                  "<query> [--limit N]"}))
+                return
+            try:
+                limit = int(args[index + 1])
+            except (TypeError, ValueError):
+                print(json.dumps({"ok": False, "error":
+                                  "Usage: yt-music-ctl station-search [--tag] "
+                                  "<query> [--limit N]"}))
+                return
             limit = max(1, min(100, limit))
             index += 2
             continue
@@ -3064,9 +3111,7 @@ def cmd_station_fav_add(args):
     if not row:
         print(json.dumps({"ok": False, "error": "Invalid station URL"}))
         return
-    if not row["id"]:
-        digest = hashlib.sha1(row["url"].encode("utf-8")).hexdigest()
-        row["id"] = "user:" + digest
+    _ensure_station_id(row)
     updated = []
     replaced = False
     for entry in load_radio_stations():
@@ -3144,15 +3189,14 @@ def cmd_station_play(args):
     if not row:
         print(json.dumps({"ok": False, "error": "Invalid station URL"}))
         return
-    if not row["id"]:
-        digest = hashlib.sha1(row["url"].encode("utf-8")).hexdigest()
-        row["id"] = "user:" + digest
+    _ensure_station_id(row)
     ensure_daemon()
     if mpv_is_running():
-        # Pin the station at the TOP of the queue and play it. A stream left
-        # over from a previous station is dropped first; drop_radio_streams
-        # clears the old marker, so stamp the new one afterwards.
-        drop_radio_streams()
+        # Pin the station at the TOP of the queue and play it. Stamp the new
+        # marker first: the old stream left over from the previous station is
+        # dropped only after the new one is current, so the marker already
+        # names the right station when drop_radio_streams keeps the entry at
+        # index 0 and removes the stale stream rows behind it.
         set_radio_current(row)
         before = mpv_query(["path", "playlist-pos", "playlist-count"]) or {}
         try:
@@ -3172,6 +3216,9 @@ def cmd_station_play(args):
             time.sleep(0.05)
         mpv_send("playlist-play-index", ["0"])
         mpv_send("set_property", ["pause", False])
+        # playlist-pos is now 0 (the new station), so the old station's stream
+        # rows are removed while the new marker survives.
+        drop_radio_streams(keep_current=True, clear_marker=False)
         props = wait_for_track_change(before.get("path") or "",
                                       before.get("playlist-pos"))
     else:
@@ -3279,6 +3326,9 @@ def cmd_last_played(args):
 
 
 def _spawn_session_mpv(ids, index, position, pause=True):
+    # A saved session holds resolved songs only; a radio marker left over from
+    # a previous station would otherwise describe this session's status as live.
+    clear_radio_current()
     ensure_daemon()
     ensure_private_runtime_dir()
     urls = [watch_url(v) for v in ids]
@@ -3833,22 +3883,31 @@ def _playlist_state():
 
 
 def _is_stream_entry(entry):
-    """True when a playlist entry is a stream: http(s) and no video id."""
+    """True when a playlist entry is a stream.
+
+    A stream is an http(s) entry video_id_from_url cannot parse at all (a
+    non-YouTube host). A YouTube URL is never a stream: an empty/invalid `v`
+    makes video_id_from_url return None, which is the same as a foreign host,
+    so the host check keeps the two apart.
+    """
     if not isinstance(entry, dict):
         return False
     filename = entry.get("filename") or ""
-    if valid_video_id(video_id_from_url(filename)):
+    if video_id_from_url(filename) is not None or _is_youtube_url(filename):
         return False
     return filename.startswith(("http://", "https://"))
 
 
-def drop_radio_streams():
-    """Remove queued stream rows, keeping the one currently playing.
+def drop_radio_streams(keep_current=True, clear_marker=True):
+    """Remove queued stream rows, keeping the one currently playing by default.
 
-    Stream entries older than the playing index are stale once another track
-    is selected, so they leave the queue. Removal goes in descending index
-    order so earlier removals do not shift later ones. The live marker is
-    dropped afterwards. Never raises.
+    `keep_current` keeps the stream entry at mpv's current `playlist-pos`; pass
+    False to drop every stream. `clear_marker` drops the live radio marker
+    afterwards. Ageing them out is the norm once another track is selected, so
+    they leave the queue; removal goes in descending index order so earlier
+    removals do not shift later ones. Station-play passes clear_marker=False
+    because it has just stamped the new marker and wants it to survive the
+    cleanup. Never raises.
     """
     try:
         if mpv_is_running():
@@ -3860,12 +3919,14 @@ def drop_radio_streams():
                 except (TypeError, ValueError):
                     pos = -1
                 drop = [index for index, entry in enumerate(playlist)
-                        if index != pos and _is_stream_entry(entry)]
+                        if (not keep_current or index != pos)
+                        and _is_stream_entry(entry)]
                 for index in sorted(drop, reverse=True):
-                    mpv_send("playlist-remove", [str(index)])
+                    mpv_send("playlist-remove", [index])
     except Exception:
         pass
-    clear_radio_current()
+    if clear_marker:
+        clear_radio_current()
 
 
 def prune_radio_if_moved_on():
@@ -4466,26 +4527,37 @@ def build_queue_rows(playlist, meta, radio=None):
     """
     radio = radio if isinstance(radio, dict) else {}
     station_name = str(radio.get("name") or "Radio")
+    station_url = str(radio.get("url") or "")
     rows = []
     number = 0
     for index, entry in enumerate(playlist or []):
         if not isinstance(entry, dict):
             continue
         filename = entry.get("filename") or ""
-        video_id = video_id_from_url(filename)
-        if not valid_video_id(video_id):
-            video_id = ""
+        raw_video_id = video_id_from_url(filename)
+        video_id = raw_video_id if valid_video_id(raw_video_id) else ""
         info = meta.get(video_id) if video_id else None
         info = info if isinstance(info, dict) else {}
-        is_stream = (not video_id) and filename.startswith(
-            ("http://", "https://"))
+        # A stream is an http(s) filename video_id_from_url cannot parse; a
+        # YouTube URL with an empty/invalid `v` resolves to None too, so the
+        # host check keeps it a song and never a live station.
+        is_stream = (raw_video_id is None
+                     and not _is_youtube_url(filename)
+                     and filename.startswith(("http://", "https://")))
         if not is_stream:
             number += 1
+        # Only the station actually playing is named; any other stream row is
+        # the generic "Radio" so a stale row cannot borrow the live marker name.
+        if is_stream and filename == station_url:
+            title = station_name
+        elif is_stream:
+            title = "Radio"
+        else:
+            title = str(info.get("title") or entry.get("title") or "")
         rows.append({
             "index": index,
             "videoId": video_id,
-            "title": station_name if is_stream
-                     else str(info.get("title") or entry.get("title") or ""),
+            "title": title,
             "artist": str(info.get("artist") or ""),
             "album": str(info.get("album") or ""),
             "duration": info.get("duration") or 0,
