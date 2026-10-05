@@ -4,6 +4,9 @@
 
 Review-driven fixes (see `docs/review-findings.md`, `docs/phase2-decisions.md`).
 
+- Discoverability: a **?** button beside the content tabs opens a cheat sheet of
+  the keyboard shortcuts and the right-click menus (station rows, queue rows,
+  and the bar icon).
 - Hardening: `doctor` now reports `cava` and `python3` too, and the panel no
   longer leaves a stuck spinner/flag when `yt-music-ctl` is missing (the
   station-search, station-play, playlist and library deadlines now clear their

@@ -139,7 +139,7 @@ Clicking the tab you are already on pops one level: an open playlist, album, or 
 | `c` | Close the panel |
 | `Esc` | Close the panel, or dismiss the delete confirmation |
 
-Shortcuts pause while a text field or an open menu has focus. Ctrl-click toggles a row's selection and Shift-click selects a range, in the Search results and the Up Next list. Tab does not navigate in this panel, and there is no scroll-to-seek or scroll-to-volume gesture.
+Shortcuts pause while a text field or an open menu has focus. Ctrl-click toggles a row's selection and Shift-click selects a range, in the Search results and the Up Next list. Tab does not navigate in this panel, and there is no scroll-to-seek or scroll-to-volume gesture. The **?** button beside the tabs opens this cheat sheet in the panel.
 
 ### Right-click menus
 

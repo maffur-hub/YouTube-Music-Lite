@@ -140,6 +140,13 @@ Close the confirmed-but-unfixed items in `docs/backlog.md`:
 - A keyboard-shortcut / context-menu cheat sheet in the panel, and a first-run
   hint covering the right-click menus (station rows, queue rows, bar icon).
 
+### Progress
+- [x] Added a **?** button beside the content tabs that opens a themed cheat
+  sheet of the keyboard shortcuts and right-click menus (reusing `MenuPopup`).
+  The station and help menus were also added to the key-catcher's blocked list.
+- [ ] A persisted first-run hint was not added; the always-visible **?** button
+  is the discoverability affordance instead (less state to persist).
+
 ## Sequencing
 Phases 1 -> 2 -> 4 -> 5 -> 6 are low/medium risk and can ship incrementally.
 Phase 3 is the largest and goes last, one component per commit. Phase 4 items

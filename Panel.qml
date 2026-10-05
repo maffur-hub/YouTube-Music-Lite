@@ -1478,6 +1478,29 @@ Panel {
       function() { root.toggleStationFavorite(row) })
   }
 
+  // A discoverability cheat sheet for the keyboard and the right-click menus.
+  // Rows are informational; selecting one just closes the menu.
+  function openHelp(anchorItem) {
+    clearMenu(helpMenu)
+    var rows = [
+      ["Space / Enter", "Play or pause (or open the selected row)"],
+      ["Up / Down", "Move the list cursor"],
+      ["Left / Right", "Seek 5 seconds"],
+      ["Delete", "Remove the selected queue or playlist row"],
+      ["Esc", "Close a menu, or the panel"],
+      ["Right-click a track", "Play, queue, playlist, like, mix"],
+      ["Right-click a station", "Play, Featured, Favorites"],
+      ["Right-click the bar icon", "Transport menu"],
+      ["Middle-click the bar icon", "Play / pause"],
+      ["Click a tab twice", "Collapse it"]
+    ]
+    for (var i = 0; i < rows.length; i++) {
+      helpMenu.addItem(rows[i][0] + "  —  " + rows[i][1], function() {})
+    }
+    var p = anchorItem ? anchorItem.mapToItem(panelFlick, 0, anchorItem.height) : { x: 0, y: 0 }
+    helpMenu.popupAt(panelFlick, p.x, p.y)
+  }
+
   function rebuildPlaylistPicker() {
     clearMenu(playlistPickerMenu)
     for (var i = 0; i < root.playlists.length; i++) {
@@ -3013,6 +3036,7 @@ Panel {
 
   MenuPopup { id: contextMenu }
   MenuPopup { id: stationMenu }
+  MenuPopup { id: helpMenu }
 
   MenuPopup {
     id: playlistPickerMenu
@@ -3042,6 +3066,7 @@ Panel {
       anchors.fill: parent
       blocked: searchField.activeFocus || newPlaylistField.activeFocus
         || contextMenu.opened || playlistPickerMenu.opened
+        || stationMenu.opened || helpMenu.opened
         || renameField.activeFocus || queueSaveField.activeFocus
         || stationField.activeFocus
       onCloseRequested: {
@@ -3974,6 +3999,7 @@ Panel {
 
           // ---- content tabs (Up Next / Search / Playlists / Library)
           Row {
+            id: tabStrip
             visible: root.tabItems.length > 1
             width: parent.width - Style.space(40)
             height: Style.spacing.controlHeight
@@ -3983,8 +4009,9 @@ Panel {
             Repeater {
               model: root.tabItems
               delegate: Button {
-                width: (parent.width - Style.spacing.sm * (root.tabItems.length - 1))
-                  / root.tabItems.length
+                // Leave room for the help button on the right.
+                width: (tabStrip.width - Style.spacing.sm * root.tabItems.length
+                        - Style.space(28)) / root.tabItems.length
                 height: Style.spacing.controlHeight
                 text: modelData.label
                 fontFamily: root.fam
@@ -3994,6 +4021,19 @@ Panel {
                 foreground: root.fg
                 onClicked: root.toggleTab(modelData.key)
               }
+            }
+
+            Button {
+              id: helpButton
+              width: Style.space(28)
+              height: Style.spacing.controlHeight
+              text: "?"
+              tooltipText: "Keyboard & mouse help"
+              fontFamily: root.fam
+              fontSize: Style.font.bodySmall
+              bordered: true
+              foreground: root.fg
+              onClicked: root.openHelp(helpButton)
             }
           }
 
