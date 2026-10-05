@@ -10,6 +10,7 @@ BarWidget {
   moduleName: "yt-music"
 
   property var musicStatus: null
+  property bool menuOpen: false
   readonly property string ctlPath: Quickshell.env("HOME") + "/.local/bin/yt-music-ctl"
   readonly property int iconPx: 12
   readonly property bool playing: Model.isPlaying(root.musicStatus)
@@ -19,6 +20,12 @@ BarWidget {
   function tooltipText() {
     return Model.tooltipText(root.musicStatus)
   }
+
+  function menuRun(command) {
+    if (root.bar) root.bar.run("yt-music-ctl " + command + " 2>/dev/null")
+  }
+
+  function closeMenu() { root.menuOpen = false }
 
   function injectPanel() {
     var target = panelLoader.item
@@ -148,15 +155,109 @@ BarWidget {
       onClicked: function(mouse) {
         if (!root.bar) return
         if (mouse.button === Qt.RightButton) {
-           if (Model.isActive(root.musicStatus))
-            root.bar.run("yt-music-ctl stop 2>/dev/null")
-          else
-            root.bar.run("yt-music-ctl status 2>/dev/null")
+          root.menuOpen = !root.menuOpen
         } else if (mouse.button === Qt.MiddleButton) {
           root.bar.run("yt-music-ctl toggle 2>/dev/null")
         } else {
           root.togglePanel()
         }
+      }
+    }
+  }
+
+  QtObject {
+    id: menuOwner
+    function close() { root.closeMenu() }
+  }
+
+  PopupCard {
+    id: transportMenu
+    anchorItem: button
+    bar: root.bar
+    owner: menuOwner
+    open: root.menuOpen
+    contentWidth: transportMenu.fittedContentWidth(Style.space(220))
+    contentHeight: transportMenu.fittedContentHeight(menuColumn.implicitHeight)
+
+    Column {
+      id: menuColumn
+      anchors.fill: parent
+      spacing: Style.space(4)
+
+      Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        elide: Text.ElideRight
+        text: root.barText !== "" ? root.barText : "YouTube Music"
+        color: root.bar ? root.bar.foreground : Style.text
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+      }
+
+      Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        elide: Text.ElideRight
+        visible: root.musicStatus !== null
+        text: root.paused ? "Paused" : (root.playing ? "Playing" : "Idle")
+        color: Qt.darker(root.bar ? root.bar.foreground : Style.text, 1.4)
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.caption
+      }
+
+      PanelSeparator { foreground: root.bar ? root.bar.foreground : Style.text }
+
+      Button {
+        width: menuColumn.width
+        leftAlign: true
+        iconText: root.playing ? Model.ICON.pause : Model.ICON.play
+        text: root.playing ? "Pause" : (root.paused ? "Resume" : "Play")
+        foreground: root.bar ? root.bar.foreground : Style.text
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        onClicked: { root.menuRun("toggle"); root.closeMenu() }
+      }
+
+      Button {
+        width: menuColumn.width
+        leftAlign: true
+        iconText: Model.ICON.prev
+        text: "Previous"
+        foreground: root.bar ? root.bar.foreground : Style.text
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        onClicked: { root.menuRun("prev"); root.closeMenu() }
+      }
+
+      Button {
+        width: menuColumn.width
+        leftAlign: true
+        iconText: Model.ICON.next
+        text: "Next"
+        foreground: root.bar ? root.bar.foreground : Style.text
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        onClicked: { root.menuRun("next"); root.closeMenu() }
+      }
+
+      Button {
+        width: menuColumn.width
+        leftAlign: true
+        iconText: Model.ICON.stop
+        text: "Stop"
+        foreground: root.bar ? root.bar.foreground : Style.text
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        onClicked: { root.menuRun("stop"); root.closeMenu() }
+      }
+
+      PanelSeparator { foreground: root.bar ? root.bar.foreground : Style.text }
+
+      Button {
+        width: menuColumn.width
+        leftAlign: true
+        iconText: Model.ICON.music
+        text: root.opened ? "Close player" : "Open player"
+        foreground: root.bar ? root.bar.foreground : Style.text
+        fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        onClicked: { root.togglePanel(); root.closeMenu() }
       }
     }
   }

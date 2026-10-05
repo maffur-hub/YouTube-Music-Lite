@@ -31,7 +31,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - Private per-user runtime state and MPV IPC socket
 - Lyrics for the current track, fetched on demand and reloaded when the track changes
 - An audio visualizer fed by `cava` (required for this feature) with an on/off toggle, eight styles (bars, bars-mirror, voice-gradient, bars-meter, VU ladder, vertical VU, VU spectrum, VU dots), and mono/stereo plus linear/decibel display options
-- A bar widget that shows an accent note glyph, the current `title · artist`, a hover tooltip, and left/middle/right-click controls
+- A bar widget that shows an accent note glyph, the current `title · artist`, a hover tooltip, left-click to open the panel, middle-click to toggle play/pause, and a right-click transport menu
 - Local Last Played history with its own Clear button
 - Keyboard control of the panel: move a list cursor, seek, drive the transport, and close the panel
 - Library browsing from Home, Recent, Liked, Songs, Albums, and Artists, with album and artist pages that open in place
@@ -43,7 +43,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - The music-note glyph is always visible; it turns the accent colour while a track is playing.
 - While playing it also shows `<title> · <artist>`, truncated at about 40 characters. When idle or paused only the icon shows.
 - The tooltip reads `YouTube Music — not logged in` when there is no status, `YouTube Music — idle` when stopped, and otherwise `<title> — <artist> — <album>`, with ` — paused` appended while paused.
-- Left-click opens or closes the panel. Middle-click toggles play/pause. Right-click stops playback while something is playing or paused, and otherwise refreshes the status.
+- Left-click opens or closes the panel. Middle-click toggles play/pause. Right-click opens a transport menu with Play/Pause, Previous, Next, Stop, and Open player/Close player.
 - There is no scroll gesture on the bar.
 
 ### Tabs

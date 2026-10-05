@@ -4,6 +4,10 @@
 
 Review-driven fixes (see `docs/review-findings.md`, `docs/phase2-decisions.md`).
 
+- The bar widget's right-click now opens a transport menu (Play/Pause, Previous,
+  Next, Stop, Open/Close player) instead of stopping or refreshing playback;
+  middle-click still toggles play/pause.
+
 - Featured stations are now editable from the panel: right-click any station row
   (Featured, Favorites, or Search) to add it to or remove it from Featured. Adds
   and removes are coalesced with an in-flight catalog fetch so the list cannot
