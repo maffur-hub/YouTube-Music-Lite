@@ -4,6 +4,25 @@ The player's feature surface is complete; this plan targets reliability and
 maintainability rather than new features. Ordered by leverage and risk. Each
 phase is independently shippable and must leave the plugin working.
 
+## Status — resume here (2026-10-06)
+
+Phases 0, 1, 2, 4, 5 and 6 are **done**. **Phase 3 is the only one left** and
+was deliberately deferred because it is the largest diff and wants a live shell
+to verify after each component moves.
+
+Test gate before starting Phase 3 (all green at last commit):
+```
+node scripts/model_test.js         → 212 assertions
+node scripts/asyncstate_test.js    →  26 assertions
+node scripts/asyncstate_harness.js →  53 assertions
+offline smoke sections             →  14 / 14 pass
+ast.parse · bash -n · qmllint      → clean
+```
+
+Phase 3 sequence (one component per commit, restart the shell and check the
+affected tab after each): visualizer renderers → Stations tab → context-menu
+builders. Target: `Panel.qml` under ~4,000 lines.
+
 Guiding rules:
 - No behaviour change unless a phase says so.
 - Every phase keeps `node scripts/model_test.js` and the offline `smoke.sh`
