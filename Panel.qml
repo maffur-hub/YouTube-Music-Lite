@@ -1933,7 +1933,12 @@ Panel {
             current: !!t.current
           })
         }
-        root.queueTracks = rows
+        // Reassign only when the queue actually changed. A brand-new array
+        // makes the queue Repeater destroy and rebuild every delegate, which
+        // flashes the row play icons whenever a command that does not touch
+        // the queue (volume, seek, pause, ...) triggers a refresh.
+        if (JSON.stringify(rows) !== JSON.stringify(root.queueTracks))
+          root.queueTracks = rows
         queueScrollTimer.restart()
       } else {
         root.queueSaved = false
