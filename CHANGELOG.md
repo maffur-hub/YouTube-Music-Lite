@@ -4,6 +4,16 @@
 
 Review-driven fixes (see `docs/review-findings.md`, `docs/phase2-decisions.md`).
 
+- A radio station that mpv accepts but never actually plays is no longer
+  reported as a success (and no longer recorded in history): playback is only
+  confirmed once the stream position advances or real ICY metadata arrives.
+- The favourite star in the Stations tab now flips immediately on click and
+  reverts if the update fails, instead of waiting for the round trip.
+- An unexpected mpv death no longer leaves a stale "live radio" marker behind;
+  `status` reconciles it in the no-player branches.
+- The visualizer is safe against a non-finite scale factor (no more NaN bar
+  heights).
+
 - The chosen volume is now remembered across mpv respawns. Every playback start
   (play, radio, restore, resume, mix, enqueue) spawns a fresh mpv, which always
   began at 100%, so the volume jumped to full after stopping or switching; the

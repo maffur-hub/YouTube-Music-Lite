@@ -20,20 +20,26 @@ are deliberate gaps or design risks to revisit. Delete entries once handled.
 
 ## Remaining (known, not yet fixed)
 
-- **A station URL that mpv *accepts* but never plays is still reported as
-  successful.** `cmd_station_play` now fails a switch when `playlist-count`
-  never grows (mpv rejected the URL), but a dead URL that is accepted and then
-  fails to produce audio keeps mpv alive, so the command prints `ok:true` and
-  records history. Detecting this reliably needs a playback-progress check.
-- **The favourite star is not optimistic.** It only flips after the
-  `station-fav-add`/`remove` round trip and the favourites refetch, so there is
-  no immediate feedback while the request is in flight.
-- **`Model.cavaScaleBars` is not `Infinity`-safe** (`Math.min(100, v * Infinity)`
-  is `NaN`). Not reachable through the current pipeline (all factors are finite
-  and the headroom divisor is guarded), but worth clamping if a caller changes.
-- **An unexpected mpv death leaves the live marker on disk.** It is not
-  reflected in status (the no-player branch returns early) and self-heals on the
-  next play/stop/queue edit, but a status reader could briefly see a stale file.
+- **The favourite star is refreshed only after the authoritative list lands.**
+  It is optimistic now, but the override is cleared wholesale when any
+  favourites fetch completes; a slow concurrent fetch could briefly revert a
+  just-toggled star.
+
+## Fixed in the hardening pass (2026-10-06)
+
+- [x] **A station URL that mpv accepts but never plays** is no longer reported
+  as success. `wait_for_stream_progress()` requires the stream's position to
+  advance or genuine ICY metadata to arrive (a title equal to the stream URL's
+  own fragment does not count); a stream that never starts is killed and
+  reported as a failure without touching history.
+- [x] **`Model.cavaScaleBars` is `Infinity`-safe** — a non-finite scale is
+  treated as the identity and a non-finite product clamps to 100, so a frame
+  can never contain NaN heights.
+- [x] **An unexpected mpv death no longer leaves the live marker on disk.**
+  `cmd_status` reconciles `radio-current.json` in both no-player branches.
+- [x] **The favourite star is optimistic** — it flips on click, reverts (and
+  refreshes) on a reported failure, and is cleared once the authoritative
+  favourites list reloads.
 
 ## Known risks / assumptions
 

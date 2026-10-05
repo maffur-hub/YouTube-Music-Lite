@@ -1295,6 +1295,38 @@ def wait_for_metadata(timeout=6):
         time.sleep(0.25)
 
 
+def wait_for_stream_progress(stream_url, timeout=8):
+    """True once a live stream is actually playing, not just connected.
+
+    A dead station URL can still be accepted by mpv and keep the process alive
+    while producing no audio, so `mpv_is_running()` alone reports a false
+    success. A live stream is real when either its position advances across two
+    polls or mpv reports a title that is genuinely ICY metadata rather than the
+    stream's own URL/filename fragment (mpv echoes the last path segment as the
+    title before any metadata arrives, which `_looks_like_url_title` alone does
+    not catch). Returns (ok, last_props).
+    """
+    deadline = time.time() + timeout
+    last = None
+    first_pos = None
+    while time.time() < deadline:
+        props = get_mpv_props()
+        if props:
+            last = props
+            title = props.get("media-title", "")
+            if _radio_now_playing(title, stream_url):
+                # A real ICY title (never the stream URL fragment) means audio.
+                return True, props
+            pos = props.get("time-pos")
+            if isinstance(pos, (int, float)):
+                if first_pos is None:
+                    first_pos = pos
+                elif pos > first_pos + 0.25:
+                    return True, props
+        time.sleep(0.25)
+    return False, last if last is not None else get_mpv_props()
+
+
 def video_id_from_url(url):
     """Pull the video id out of a YouTube watch/youtu.be URL.
 
@@ -1990,10 +2022,14 @@ def cmd_logout(args):
 
 def cmd_status(args):
     if not mpv_is_running():
+        # No player means no stream can be live: reconcile a marker left behind
+        # by an unexpected mpv death so a status reader cannot see it as live.
+        clear_radio_current()
         write_status({"ok": True, "playing": False})
         return
     props = get_mpv_props()
     if not props:
+        clear_radio_current()
         write_status({"ok": True, "playing": False})
         return
     write_status_from_mpv(props)
@@ -3479,6 +3515,18 @@ def cmd_station_play(args):
         json_dump(MPV_PID_PATH, mpv_pid_record(proc))
         wait_for_mpv()
         props = wait_for_metadata()
+        # mpv kept alive is not proof of audio: a dead URL it accepted would
+        # otherwise be reported as a successful play and recorded in history.
+        if mpv_is_running():
+            ok, progress_props = wait_for_stream_progress(row["url"])
+            if not ok:
+                mpv_kill()
+                clear_radio_current()
+                write_status({"ok": False, "playing": False})
+                print(json.dumps({"ok": False,
+                                  "error": "Stream did not start playing"}))
+                return
+            props = progress_props or props
     if not mpv_is_running():
         clear_radio_current()
         write_status({"ok": False, "playing": False})

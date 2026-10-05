@@ -1552,6 +1552,93 @@ else
     fail "radio bug fixes (station switch, session index, stream detection)" "$(cat "$ERR_FILE")"
 fi
 
+# ------------------------------------------------- stream progress + status marker (offline)
+# A station URL mpv accepts but that never plays must not report success, and a
+# marker left by an unexpected mpv death must be reconciled by `status`.
+section "stream progress + status marker (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import importlib.util, io, json, os, sys, tempfile
+import contextlib
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_progress_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+tmp = tempfile.mkdtemp(prefix="yt-music-progress-")
+mod.STATE_DIR = tmp
+mod.RADIO_CURRENT_PATH = os.path.join(tmp, "radio-current.json")
+mod.STATUS_PATH = os.path.join(tmp, "status.json")
+
+
+class Clock:
+    def __init__(self): self.t = 0.0
+    def time(self): self.t += 0.5; return self.t
+    @staticmethod
+    def sleep(_s): pass
+
+
+URL = "http://stream.example.com/live/icecast.audio"
+
+# A dead URL echoes its own tail as the title and never advances: not playing.
+mod.time = Clock()
+mod.get_mpv_props = lambda: {"media-title": "icecast.audio", "time-pos": 0.0}
+ok, _ = mod.wait_for_stream_progress(URL, timeout=1)
+assert ok is False, "a title equal to the stream URL tail must not count as playing"
+
+# A URL-shaped title is likewise not playing.
+mod.time = Clock()
+mod.get_mpv_props = lambda: {"media-title": "https://youtu.be/x", "time-pos": 0.0}
+ok, _ = mod.wait_for_stream_progress(URL, timeout=1)
+assert ok is False, "a URL title must not count as playing"
+
+# Real ICY metadata is proof of audio.
+mod.time = Clock()
+mod.get_mpv_props = lambda: {"media-title": "Artist - Song", "time-pos": 0.0}
+ok, _ = mod.wait_for_stream_progress(URL, timeout=1)
+assert ok is True, "ICY metadata means the stream is playing"
+
+# A position that advances is proof of audio.
+class SlowClock:
+    def __init__(self): self.t = 0.0
+    def time(self): return self.t
+    @staticmethod
+    def sleep(_s): self = None
+
+
+mod.time = SlowClock()
+seq = [0.0, 1.0]
+idx = [0]
+
+
+def progressing():
+    v = seq[min(idx[0], 1)]
+    idx[0] += 1
+    return {"media-title": "icecast.audio", "time-pos": v}
+
+
+mod.get_mpv_props = progressing
+ok, props = mod.wait_for_stream_progress(URL, timeout=5)
+assert ok is True and props["time-pos"] == 1.0, (ok, props)
+
+# status reconciles a stale live marker when no player is running.
+mod.mpv_is_running = lambda: False
+mod.set_radio_current({"id": "u1", "name": "S", "url": URL})
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_status([])
+assert mod.load_radio_current() is None, "status left a stale live marker"
+status = mod.read_status()
+assert status.get("playing") is False, status
+PY
+if [[ $? -eq 0 ]]; then
+    pass "stream progress detection + status marker reconciliation"
+else
+    fail "stream progress + status marker" "$(cat "$ERR_FILE")"
+fi
+
 # ------------------------------------------------- volume persistence (offline)
 # A fresh mpv starts at 100%, so the chosen volume must be remembered and fed
 # to every respawn (play, radio, restore, resume) or it silently jumps back to
@@ -2685,6 +2772,9 @@ mod.mpv_pid_record = lambda proc: {"pid": 4242}
 mod.wait_for_mpv = lambda *a, **k: True
 mod.wait_for_metadata = lambda *a, **k: {
     "pause": False, "media-title": "icy", "path": "https://example.com/live"}
+mod.wait_for_stream_progress = lambda *a, **k: (
+    True, {"pause": False, "media-title": "icy",
+           "path": "https://example.com/live"})
 mod.clear_session = lambda: fresh.append("clear_session")
 out = call(mod.cmd_station_play, ["https://example.com/live", "Test Station"])
 assert out["ok"] is True, out
