@@ -18,6 +18,23 @@ are deliberate gaps or design risks to revisit. Delete entries once handled.
   and `--limit` only; there is no country/codec/bitrate filter in the UI or the
   command.
 
+## Remaining (known, not yet fixed)
+
+- **A station URL that mpv *accepts* but never plays is still reported as
+  successful.** `cmd_station_play` now fails a switch when `playlist-count`
+  never grows (mpv rejected the URL), but a dead URL that is accepted and then
+  fails to produce audio keeps mpv alive, so the command prints `ok:true` and
+  records history. Detecting this reliably needs a playback-progress check.
+- **The favourite star is not optimistic.** It only flips after the
+  `station-fav-add`/`remove` round trip and the favourites refetch, so there is
+  no immediate feedback while the request is in flight.
+- **`Model.cavaScaleBars` is not `Infinity`-safe** (`Math.min(100, v * Infinity)`
+  is `NaN`). Not reachable through the current pipeline (all factors are finite
+  and the headroom divisor is guarded), but worth clamping if a caller changes.
+- **An unexpected mpv death leaves the live marker on disk.** It is not
+  reflected in status (the no-player branch returns early) and self-heals on the
+  next play/stop/queue edit, but a status reader could briefly see a stale file.
+
 ## Known risks / assumptions
 
 - **The panel assumes Quickshell emits `onExited` when a deadline timer sets
