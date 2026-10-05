@@ -122,6 +122,9 @@ Panel {
   property var playlistAddLabels: ({})
   property int contextTrackIndex: -1
   property int lastVolume: 100
+  // Coalesced volume target while dragging or wheel-scrolling; volumeApply
+  // sends it once the input settles.
+  property real volumePending: 100
   readonly property int currentVolume: root.musicStatus && root.musicStatus.volume !== undefined
     ? Math.round(Number(root.musicStatus.volume))
     : 100
@@ -3811,12 +3814,13 @@ Panel {
               value: root.musicStatus && root.musicStatus.volume !== undefined
                 ? root.musicStatus.volume
                 : 100
-              onReleased: function(v) {
-                var target = Math.round(v)
-                var current = root.musicStatus && root.musicStatus.volume !== undefined
-                  ? root.musicStatus.volume
-                  : 100
-                if (target !== current && !root.busy) root.sendCmd("volume", [String(target)])
+              onMoved: function(v) {
+                // PanelSlider emits moved() on every wheel notch, so coalesce
+                // the target and send once the gesture settles. Sending one
+                // command per notch toggled the global busy lock (which flashed
+                // the row action icons) and dropped intermediate values.
+                root.volumePending = v
+                volumeApply.restart()
               }
             }
 
@@ -3825,13 +3829,30 @@ Panel {
               height: parent.height
               verticalAlignment: Text.AlignVCenter
               horizontalAlignment: Text.AlignRight
-              text: (volumeSlider.dragging ? Math.round(volumeSlider.liveValue) :
-                (root.musicStatus && root.musicStatus.volume !== undefined
+              text: (volumeSlider.dragging || volumeApply.running
+                ? Math.round(root.volumePending)
+                : (root.musicStatus && root.musicStatus.volume !== undefined
                   ? root.musicStatus.volume
                   : 100)) + "%"
               color: root.fg
               font.family: root.fam
               font.pixelSize: Style.font.body
+            }
+          }
+
+          Timer {
+            id: volumeApply
+            interval: 130
+            repeat: false
+            onTriggered: {
+              // Wait out an in-flight command so the settled value is applied
+              // rather than dropped by the single shared cmd process.
+              if (root.busy) { volumeApply.restart(); return }
+              var target = Math.round(root.volumePending)
+              var current = root.musicStatus && root.musicStatus.volume !== undefined
+                ? root.musicStatus.volume
+                : 100
+              if (target !== current) root.sendCmd("volume", [String(target)])
             }
           }
 
@@ -4346,7 +4367,6 @@ Panel {
                           tooltipText: "Jump to track"
                           fontFamily: root.fam
                           foreground: root.fg
-                          enabled: !root.busy
                           onClicked: root.queueJump(index)
                         }
                       }
@@ -4923,7 +4943,6 @@ Panel {
                           tooltipText: "Play"
                           fontFamily: root.fam
                           foreground: root.fg
-                          enabled: !root.busy
                           onClicked: root.playNow(modelData.videoId)
                         }
 
@@ -4935,7 +4954,6 @@ Panel {
                           tooltipText: "Start mix"
                           fontFamily: root.fam
                           foreground: root.fg
-                          enabled: !root.busy
                           onClicked: root.playMix(modelData.videoId)
                         }
 
@@ -5300,7 +5318,6 @@ Panel {
                           tooltipText: "Play"
                           fontFamily: root.fam
                           foreground: root.fg
-                          enabled: !root.busy
                           onClicked: root.playNow(modelData.videoId)
                         }
 
@@ -5311,7 +5328,6 @@ Panel {
                           tooltipText: "Start mix"
                           fontFamily: root.fam
                           foreground: root.fg
-                          enabled: !root.busy
                           onClicked: root.playMix(modelData.videoId)
                         }
                       }
@@ -5971,7 +5987,6 @@ Panel {
                           tooltipText: "Play"
                           fontFamily: root.fam
                           foreground: root.fg
-                          enabled: !root.busy
                           onClicked: root.playNow(modelData.videoId)
                         }
 
