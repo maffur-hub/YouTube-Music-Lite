@@ -1552,6 +1552,70 @@ else
     fail "radio bug fixes (station switch, session index, stream detection)" "$(cat "$ERR_FILE")"
 fi
 
+# ------------------------------------------------- volume persistence (offline)
+# A fresh mpv starts at 100%, so the chosen volume must be remembered and fed
+# to every respawn (play, radio, restore, resume) or it silently jumps back to
+# full. Checks the store, its clamping/corruption tolerance, the spawn argv,
+# and that a media-key change seen in status is persisted.
+section "volume persistence (offline)"
+REPO_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 - "$REPO_DIR" >"$ERR_FILE" 2>&1 <<'PY'
+import importlib.util, os, sys, tempfile
+
+repo = sys.argv[1]
+path = os.path.join(repo, "backend", "yt_music.py")
+spec = importlib.util.spec_from_file_location("yt_music_volume_test", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+tmp = tempfile.mkdtemp(prefix="yt-music-volume-")
+mod.STATE_DIR = tmp
+mod.VOLUME_PATH = os.path.join(tmp, "volume.json")
+
+# Default when nothing is stored.
+assert mod.load_volume() == 100, mod.load_volume()
+
+# Round-trip and clamp.
+mod.save_volume(42)
+assert mod.load_volume() == 42
+mod.save_volume(999)
+assert mod.load_volume() == 150
+mod.save_volume(-5)
+assert mod.load_volume() == 0
+
+# Corrupt file falls back to the default rather than raising.
+with open(mod.VOLUME_PATH, "w") as fh:
+    fh.write("{not json")
+assert mod.load_volume() == 100
+
+# Every mpv spawn carries --volume=<stored>.
+mod.save_volume(37)
+assert mod.mpv_volume_args() == ["--volume=37"], mod.mpv_volume_args()
+radio_argv = mod._radio_mpv_argv("https://x/s")
+assert "--volume=37" in radio_argv, radio_argv
+# The stream URL must remain the final positional argument.
+assert radio_argv[-1] == "https://x/s", radio_argv
+
+# A volume seen only in mpv status (media keys/MPRIS) is persisted too.
+mod.save_volume(100)
+mod.mpv_is_running = lambda: True
+mod.mpv_query = lambda names: {"volume": 55}
+mod.load_radio_current = lambda: None
+mod.read_status = lambda: {}
+mod.remember_play = lambda *a, **k: None
+mod.notify_track_change = lambda *a, **k: None
+mod.write_status = lambda *a, **k: None
+mod.write_status_from_mpv({"pause": False, "media-title": "t",
+                           "path": "https://www.youtube.com/watch?v=abcdefghijk",
+                           "duration": 10, "time-pos": 1, "volume": 55})
+assert mod.load_volume() == 55, mod.load_volume()
+PY
+if [[ $? -eq 0 ]]; then
+    pass "volume persists across mpv respawns (store/clamp/argv/status)"
+else
+    fail "volume persistence" "$(cat "$ERR_FILE")"
+fi
+
 # ------------------------------------------------- editable Featured stations (offline)
 # The Featured list is seeded from RADIO_CATALOG and stores only deltas: the
 # custom rows the user added and the catalog ids the user hid. Checks that an

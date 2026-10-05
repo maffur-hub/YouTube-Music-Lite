@@ -35,6 +35,10 @@ STATUS_PATH = os.path.join(STATE_DIR, "status.json")
 TRACK_META_PATH = os.path.join(STATE_DIR, "track-meta.json")
 LAST_PLAYED_PATH = os.path.join(STATE_DIR, "last-played.json")
 SESSION_PATH = os.path.join(STATE_DIR, "session.json")
+# The player is respawned constantly (every mpv_play, radio, restore, resume),
+# and a fresh mpv always starts at 100%. Persist the chosen volume so it is
+# carried across those respawns instead of jumping back to full.
+VOLUME_PATH = os.path.join(STATE_DIR, "volume.json")
 LAST_PLAYED_MAX = 200
 SESSION_SAVE_INTERVAL = 5
 TRACK_META_MAX = 500
@@ -741,6 +745,35 @@ def clear_session():
         pass
 
 
+def load_volume(default=100):
+    """The last chosen volume (0..150), or `default` when none is stored."""
+    data = json_load(VOLUME_PATH, default=None)
+    value = data.get("volume") if isinstance(data, dict) else data
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(150, value))
+
+
+def save_volume(value):
+    """Remember the volume so the next mpv respawn starts at it. Never raises."""
+    try:
+        value = max(0, min(150, int(value)))
+    except (TypeError, ValueError):
+        return
+    json_dump(VOLUME_PATH, {"volume": value}, mode=0o600)
+
+
+def mpv_volume_args():
+    """`--volume=<n>` for a fresh mpv, carrying the persisted choice forward.
+
+    Every spawn helper appends this to its argv; without it mpv resets to 100%
+    on the next play, radio start, restore, or resume.
+    """
+    return [f"--volume={load_volume()}"]
+
+
 def _session_ids():
     """(ids, index, position) from the saved resume session."""
     session = load_session()
@@ -1168,8 +1201,7 @@ def mpv_play(video_id):
         "--hr-seek=yes",
         "--ytdl",
         "--ytdl-format=bestaudio/best",
-        url
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ] + mpv_volume_args() + [url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     json_dump(MPV_PID_PATH, mpv_pid_record(proc))
     wait_for_mpv()
 
@@ -1339,6 +1371,14 @@ def write_status_from_mpv(props, notify=True, spawn_precache=False):
     duration = props.get("duration", 0) or 0
     position = props.get("time-pos", 0) or 0
     volume = props.get("volume", 100)
+    # A volume change made outside `volume` (media keys/MPRIS) is still the
+    # user's choice: persist it so the next respawn carries it forward.
+    try:
+        volume_int = max(0, min(150, int(round(float(volume)))))
+        if volume_int != load_volume():
+            save_volume(volume_int)
+    except (TypeError, ValueError):
+        pass
     video_id = extract_video_id(props)
     # The marker reads "a stream is queued", not "a stream is playing": mpv can
     # have YouTube tracks appended after the stream, and only the entry with no
@@ -3340,7 +3380,8 @@ def _radio_mpv_argv(url):
     return ["mpv", "--no-video", "--really-quiet",
             f"--input-ipc-server={MPV_SOCKET}", "--keep-open=no",
             "--network-timeout=30",
-            "--stream-lavf-o=reconnect=1,reconnect_streamed=1", url]
+            "--stream-lavf-o=reconnect=1,reconnect_streamed=1"] \
+        + mpv_volume_args() + [url]
 
 
 def cmd_station_play(args):
@@ -3541,7 +3582,8 @@ def _spawn_session_mpv(ids, index, position, pause=True):
     urls = [watch_url(v) for v in ids]
     proc = subprocess.Popen(
         ["mpv", "--no-video", "--really-quiet",
-         f"--input-ipc-server={MPV_SOCKET}", "--keep-open=no", "--pause=yes"] + urls,
+         f"--input-ipc-server={MPV_SOCKET}", "--keep-open=no", "--pause=yes"]
+        + mpv_volume_args() + urls,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     json_dump(MPV_PID_PATH, mpv_pid_record(proc))
     wait_for_mpv()
@@ -4438,7 +4480,7 @@ def _mix_launch(track_list):
     ensure_private_runtime_dir()
     proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
                              f"--input-ipc-server={MPV_SOCKET}",
-                             "--keep-open=no"] + urls,
+                             "--keep-open=no"] + mpv_volume_args() + urls,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     json_dump(MPV_PID_PATH, mpv_pid_record(proc))
     wait_for_mpv()
@@ -4548,7 +4590,7 @@ def cmd_queue_playlist(args):
         ensure_private_runtime_dir()
         proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
                                  f"--input-ipc-server={MPV_SOCKET}",
-                                 "--keep-open=no"] + urls,
+                                 "--keep-open=no"] + mpv_volume_args() + urls,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         json_dump(MPV_PID_PATH, mpv_pid_record(proc))
         wait_for_mpv()
@@ -4615,7 +4657,7 @@ def cmd_enqueue(args):
             ensure_private_runtime_dir()
             proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
                                      f"--input-ipc-server={MPV_SOCKET}",
-                                     "--keep-open=no"] + urls,
+                                     "--keep-open=no"] + mpv_volume_args() + urls,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             json_dump(MPV_PID_PATH, mpv_pid_record(proc))
             wait_for_mpv()
@@ -4690,7 +4732,7 @@ def cmd_enqueue_files(args):
             ensure_private_runtime_dir()
             proc = subprocess.Popen(["mpv", "--no-video", "--really-quiet",
                                      f"--input-ipc-server={MPV_SOCKET}",
-                                     "--keep-open=no"] + urls,
+                                     "--keep-open=no"] + mpv_volume_args() + urls,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             json_dump(MPV_PID_PATH, mpv_pid_record(proc))
             wait_for_mpv()
@@ -5101,6 +5143,7 @@ def cmd_volume(args):
         vol = max(0, min(150, int(args[0])))
     except (TypeError, ValueError):
         fail("Usage: yt-music-ctl volume <0-150>")
+    save_volume(vol)
     mpv_send("set_property", ["volume", vol])
     props = get_mpv_props()
     write_status_from_mpv(props)
