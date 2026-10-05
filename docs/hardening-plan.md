@@ -57,6 +57,22 @@ stale responses, double fetches).
    drives the extracted state machines (from Phase 1) so the token/flag logic
    is covered without a live shell.
 
+### Progress
+- [x] Added `AsyncState.js` with three tested factories: `makeTokenSource`
+  (monotonic tokens + `invalidate`/`isCurrent`), `makeDirtyFlag`
+  (`mark`/`take`/`clear`), `makePendingQueue` (`offer`/`take`/`clear`, with
+  `null`/`undefined` coerced to ""). `scripts/asyncstate_test.js` covers them
+  (26 assertions).
+- [x] Wired them into `Panel.qml`, replacing the ad-hoc `tracksRequestSeq`,
+  `libraryRequestSeq`, `stationFavoritesDirty`, `stationCatalogDirty`,
+  `pendingStationSearch` and `pendingSearch` bookkeeping with the shared
+  objects. Behaviour-preserving; `qmllint` clean.
+- [ ] Extend the token pattern to the remaining fetch processes that use
+  ad-hoc staleness guards (`searchProc` query compare, `albumStatusProc`
+  refId compare) and give every fetch process a deadline if it lacks one.
+- [ ] Audit the timeout timers so every flagged state clears on timeout as well
+  as success.
+
 ## Phase 3 — Break up Panel.qml (MEDIUM RISK, largest diff)
 Extract self-contained regions into components, one per commit, verifying after
 each:

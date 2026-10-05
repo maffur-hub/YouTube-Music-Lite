@@ -6,6 +6,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "AsyncState.js" as AsyncState
 
 Panel {
   id: root
@@ -80,13 +81,13 @@ Panel {
   property var playlistTracks: []
   property string activePlaylistTitle: ""
   property string activePlaylistId: ""
-  property int tracksRequestSeq: 0
+  readonly property var tracksTokens: AsyncState.makeTokenSource()
   property var pendingPlaylistOpen: null
   property var searchResults: []
   property string searchQuery: ""
   property string searchFilter: "songs"
   property bool searching: false
-  property var pendingSearch: ""
+  readonly property var pendingSearch: AsyncState.makePendingQueue()
   property int selectedIndex: -1
   // Multi-select over the active list (search results / up-next queue): keys
   // are Model.rowKey(row) values and the value is the row itself, so the
@@ -145,17 +146,17 @@ Panel {
     ? root.stationResults
     : (root.stationSection === "featured" ? root.stationCatalog : root.stationFavorites)
   property bool stationBusy: false
-  property string pendingStationSearch: ""
+  readonly property var pendingStationSearch: AsyncState.makePendingQueue()
   // True while a station search is in flight or debouncing; drives the
   // Searching…/empty states so a replaced query never flashes "No stations
   // found." in the gap before the next request starts.
   property bool stationSearching: false
   // Set when a favourites refresh is skipped because one is already running,
   // so the in-flight fetch replays it on exit instead of dropping the update.
-  property bool stationFavoritesDirty: false
+  readonly property var stationFavoritesDirty: AsyncState.makeDirtyFlag()
   // Same coalescing for the featured catalog: an add/remove that lands mid-fetch
   // is replayed when the in-flight catalog load exits.
-  property bool stationCatalogDirty: false
+  readonly property var stationCatalogDirty: AsyncState.makeDirtyFlag()
   property int queuePosition: -1
   property string contextQueueKey: ""
   property string queueKey: ""
@@ -164,7 +165,7 @@ Panel {
   property string librarySubtitle: ""
   property var libraryRows: []
   property string libraryRefId: ""
-  property int libraryRequestSeq: 0
+  readonly property var libraryTokens: AsyncState.makeTokenSource()
   // Browse-level stack: opening an album/artist from a library list (or an
   // artist's similar-artists list) remembers the level you came from, so Back
   // returns there instead of dropping straight to the Home/Recent/… pills.
@@ -667,7 +668,7 @@ Panel {
     if (tracksProc.running) {
       // Drop the in-flight response for the playlist we are leaving, then
       // load this one once it exits.
-      root.tracksRequestSeq++
+      root.tracksTokens.invalidate()
       root.pendingPlaylistOpen = { id: id, title: title }
       return
     }
@@ -675,8 +676,7 @@ Panel {
   }
 
   function startTracksRequest(id) {
-    root.tracksRequestSeq++
-    tracksProc.requestToken = root.tracksRequestSeq
+    tracksProc.requestToken = root.tracksTokens.next()
     tracksProc.command = [root.ctlPath, "playlist", id]
     root.loadingText = "Loading…"
     root.startProcess(tracksProc, "tracks")
@@ -690,7 +690,7 @@ Panel {
   }
 
   function closePlaylist() {
-    root.tracksRequestSeq++
+    root.tracksTokens.invalidate()
     root.pendingPlaylistOpen = null
     root.activePlaylistId = ""
     root.activePlaylistTitle = ""
@@ -773,7 +773,7 @@ Panel {
     if (query === undefined || query.trim() === "") return
     var q = query.trim()
     if (searchProc.running) {
-      root.pendingSearch = q
+      root.pendingSearch.offer(q, "")
       return
     }
     root.startSearchRequest(q)
@@ -793,7 +793,7 @@ Panel {
     root.searchFilter = "songs"
     root.searchResults = []
     root.searching = false
-    root.pendingSearch = ""
+    root.pendingSearch.clear()
     root.selectedIndex = -1
   }
 
@@ -835,7 +835,7 @@ Panel {
   function refreshStationFavorites() {
     if (stationFavoritesProc.running) {
       // The fetch in flight will replay this once it exits.
-      root.stationFavoritesDirty = true
+      root.stationFavoritesDirty.mark()
       return
     }
     root.startProcess(stationFavoritesProc, "stationFavorites")
@@ -844,7 +844,7 @@ Panel {
   function refreshStationCatalog() {
     if (stationCatalogProc.running) {
       // The fetch in flight will replay this once it exits.
-      root.stationCatalogDirty = true
+      root.stationCatalogDirty.mark()
       return
     }
     root.startProcess(stationCatalogProc, "stationCatalog")
@@ -855,7 +855,7 @@ Panel {
     if (q === "") {
       root.stationResults = []
       root.stationSearching = false
-      root.pendingStationSearch = ""
+      root.pendingStationSearch.clear()
       return
     }
     if (stationSearchProc.running) {
@@ -863,8 +863,7 @@ Panel {
       // (an identical one is already on its way and needs no second run).
       // Always overwrite: returning to the in-flight query must clear a
       // pending one, or the replay would wedge `stationSearching` true.
-      root.pendingStationSearch =
-        (String((stationSearchProc.command || [])[2] || "") !== q) ? q : ""
+      root.pendingStationSearch.offer(q, (stationSearchProc.command || [])[2] || "")
       return
     }
     var command = [root.ctlPath, "station-search", q]
@@ -970,12 +969,11 @@ Panel {
   }
 
   function invalidateLibraryRequest() {
-    root.libraryRequestSeq++
+    root.libraryTokens.invalidate()
   }
 
   function startLibraryRequest(command) {
-    root.libraryRequestSeq++
-    libraryProc.requestToken = root.libraryRequestSeq
+    libraryProc.requestToken = root.libraryTokens.next()
     libraryProc.command = command
     root.startProcess(libraryProc, "library")
   }
@@ -1718,7 +1716,7 @@ Panel {
     onExited: function(exitCode) {
       tracksDeadline.stop()
       root.loadingText = ""
-      if (tracksProc.requestToken === root.tracksRequestSeq) {
+      if (root.tracksTokens.isCurrent(tracksProc.requestToken)) {
         var data = root.parseProcessJson(root.processText("tracks"))
         var msg = root.processText("tracksErr").trim()
         if (data && data.ok) {
@@ -1755,9 +1753,8 @@ Panel {
       if (data && data.ok && data.query === root.searchQuery)
         root.searchResults = root.normalizeMixedRows(data.items, 100)
       root.searching = false
-      if (root.pendingSearch !== "") {
-        var q = root.pendingSearch
-        root.pendingSearch = ""
+      if (root.pendingSearch.hasPending()) {
+        var q = root.pendingSearch.take()
         root.startSearchRequest(q)
       }
     }
@@ -1971,10 +1968,8 @@ Panel {
         root.stationFavorites = root.normalizeStations(data.items)
       // Replay a refresh that arrived while this fetch was running (e.g. a
       // favourite was toggled) so the list can never be left stale.
-      if (root.stationFavoritesDirty) {
-        root.stationFavoritesDirty = false
+      if (root.stationFavoritesDirty.take())
         root.refreshStationFavorites()
-      }
     }
   }
 
@@ -1995,10 +1990,8 @@ Panel {
         root.stationCatalog = root.normalizeStations(data.items)
       // Replay a refresh that arrived while this fetch was running (e.g. a
       // featured add/remove) so the list can never be left stale.
-      if (root.stationCatalogDirty) {
-        root.stationCatalogDirty = false
+      if (root.stationCatalogDirty.take())
         root.refreshStationCatalog()
-      }
     }
   }
 
@@ -2046,9 +2039,8 @@ Panel {
         else
           root.statusText = root.boundedString("Station search failed", 256)
       }
-      if (root.pendingStationSearch !== "") {
-        var pending = root.pendingStationSearch
-        root.pendingStationSearch = ""
+      if (root.pendingStationSearch.hasPending()) {
+        var pending = root.pendingStationSearch.take()
         root.searchStations(pending)
       }
     }
@@ -2121,7 +2113,7 @@ Panel {
       stationSearchDebounce.stop()
       root.stationResults = []
       root.stationSearching = false
-      root.pendingStationSearch = ""
+      root.pendingStationSearch.clear()
       return
     }
     root.stationResults = []
@@ -2168,7 +2160,7 @@ Panel {
     onExited: function(exitCode) {
       libraryDeadline.stop()
       root.loadingText = ""
-      if (libraryProc.requestToken !== root.libraryRequestSeq) return
+      if (!root.libraryTokens.isCurrent(libraryProc.requestToken)) return
       var data = root.parseProcessJson(root.processText("library"))
       if (!data || !data.ok) {
         var libMsg = root.processText("libraryErr").trim()
