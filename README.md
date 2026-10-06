@@ -35,6 +35,7 @@ library/search actions and MPV with `yt-dlp` for audio playback.
 - Local Last Played history with its own Clear button
 - Keyboard control of the panel: move a list cursor, seek, drive the transport, and close the panel
 - Library browsing from Home, Recent, Liked, Songs, Albums, and Artists, with album and artist pages that open in place
+- A complete in-panel help guide (the **?** button beside the tabs) that walks a first-time user through the install, login, bar widget, tabs, controls, shortcuts, right-click menus, CLI, and troubleshooting
 
 ## Using the panel
 
@@ -139,7 +140,7 @@ Clicking the tab you are already on pops one level: an open playlist, album, or 
 | `c` | Close the panel |
 | `Esc` | Close the panel, or dismiss the delete confirmation |
 
-Shortcuts pause while a text field or an open menu has focus. Ctrl-click toggles a row's selection and Shift-click selects a range, in the Search results and the Up Next list. Tab does not navigate in this panel, and there is no scroll-to-seek or scroll-to-volume gesture. The **?** button beside the tabs opens this cheat sheet in the panel.
+Shortcuts pause while a text field or an open menu has focus. Ctrl-click toggles a row's selection and Shift-click selects a range, in the Search results and the Up Next list. Tab does not navigate in this panel, and there is no scroll-to-seek or scroll-to-volume gesture. The **?** button beside the tabs opens the complete in-panel help guide: a scrollable, beginner-facing walkthrough of the install, login, bar widget, every tab and control, these shortcuts, all of the right-click menus, the CLI, and troubleshooting.
 
 ### Right-click menus
 

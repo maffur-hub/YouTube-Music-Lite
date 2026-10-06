@@ -7,6 +7,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "AsyncState.js" as AsyncState
+import "Help.js" as Help
 
 Panel {
   id: root
@@ -37,6 +38,9 @@ Panel {
   property bool busy: false
   property bool refreshing: false
   property string statusText: ""
+
+  // True while the full help guide (the "?" button beside the tabs) is open.
+  property bool helpOpen: false
 
   // Audio visualizer: cava's raw ASCII frames drive a flat bar strip below the
   // now-playing Hero. `visualizerOn` is the user's toggle and is persisted in
@@ -1478,27 +1482,21 @@ Panel {
       function() { root.toggleStationFavorite(row) })
   }
 
-  // A discoverability cheat sheet for the keyboard and the right-click menus.
-  // Rows are informational; selecting one just closes the menu.
-  function openHelp(anchorItem) {
-    clearMenu(helpMenu)
-    var rows = [
-      ["Space / Enter", "Play or pause (or open the selected row)"],
-      ["Up / Down", "Move the list cursor"],
-      ["Left / Right", "Seek 5 seconds"],
-      ["Delete", "Remove the selected queue or playlist row"],
-      ["Esc", "Close a menu, or the panel"],
-      ["Right-click a track", "Play, queue, playlist, like, mix"],
-      ["Right-click a station", "Play, Featured, Favorites"],
-      ["Right-click the bar icon", "Transport menu"],
-      ["Middle-click the bar icon", "Play / pause"],
-      ["Click a tab twice", "Collapse it"]
-    ]
-    for (var i = 0; i < rows.length; i++) {
-      helpMenu.addItem(rows[i][0] + "  —  " + rows[i][1], function() {})
-    }
-    var p = anchorItem ? anchorItem.mapToItem(panelFlick, 0, anchorItem.height) : { x: 0, y: 0 }
-    helpMenu.popupAt(panelFlick, p.x, p.y)
+  // The complete in-panel help guide, opened by the "?" button beside the
+  // tabs. It replaces the old one-line cheat sheet: every section in
+  // Help.js is rendered in a scrollable overlay that fills the panel.
+  function openHelp() {
+    root.helpOpen = true
+    helpFlick.contentY = 0
+  }
+
+  function closeHelp() {
+    root.helpOpen = false
+  }
+
+  function toggleHelp() {
+    if (root.helpOpen) root.closeHelp()
+    else root.openHelp()
   }
 
   function rebuildPlaylistPicker() {
@@ -3042,7 +3040,6 @@ Panel {
 
   MenuPopup { id: contextMenu }
   MenuPopup { id: stationMenu }
-  MenuPopup { id: helpMenu }
 
   MenuPopup {
     id: playlistPickerMenu
@@ -3052,6 +3049,9 @@ Panel {
   }
 
   MenuPopup { id: playlistOptionsMenu }
+
+  // A reopened panel should start on normal content, never on the help guide.
+  onOpenedChanged: if (!root.opened) root.helpOpen = false
 
   Component.onCompleted: { root.loadThumbnail(); root.loadPlaylists(); root.restoreUiState(); root.refreshLikedSet(); root.writeCavaConfig() }
 
@@ -3065,21 +3065,32 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
      contentWidth: Style.space(540)
-    contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight)
+     contentHeight: root.helpOpen
+       ? panel.fittedContentHeight(panel.availableCardHeight)
+       : panel.fittedContentHeight(contentColumn.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: searchField.activeFocus || newPlaylistField.activeFocus
+      blocked: !root.helpOpen && (searchField.activeFocus || newPlaylistField.activeFocus
         || contextMenu.opened || playlistPickerMenu.opened
-        || stationMenu.opened || helpMenu.opened
+        || stationMenu.opened
         || renameField.activeFocus || queueSaveField.activeFocus
-        || stationField.activeFocus
+        || stationField.activeFocus)
       onCloseRequested: {
         if (root.deleteConfirmOpen) { root.deleteConfirmOpen = false; return }
+        if (root.helpOpen) { root.closeHelp(); return }
         root.close()
       }
       onMoveRequested: function(dx, dy) {
+        if (root.helpOpen) {
+          if (dy !== 0) {
+            var maxY = Math.max(0, helpFlick.contentHeight - helpFlick.height)
+            helpFlick.contentY = Math.max(0, Math.min(maxY,
+              helpFlick.contentY + dy * Style.space(56)))
+          }
+          return
+        }
         if (root.deleteConfirmOpen) {
           if (dx !== 0) deleteConfirm.selectedIndex = deleteConfirm.selectedIndex === 0 ? 1 : 0
           return
@@ -3093,6 +3104,7 @@ Panel {
       }
       onActivateRequested: function() {
         if (root.deleteConfirmOpen) { root.deleteActivePlaylist(); return }
+        if (root.helpOpen) return
         // The Stations tab has no keyboard list (activeListKind is ""), so
         // Enter/Space must not fall through to the transport toggle.
         if (root.activeTab === "stations") return
@@ -3129,6 +3141,7 @@ Panel {
         }
       }
       onDeleteRequested: function() {
+        if (root.helpOpen) return
         if (root.deleteConfirmOpen) return
         if (root.activeListKind === "") return
         if (root.activeListKind === "library") return
@@ -3142,6 +3155,7 @@ Panel {
         }
       }
       onTextKey: function(t) {
+        if (root.helpOpen) return
         if (root.deleteConfirmOpen) return
         if (t === "c") root.close()
         else if (t === "s") root.sendCmd("stop", [])
@@ -4034,12 +4048,13 @@ Panel {
               width: Style.space(28)
               height: Style.spacing.controlHeight
               text: "?"
-              tooltipText: "Keyboard & mouse help"
+              tooltipText: root.helpOpen ? "Close help" : "Help & keyboard guide"
               fontFamily: root.fam
               fontSize: Style.font.bodySmall
               bordered: true
+              selected: root.helpOpen
               foreground: root.fg
-              onClicked: root.openHelp(helpButton)
+              onClicked: root.toggleHelp()
             }
           }
 
@@ -6050,6 +6065,125 @@ Panel {
           }
           }
 
+        }
+      }
+
+      // ---- full help guide (opened by the "?" button beside the tabs)
+      Rectangle {
+        id: helpOverlay
+        anchors.fill: parent
+        z: 25
+        visible: root.helpOpen
+        color: Color.popups.background
+
+        // Swallow wheel and clicks so the panel content behind cannot react.
+        MouseArea {
+          anchors.fill: parent
+          acceptedButtons: Qt.AllButtons
+          onWheel: function(wheel) { wheel.accepted = true }
+        }
+
+        Item {
+          id: helpHeader
+          anchors.top: parent.top
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.margins: Style.space(10)
+          height: Style.spacing.controlHeight
+
+          PanelSectionHeader {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            text: "HELP - YOUTUBE MUSIC BAR"
+            foreground: root.fg
+            fontFamily: root.fam
+          }
+
+          Button {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(60)
+            height: Style.spacing.controlHeight
+            text: "Close"
+            tooltipText: "Close help"
+            fontFamily: root.fam
+            fontSize: Style.font.bodySmall
+            foreground: root.fg
+            onClicked: root.closeHelp()
+          }
+        }
+
+        PanelSeparator {
+          id: helpRule
+          anchors.top: helpHeader.bottom
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.leftMargin: Style.space(10)
+          anchors.rightMargin: Style.space(10)
+          foreground: root.fg
+        }
+
+        Flickable {
+          id: helpFlick
+          anchors.top: helpRule.bottom
+          anchors.topMargin: Style.spacing.sm
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          anchors.leftMargin: Style.space(10)
+          anchors.rightMargin: Style.space(10)
+          anchors.bottomMargin: Style.space(10)
+          contentWidth: width
+          contentHeight: helpColumn.implicitHeight
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          flickableDirection: Flickable.VerticalFlick
+          interactive: contentHeight > height
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          Column {
+            id: helpColumn
+            width: helpFlick.width
+            spacing: Style.spacing.xl
+
+            Repeater {
+              model: Help.SECTIONS
+
+              Column {
+                id: helpSectionColumn
+                required property var modelData
+                readonly property var section: modelData
+                width: helpColumn.width
+                spacing: Style.spacing.xxs
+
+                Text {
+                  width: helpSectionColumn.width
+                  text: helpSectionColumn.section.title
+                  color: Color.accent
+                  font.family: root.fam
+                  font.pixelSize: Style.font.subtitle
+                  font.bold: true
+                  wrapMode: Text.WordWrap
+                  textFormat: Text.PlainText
+                }
+
+                Repeater {
+                  model: helpSectionColumn.section.lines
+
+                  Text {
+                    required property string modelData
+                    width: helpSectionColumn.width
+                    text: modelData
+                    color: root.fg
+                    font.family: root.fam
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                  }
+                }
+              }
+            }
+          }
         }
       }
 
