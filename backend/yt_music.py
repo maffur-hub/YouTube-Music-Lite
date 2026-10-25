@@ -5340,7 +5340,11 @@ def cmd_queue_remove_keys(args):
 
 
 def cmd_queue_clear(args):
-    """Drop every upcoming queue entry, keeping the current track playing.
+    """Empty the queue, keeping only the entry that is playing right now.
+
+    The panel's Up Next list shows the whole queue, played history included, so
+    Clear must leave nothing but the current row: dropping only upcoming tracks
+    makes the click look like a no-op whenever the current track is last.
 
     When nothing is playing, drop the saved resume session instead.
     """
@@ -5360,13 +5364,21 @@ def cmd_queue_clear(args):
         print(json.dumps({"ok": True, "cleared": True, "removed": 0,
                           "remaining": 0, "playing": True}))
         return
-    if pos is None or pos < 0:
-        pos = 0
+    if pos is None or pos < 0 or pos >= len(playlist):
+        keep = -1
+    else:
+        keep = pos
     removed = 0
-    for index in range(len(playlist) - 1, pos, -1):
+    # Descending order keeps the lower indices valid as entries disappear.
+    for index in range(len(playlist) - 1, -1, -1):
+        if index == keep:
+            continue
         resp = mpv_send("playlist-remove", index)
         if isinstance(resp, dict) and resp.get("error") == "success":
             removed += 1
+            # Removing a row below the kept one shifts it down by one.
+            if keep > index:
+                keep -= 1
     write_status_from_mpv(get_mpv_props() or {})
     # Clearing keeps the current entry playing, so the marker survives only if
     # that current entry is still a stream; a song means it is stale.
@@ -6232,7 +6244,7 @@ def main():
         print("  queue <playlistId>       Queue and play a playlist")
         print("  queue-add <videoId>      Append a track to the queue")
         print("  queue-list               List the current queue")
-        print("  queue-clear              Remove every upcoming track")
+        print("  queue-clear              Empty the queue, keeping only the current track")
         print("  queue-jump <index>       Jump to a queue index")
         print("  queue-remove <index>     Remove a queue entry")
         print("  queue-remove-keys <key...>  Remove queue entries by row key")

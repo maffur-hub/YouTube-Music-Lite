@@ -1531,6 +1531,23 @@ assert json.loads(out.getvalue())["ok"] is True
 assert mod.load_radio_current() is not None, "current stream marker dropped"
 mod.clear_radio_current()
 
+# Clear keeps only the playing entry: upcoming rows *and* played history go.
+removals = []
+def fake_send(cmd, *args):
+    if cmd == "playlist-remove":
+        removals.append(args[0])
+    return {"error": "success"}
+mod.mpv_send = fake_send
+mod.mpv_query = lambda names: {
+    "playlist": [{"filename": "https://www.youtube.com/watch?v=AAAAAAAAAAA"}] * 4,
+    "playlist-pos": 2,
+}
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    mod.cmd_queue_clear([])
+assert json.loads(out.getvalue())["removed"] == 3, out.getvalue()
+assert removals == [3, 1, 0], removals
+
 # FIX 8: spawning a saved session clears a stale radio marker.
 mod.mpv_is_running = lambda: False
 mod.ensure_daemon = lambda *a, **k: None

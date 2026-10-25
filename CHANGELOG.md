@@ -4,6 +4,12 @@
 
 Review-driven fixes (see `docs/review-findings.md`, `docs/phase2-decisions.md`).
 
+- Up Next: **Clear** now empties the queue down to the playing track (it used
+  to drop only upcoming rows, which made a click look like a no-op whenever the
+  current track was last) and it is visibly dimmed when there is nothing to
+  clear. The Up Next list also refetches when the queue length changes outside
+  the panel.
+
 - Discoverability: a **?** button beside the content tabs opens a complete,
   scrollable in-panel help guide (`Help.js`) that explains the plugin from
   scratch — install and login, the bar widget, every tab and control, the

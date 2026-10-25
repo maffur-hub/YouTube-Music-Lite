@@ -418,6 +418,13 @@ function queueCurrentIndex(tracks, position) {
   return (position >= 0 && position < list.length) ? position : -1
 }
 
+// Rows Clear would drop: everything except the row that is playing now.
+// With no current row (a saved queue, or an idle player) every row goes.
+function queueClearableCount(list, pos) {
+  if (!Array.isArray(list)) return 0
+  return Math.max(0, list.length - (queueCurrentIndex(list, pos) >= 0 ? 1 : 0))
+}
+
 // ---- multi-select helpers (pure; used by Panel.qml and scripts/model_test.js)
 
 // Stable identity for a search row: songs key on videoId, everything else on
@@ -623,6 +630,7 @@ if (typeof module !== "undefined") {
     songCount: songCount,
     queueUpcomingCount: queueUpcomingCount,
     queueCurrentIndex: queueCurrentIndex,
+    queueClearableCount: queueClearableCount,
     rowKey: rowKey,
     selectedCount: selectedCount,
     withRowSelected: withRowSelected,

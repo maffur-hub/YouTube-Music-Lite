@@ -320,6 +320,17 @@ eq(Model.queueCurrentIndex([song, song], 9), -1,
   "queueCurrentIndex returns -1 for an out-of-range position")
 eq(Model.queueCurrentIndex([], 0), -1, "queueCurrentIndex([])")
 
+// --- queueClearableCount
+eq(Model.queueClearableCount([song, song, song], 0), 2,
+  "queueClearableCount drops the rows behind a mid-queue track")
+eq(Model.queueClearableCount([song, song, song], 2), 2,
+  "queueClearableCount drops played history too")
+eq(Model.queueClearableCount([song], 0), 0,
+  "queueClearableCount with only the current row")
+eq(Model.queueClearableCount([], 0), 0, "queueClearableCount([])")
+eq(Model.queueClearableCount([song, song], -1), 2,
+  "queueClearableCount with no current row")
+
 // --- parseCavaFrame
 eq(Model.parseCavaFrame("10;50;100;", 4), [10, 50, 100, 0],
   "parseCavaFrame maps every field and zeroes a trailing blank")

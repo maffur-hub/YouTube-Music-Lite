@@ -168,8 +168,9 @@ var SECTIONS = [
       "row has a Jump-to-track button.",
       "Right-click a row for Move up, Move down, Remove from queue,",
       "plus the normal song actions.",
-      "Clear removes upcoming tracks (or clears the saved queue when",
-      "nothing is playing). Save stores the queue as a new playlist.",
+      "Clear empties the queue and keeps only the track that is playing;",
+      "it drops upcoming tracks and played history (or the saved queue",
+      "when nothing is playing). Save stores the queue as a new playlist.",
       "While stopped, the last queue is shown from the saved session",
       "with a Resume button; opening the panel restores it paused."
     ]

@@ -165,6 +165,7 @@ Panel {
   // Cleared when the authoritative favourites list reloads.
   property var stationFavOverrides: ({})
   property int queuePosition: -1
+  property bool queueRefreshPending: false
   property string contextQueueKey: ""
   property string queueKey: ""
   property string libraryKind: ""
@@ -519,7 +520,10 @@ Panel {
 
   function refreshQueue() {
     if (!root.opened) return
-    if (queueListProc.running) return
+    if (queueListProc.running) {
+      root.queueRefreshPending = true
+      return
+    }
     root.startProcess(queueListProc, "queueList")
   }
 
@@ -536,11 +540,13 @@ Panel {
 
   function clearQueue() {
     if (queueClearProc.running) return
+    root.processOutput["queueClearErr"] = ""
     root.startProcess(queueClearProc, "queueClear")
   }
 
-  function queueUpcomingCount() {
-    return Model.queueUpcomingCount(root.queueTracks, root.queuePosition)
+  // Rows Clear would drop: the whole list minus the row that is playing.
+  function queueClearableCount() {
+    return Model.queueClearableCount(root.queueTracks, root.queuePosition)
   }
 
   // Index of the currently-playing/queued row, or -1. Prefers mpv's reported
@@ -1909,6 +1915,10 @@ Panel {
         if (JSON.stringify(rows) !== JSON.stringify(root.queueTracks))
           root.queueTracks = rows
         queueScrollTimer.restart()
+        if (root.queueRefreshPending) {
+          root.queueRefreshPending = false
+          queueRefreshRetry.restart()
+        }
       } else {
         root.queueSaved = false
       }
@@ -1970,9 +1980,24 @@ Panel {
     stdout: SplitParser {
       onRead: function(data) { root.appendProcessOutput("queueClear", data) }
     }
+    stderr: SplitParser {
+      onRead: function(data) { root.appendProcessOutput("queueClearErr", data) }
+    }
     onStarted: queueClearDeadline.start()
     onExited: function(exitCode) {
       queueClearDeadline.stop()
+      // Say what happened: a Clear click that quietly removes nothing is what
+      // made the old behaviour look broken. The backend answers in JSON
+      // ({"ok":..., "removed":n}); `fail()` writes human text to stderr.
+      var data = root.parseProcessJson(root.processText("queueClear"))
+      var msg = root.processText("queueClearErr").trim()
+      if (data && data.ok) {
+        root.statusText = (Number(data.removed) || 0) > 0
+          ? "Queue cleared ✓" : "Nothing to clear"
+      } else if (data && data.error) {
+        root.statusText = root.boundedString(data.error, 256)
+      }
+      if (msg !== "") root.statusText = root.boundedString(msg.split("\n")[0], 256)
       root.refresh()
       root.refreshQueue()
     }
@@ -2702,8 +2727,11 @@ Panel {
     var currentVideoId = String(root.musicStatus ? root.musicStatus.videoId : "")
     if (root.lyricsOpen && currentVideoId !== root.lyricsVideoId)
       root.loadLyrics(currentVideoId)
+    // playlistCount is part of the key so a queue appended or trimmed outside
+    // the panel (CLI, mix, backend) still refetches the Up Next list.
     var key = currentVideoId
       + ":" + String(root.musicStatus ? root.musicStatus.playlistPos : "")
+      + ":" + String(root.musicStatus ? root.musicStatus.playlistCount : "")
     if (key !== root.queueKey) {
       root.queueKey = key
       root.refreshQueue()
@@ -2714,6 +2742,15 @@ Panel {
     id: afterCommand
     interval: 1600
     onTriggered: { root.refresh(); root.refreshQueue(); root.refreshLastPlayed() }
+  }
+
+  // Waits for the queue-list process to finish exiting before refetching, so a
+  // refresh requested mid-flight is not dropped by the running guard.
+  Timer {
+    id: queueRefreshRetry
+    interval: 80
+    repeat: false
+    onTriggered: root.refreshQueue()
   }
 
   // Waits a beat after the queue model changes so the Repeater has created the
@@ -4160,10 +4197,14 @@ Panel {
                     text: "Clear"
                     fontFamily: root.fam
                     fontSize: Style.font.bodySmall
-                    foreground: root.fg
                     visible: !root.selectMode
                     enabled: (root.queueSaved ? root.queueTracks.length > 0
-                                              : root.queueUpcomingCount() > 0) && !root.busy
+                                              : root.queueClearableCount() > 0) && !root.busy
+                    // Button.qml draws no disabled state, so dim the label
+                    // instead of leaving a dead button that looks live.
+                    foreground: (root.queueSaved ? root.queueTracks.length > 0
+                                                  : root.queueClearableCount() > 0)
+                                ? root.fg : Qt.darker(root.fg, 1.8)
                     onClicked: root.clearQueue()
                   }
                 }
